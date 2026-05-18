@@ -3,31 +3,6 @@ import statistics
 import numpy as np
 
 
-# === TurtleBot3 Hardware Spec Constants ===
-TB3_MAX_LIN_VEL = 0.22       # m/s (Burger)
-TB3_MAX_ANG_VEL = 2.84       # rad/s (Burger)
-TB3_MAX_LIN_ACCEL = 5.0      # m/s^2 (derived from XL430-W250 torque)
-TB3_MAX_ANG_ACCEL = 30.0     # rad/s^2
-TB3_QUAT_NORM_TOL = 0.01     # unit quaternion tolerance
-TB3_Z_POS_TOL = 0.01         # m (climbing threshold 10mm)
-TB3_LATERAL_VEL_TOL = 0.01   # m/s (no lateral motion for diff-drive)
-TB3_ROLL_PITCH_TOL = 0.05    # rad/s (ground robot, no roll/pitch)
-TB3_IMU_ROLL_PITCH_TOL = 0.1 # rad/s (IMU noise margin)
-TB3_VEL_POS_TOL = 0.05       # m (velocity-position consistency)
-TB3_IMU_ODOM_ACCEL_TOL = 2.0 # m/s^2 (cross-validation tolerance)
-TB3_LIDAR_TEMPORAL_TOL = 1.0 # m (mean beam change between scans)
-TB3_CMD_VEL_LIN_TOL = 0.1    # m/s (steady-state tracking error)
-TB3_CMD_VEL_ANG_TOL = 0.5    # rad/s
-
-
-def _ts_to_sec(ts):
-    """Convert 16-digit trimmed timestamp to seconds (float)."""
-    ts_str = str(ts)
-    if len(ts_str) <= 10:
-        return float(ts)
-    return int(ts_str[:10]) + int(ts_str[10:]) / (10 ** (len(ts_str) - 10))
-
-
 def check(config, msg_list, state_dict, feedback_list):
     errs = list()
 
@@ -92,16 +67,8 @@ def check(config, msg_list, state_dict, feedback_list):
             errs.append("imu.angular_velocity.z is INF")
 
         # Check max
-        if imu.angular_velocity.z > TB3_MAX_ANG_VEL:
-            errs.append(f"imu.angular_velocity.z ({imu.angular_velocity.z}) exceeded max ({TB3_MAX_ANG_VEL})")
-        if imu.angular_velocity.z < -TB3_MAX_ANG_VEL:
-            errs.append(f"imu.angular_velocity.z ({imu.angular_velocity.z}) exceeded min (-{TB3_MAX_ANG_VEL})")
-
-        # 2D ground constraint for IMU roll/pitch
-        if abs(imu.angular_velocity.x) > TB3_IMU_ROLL_PITCH_TOL:
-            errs.append(f"imu.angular_velocity.x ({imu.angular_velocity.x}) violates ground constraint")
-        if abs(imu.angular_velocity.y) > TB3_IMU_ROLL_PITCH_TOL:
-            errs.append(f"imu.angular_velocity.y ({imu.angular_velocity.y}) violates ground constraint")
+        if imu.angular_velocity.z > 2.84:
+            errs.append(f"imu.angular_velocity.z ({imu.angular_velocity.z}) exceeded max (2.84)")
 
         # robot_pose_2 = np.arctan2(siny_cosp, cosy_cosp)
         imu_angle_ = np.arctan2(
@@ -195,39 +162,12 @@ def check(config, msg_list, state_dict, feedback_list):
 
         # check max
         lin_vel = odom.twist.twist.linear.x
-        if lin_vel > TB3_MAX_LIN_VEL:
-            errs.append(f"linear velocity ({lin_vel}) exceeded max ({TB3_MAX_LIN_VEL})")
+        if lin_vel > 0.22:
+            errs.append(f"linear velocity ({lin_vel}) exceeded max (0.22)")
 
         ang_vel = odom.twist.twist.angular.z
-        if ang_vel > TB3_MAX_ANG_VEL:
-            errs.append(f"angular velocity ({ang_vel}) exceeded max ({TB3_MAX_ANG_VEL})")
-
-        # check negative velocity bounds (symmetric hardware limits)
-        if lin_vel < -TB3_MAX_LIN_VEL:
-            errs.append(f"linear velocity ({lin_vel}) exceeded min (-{TB3_MAX_LIN_VEL})")
-        if ang_vel < -TB3_MAX_ANG_VEL:
-            errs.append(f"angular velocity ({ang_vel}) exceeded min (-{TB3_MAX_ANG_VEL})")
-
-        # quaternion unit norm validation
-        qx = odom.pose.pose.orientation.x
-        qy = odom.pose.pose.orientation.y
-        qz = odom.pose.pose.orientation.z
-        qw = odom.pose.pose.orientation.w
-        quat_norm = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
-        if abs(quat_norm - 1.0) > TB3_QUAT_NORM_TOL:
-            errs.append(f"odom quaternion norm ({quat_norm}) deviates from 1.0")
-
-        # 2D ground robot constraints
-        if abs(odom.pose.pose.position.z) > TB3_Z_POS_TOL:
-            errs.append(f"odom.position.z ({odom.pose.pose.position.z}) violates ground constraint")
-        if abs(odom.twist.twist.linear.y) > TB3_LATERAL_VEL_TOL:
-            errs.append(f"odom.linear.y ({odom.twist.twist.linear.y}) violates diff-drive constraint")
-        if abs(odom.twist.twist.linear.z) > TB3_LATERAL_VEL_TOL:
-            errs.append(f"odom.linear.z ({odom.twist.twist.linear.z}) violates ground constraint")
-        if abs(odom.twist.twist.angular.x) > TB3_ROLL_PITCH_TOL:
-            errs.append(f"odom.angular.x ({odom.twist.twist.angular.x}) violates ground constraint")
-        if abs(odom.twist.twist.angular.y) > TB3_ROLL_PITCH_TOL:
-            errs.append(f"odom.angular.y ({odom.twist.twist.angular.y}) violates ground constraint")
+        if ang_vel > 2.84:
+            errs.append(f"angular velocity ({ang_vel}) exceeded max (2.84)")
 
         # rev-compute theta (check Odometry::publish())
         robot_pose_0 = odom.pose.pose.position.x
@@ -317,207 +257,6 @@ def check(config, msg_list, state_dict, feedback_list):
 
         if range_error:
             errs.append(f"scan.range {scan_range} is out of range")
-
-    # ===================================================================
-    # Deep Oracle Checks (derived from TurtleBot3 hardware specifications)
-    # ===================================================================
-
-    # --- Check: Acceleration Limits ---
-    max_lin_accel_val = 0.0
-    max_ang_accel_val = 0.0
-    if len(odom_list) >= 2:
-        for i in range(1, len(odom_list)):
-            ts_prev = _ts_to_sec(odom_list[i-1][0])
-            ts_curr = _ts_to_sec(odom_list[i][0])
-            dt = ts_curr - ts_prev
-            if dt <= 0:
-                continue
-
-            v_prev = odom_list[i-1][1].twist.twist.linear.x
-            v_curr = odom_list[i][1].twist.twist.linear.x
-            lin_accel = abs(v_curr - v_prev) / dt
-
-            w_prev = odom_list[i-1][1].twist.twist.angular.z
-            w_curr = odom_list[i][1].twist.twist.angular.z
-            ang_accel = abs(w_curr - w_prev) / dt
-
-            max_lin_accel_val = max(max_lin_accel_val, lin_accel)
-            max_ang_accel_val = max(max_ang_accel_val, ang_accel)
-
-            if lin_accel > TB3_MAX_LIN_ACCEL:
-                errs.append(
-                    f"linear acceleration ({lin_accel:.2f} m/s^2) "
-                    f"exceeded physical limit ({TB3_MAX_LIN_ACCEL})")
-            if ang_accel > TB3_MAX_ANG_ACCEL:
-                errs.append(
-                    f"angular acceleration ({ang_accel:.2f} rad/s^2) "
-                    f"exceeded physical limit ({TB3_MAX_ANG_ACCEL})")
-
-    for feedback in feedback_list:
-        if feedback.name == "max_linear_accel":
-            feedback.update_value(max_lin_accel_val)
-        elif feedback.name == "max_angular_accel":
-            feedback.update_value(max_ang_accel_val)
-
-    # --- Check: Quaternion norm deviation feedback ---
-    max_quat_dev = 0.0
-    for (ts, odom) in odom_list:
-        qx = odom.pose.pose.orientation.x
-        qy = odom.pose.pose.orientation.y
-        qz = odom.pose.pose.orientation.z
-        qw = odom.pose.pose.orientation.w
-        dev = abs(math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw) - 1.0)
-        max_quat_dev = max(max_quat_dev, dev)
-
-    for feedback in feedback_list:
-        if feedback.name == "quat_norm_deviation":
-            feedback.update_value(max_quat_dev)
-            break
-
-    # --- Check: Velocity-Position Consistency ---
-    max_vel_pos_err = 0.0
-    if len(odom_list) >= 2:
-        for i in range(1, len(odom_list)):
-            ts_prev = _ts_to_sec(odom_list[i-1][0])
-            ts_curr = _ts_to_sec(odom_list[i][0])
-            dt = ts_curr - ts_prev
-            if dt <= 0 or dt > 1.0:
-                continue
-
-            odom_prev = odom_list[i-1][1]
-            odom_curr = odom_list[i][1]
-
-            vx = odom_prev.twist.twist.linear.x
-            # Get theta from previous odom quaternion
-            qz_p = odom_prev.pose.pose.orientation.z
-            qw_p = odom_prev.pose.pose.orientation.w
-            theta = 2.0 * np.arctan2(qz_p, qw_p)
-
-            expected_dx = vx * math.cos(theta) * dt
-            expected_dy = vx * math.sin(theta) * dt
-
-            actual_dx = odom_curr.pose.pose.position.x - odom_prev.pose.pose.position.x
-            actual_dy = odom_curr.pose.pose.position.y - odom_prev.pose.pose.position.y
-
-            pos_err = math.sqrt(
-                (expected_dx - actual_dx)**2 + (expected_dy - actual_dy)**2)
-            max_vel_pos_err = max(max_vel_pos_err, pos_err)
-
-            if pos_err > TB3_VEL_POS_TOL:
-                errs.append(
-                    f"velocity-position inconsistency ({pos_err:.4f} m) "
-                    f"exceeded threshold ({TB3_VEL_POS_TOL})")
-
-    for feedback in feedback_list:
-        if feedback.name == "vel_pos_inconsistency":
-            feedback.update_value(max_vel_pos_err)
-            break
-
-    # --- Check: IMU-Odometry Linear Acceleration Cross-Validation ---
-    max_accel_diff = 0.0
-    accel_diffs = []
-    if len(odom_list) >= 2 and len(imu_list) >= 1:
-        # Compute odom-derived accelerations with timestamps
-        odom_accels = []
-        for i in range(1, len(odom_list)):
-            ts_prev = _ts_to_sec(odom_list[i-1][0])
-            ts_curr = _ts_to_sec(odom_list[i][0])
-            dt = ts_curr - ts_prev
-            if dt <= 0:
-                continue
-            v_prev = odom_list[i-1][1].twist.twist.linear.x
-            v_curr = odom_list[i][1].twist.twist.linear.x
-            a_odom = (v_curr - v_prev) / dt
-            ts_mid = (odom_list[i-1][0] + odom_list[i][0]) / 2
-            odom_accels.append((ts_mid, a_odom))
-
-        # Match IMU readings to odom acceleration timestamps
-        for (ts_oa, a_odom) in odom_accels:
-            best_imu_accel = None
-            best_ts_diff = float('inf')
-            for (ts_imu, imu_msg) in imu_list:
-                td = abs(ts_oa - ts_imu)
-                if td < best_ts_diff:
-                    best_ts_diff = td
-                    best_imu_accel = imu_msg.linear_acceleration.x
-            if best_imu_accel is not None:
-                diff = abs(best_imu_accel - a_odom)
-                accel_diffs.append(diff)
-                max_accel_diff = max(max_accel_diff, diff)
-
-    if accel_diffs and statistics.mean(accel_diffs) > TB3_IMU_ODOM_ACCEL_TOL:
-        errs.append(
-            f"IMU-odom acceleration mean discrepancy "
-            f"({statistics.mean(accel_diffs):.2f} m/s^2) "
-            f"exceeded threshold ({TB3_IMU_ODOM_ACCEL_TOL})")
-
-    for feedback in feedback_list:
-        if feedback.name == "imu_odom_accel_diff":
-            feedback.update_value(max_accel_diff)
-            break
-
-    # --- Check: LiDAR Temporal Consistency ---
-    if len(scan_list) >= 2:
-        for i in range(1, len(scan_list)):
-            prev_ranges = scan_list[i-1][1].ranges
-            curr_ranges = scan_list[i][1].ranges
-
-            if len(prev_ranges) != len(curr_ranges):
-                continue
-
-            diffs = []
-            for j in range(len(prev_ranges)):
-                r_prev = prev_ranges[j]
-                r_curr = curr_ranges[j]
-                if math.isnan(r_prev) or math.isnan(r_curr):
-                    continue
-                diffs.append(abs(r_curr - r_prev))
-
-            if diffs:
-                mean_diff = statistics.mean(diffs)
-                if mean_diff > TB3_LIDAR_TEMPORAL_TOL:
-                    errs.append(
-                        f"LiDAR temporal inconsistency: mean beam change "
-                        f"({mean_diff:.3f} m) exceeded threshold "
-                        f"({TB3_LIDAR_TEMPORAL_TOL})")
-
-    # --- Check: cmd_vel Tracking (commanded vs achieved velocity) ---
-    try:
-        cmd_vel_list = state_dict["/cmd_vel"]
-    except KeyError:
-        cmd_vel_list = []
-
-    if not cmd_vel_list and msg_list:
-        cmd_vel_list = [(0, msg) for msg in msg_list]
-
-    if cmd_vel_list and len(odom_list) >= 2:
-        # Use last commanded velocity
-        last_cmd = cmd_vel_list[-1][1]
-        cmd_lin = last_cmd.linear.x
-        cmd_ang = last_cmd.angular.z
-
-        # Use last 20% of odom samples as steady-state
-        n_steady = max(1, len(odom_list) // 5)
-        steady_odom = odom_list[-n_steady:]
-
-        achieved_lin = statistics.mean(
-            [o[1].twist.twist.linear.x for o in steady_odom])
-        achieved_ang = statistics.mean(
-            [o[1].twist.twist.angular.z for o in steady_odom])
-
-        lin_track_err = abs(cmd_lin - achieved_lin)
-        ang_track_err = abs(cmd_ang - achieved_ang)
-
-        if lin_track_err > TB3_CMD_VEL_LIN_TOL:
-            errs.append(
-                f"cmd_vel tracking error: linear "
-                f"(cmd={cmd_lin:.3f}, achieved={achieved_lin:.3f}, "
-                f"err={lin_track_err:.3f} m/s)")
-        if ang_track_err > TB3_CMD_VEL_ANG_TOL:
-            errs.append(
-                f"cmd_vel tracking error: angular "
-                f"(cmd={cmd_ang:.3f}, achieved={achieved_ang:.3f}, "
-                f"err={ang_track_err:.3f} rad/s)")
 
     return errs
 

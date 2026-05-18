@@ -232,7 +232,6 @@ STAGE_EXTRAS_AO = 14
 STAGE_HAVOC = 15
 STAGE_SPLICE = 16
 STAGE_RANDOM = 17
-STAGE_INTEREST_FLOAT = 18  # physics-aware float substitution
 
 STAGE_NAMES = {
     STAGE_FLIP1: "flip 1/1",
@@ -247,7 +246,6 @@ STAGE_NAMES = {
     STAGE_INTEREST8: "interest 8/8",
     STAGE_INTEREST16: "interest 16/8",
     STAGE_INTEREST32: "interest 32/8",
-    STAGE_INTEREST_FLOAT: "interest float/phys",
     STAGE_EXTRAS_UO: "extra user overwrite",
     STAGE_EXTRAS_UI: "extra insert",
     STAGE_EXTRAS_AO: "extra auto overwrite",
@@ -336,15 +334,13 @@ APPLICABLE_STAGES = {
         STAGE_FLIP1, STAGE_FLIP2, STAGE_FLIP4, STAGE_FLIP8, STAGE_FLIP16,
         STAGE_FLIP32,
         STAGE_ARITH8, STAGE_ARITH16, STAGE_ARITH32,
-        STAGE_INTEREST8, STAGE_INTEREST16, STAGE_INTEREST32,
-        STAGE_INTEREST_FLOAT
+        STAGE_INTEREST8, STAGE_INTEREST16, STAGE_INTEREST32
     ],
     "float64": [
         STAGE_FLIP1, STAGE_FLIP2, STAGE_FLIP4, STAGE_FLIP8, STAGE_FLIP16,
         STAGE_FLIP32,
         STAGE_ARITH8, STAGE_ARITH16, STAGE_ARITH32,
-        STAGE_INTEREST8, STAGE_INTEREST16, STAGE_INTEREST32,
-        STAGE_INTEREST_FLOAT
+        STAGE_INTEREST8, STAGE_INTEREST16, STAGE_INTEREST32
     ],
 }
 
@@ -409,30 +405,10 @@ INTERESTING_32 = [
     2147483647
 ]
 
-# Physics-aware interesting float values for robotic systems.
-# Extensible: add domain-specific boundary values per robot platform.
-INTERESTING_FLOAT = [
-    # Generic boundaries
-    0.0, -0.0, 1.0, -1.0,
-    # TurtleBot3 Burger: linear velocity boundaries (max 0.22 m/s)
-    0.22, -0.22, 0.23, -0.23, 0.21, -0.21, 0.11, -0.11,
-    # TurtleBot3 Burger: angular velocity boundaries (max 2.84 rad/s)
-    2.84, -2.84, 2.85, -2.85, 2.83, -2.83, 1.42, -1.42,
-    # TurtleBot3 Waffle Pi: linear velocity boundaries (max 0.26 m/s)
-    0.26, -0.26, 0.27, -0.27,
-    # TurtleBot3 Waffle Pi: angular velocity boundaries (max 1.82 rad/s)
-    1.82, -1.82, 1.83, -1.83,
-    # Near-zero (dead zone testing)
-    0.001, -0.001, 0.01, -0.01,
-    # Large values (saturation testing)
-    1.0, -1.0, 5.0, -5.0, 10.0, -10.0,
-]
-
 INTERESTING_MAP = {
     STAGE_INTEREST8: INTERESTING_8,
     STAGE_INTEREST16: INTERESTING_16,
     STAGE_INTEREST32: INTERESTING_32,
-    STAGE_INTEREST_FLOAT: INTERESTING_FLOAT,
 }
 
 def get_primary_type(full_type_name):
@@ -955,10 +931,6 @@ def mutate_one(dtype, value, stage, pos, arith_val=0, interesting_idx=-1):
 
             return val
 
-        elif stage == STAGE_INTEREST_FLOAT:
-            # Direct float substitution with physics-aware values
-            return INTERESTING_FLOAT[interesting_idx]
-
     elif dtype.type is np.float64:
         if stage <= STAGE_FLIP32:
             mask = [0] * 64
@@ -1022,10 +994,6 @@ def mutate_one(dtype, value, stage, pos, arith_val=0, interesting_idx=-1):
             val = struct.unpack(">d", val_bytes)[0]
 
             return val
-
-        elif stage == STAGE_INTEREST_FLOAT:
-            # Direct float substitution with physics-aware values
-            return INTERESTING_FLOAT[interesting_idx]
 
     elif dtype.type is np.bool_:
         if stage <= STAGE_FLIP1:
