@@ -159,6 +159,39 @@ class Fuzzer:
 
             self.queue.append(msg_list)
 
+        elif self.config.tb3_sitl or self.config.tb3_hitl:
+            # Seed pool: boundary values derived from TurtleBot3 Burger specs
+            # Max linear velocity: 0.22 m/s, Max angular velocity: 2.84 rad/s
+            from geometry_msgs.msg import Twist
+            import seed_generator
+
+            # Single-message seeds (for RND_SINGLE and RND_REPEATED campaigns)
+            tb3_seeds = [
+                (0.22, 0.0),     # max forward
+                (-0.22, 0.0),    # max reverse
+                (0.0, 2.84),     # max left turn
+                (0.0, -2.84),    # max right turn
+                (0.22, 2.84),    # max forward + max left
+                (0.22, -2.84),   # max forward + max right
+                (-0.22, 2.84),   # max reverse + max left
+                (0.11, 1.42),    # mid-range values
+                (0.20, 0.0),     # near-boundary forward
+                (0.0, 2.80),     # near-boundary turn
+            ]
+            for (lin_x, ang_z) in tb3_seeds:
+                msg = Twist()
+                msg.linear.x = lin_x
+                msg.angular.z = ang_z
+                self.queue.append(msg)
+
+            # Sequence seeds (for RND_SEQUENCE campaign: step/ramp/alternating)
+            seq_seeds = seed_generator.generate_sequence_seeds(
+                "tb3", Twist, seqlen=self.config.seqlen
+                    if hasattr(self.config, 'seqlen') else 10
+            )
+            for seq in seq_seeds:
+                self.queue.append(seq)
+
         elif self.config.test_moveit:
             # when using joint constraints
             # msg = harness.get_init_moveit_msg()
@@ -648,7 +681,17 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ["angular", "z", np.dtype("float64")],
             ]
 
-            fbk = Feedback("theta_diff", FeedbackType.INC)
+            fbk = Feedback("theta_diff", FeedbackType.INC, min_threshold=0.5)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.5)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=2.0)
+            fbk_list.append(fbk)
+            fbk = Feedback("quat_norm_deviation", FeedbackType.INC, min_threshold=0.001)
+            fbk_list.append(fbk)
+            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.005)
+            fbk_list.append(fbk)
+            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.3)
             fbk_list.append(fbk)
 
         elif fuzzer.config.tb3_sitl:
@@ -657,7 +700,17 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ["linear", "x", np.dtype("float64")],
             ]
 
-            fbk = Feedback("theta_diff", FeedbackType.INC)
+            fbk = Feedback("theta_diff", FeedbackType.INC, min_threshold=0.5)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.5)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=2.0)
+            fbk_list.append(fbk)
+            fbk = Feedback("quat_norm_deviation", FeedbackType.INC, min_threshold=0.001)
+            fbk_list.append(fbk)
+            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.005)
+            fbk_list.append(fbk)
+            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.3)
             fbk_list.append(fbk)
 
         elif fuzzer.config.rospkg == "turtlesim":

@@ -868,6 +868,10 @@ class Scheduler:
                 interesting_idx = random.randint(
                     0, len(mutator.INTERESTING_MAP[rand_mutation_stage]) - 1
                 )
+            elif rand_mutation_stage == mutator.STAGE_INTEREST_FLOAT:
+                interesting_idx = random.randint(
+                    0, len(mutator.INTERESTING_FLOAT) - 1
+                )
             else:
                 interesting_idx = -1
 
@@ -1074,6 +1078,32 @@ class Scheduler:
                             self.bit_pos += skip
                             self.interesting_idx = 0
 
+                    elif determ_stage == mutator.STAGE_INTEREST_FLOAT:
+                        # Physics-aware float substitution: iterate through
+                        # all interesting float values (no bit_pos needed)
+                        if self.interesting_idx < len(
+                            mutator.INTERESTING_FLOAT
+                        ):
+                            data_val = mutator.mutate_one(
+                                dtype,
+                                odata,
+                                determ_stage,
+                                0,
+                                arith_val=0,
+                                interesting_idx=self.interesting_idx,
+                            )
+                            if data_val is not None:
+                                nmsg = deepcopy(msg)
+                                obj = reduce(getattr, attr_list[:-1], nmsg)
+                                setattr(obj, attr_leaf, data_val)
+
+                            self.interesting_idx += 1
+                        else:
+                            # All interesting floats exhausted, advance bit_pos
+                            # to end the stage
+                            self.bit_pos = bit_size
+                            self.interesting_idx = 0
+
                     else:
                         data_val = mutator.mutate_one(
                             dtype, odata, determ_stage, self.bit_pos
@@ -1131,6 +1161,11 @@ class Scheduler:
                     interesting_idx = random.randint(
                         0,
                         len(mutator.INTERESTING_MAP[rand_mutation_stage]) - 1,
+                    )
+                elif rand_mutation_stage == mutator.STAGE_INTEREST_FLOAT:
+                    interesting_idx = random.randint(
+                        0,
+                        len(mutator.INTERESTING_FLOAT) - 1,
                     )
                 else:
                     interesting_idx = -1
@@ -1195,6 +1230,10 @@ class Scheduler:
             ):
                 interesting_idx = random.randint(
                     0, len(mutator.INTERESTING_MAP[determ_stage]) - 1
+                )
+            elif determ_stage == mutator.STAGE_INTEREST_FLOAT:
+                interesting_idx = random.randint(
+                    0, len(mutator.INTERESTING_FLOAT) - 1
                 )
             else:
                 interesting_idx = -1
