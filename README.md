@@ -257,7 +257,7 @@ and re-run the fuzzer.
 
 ## Reports and PoCs of the bugs RoboFuzz detected
 
-Bug numbers (# columnn) in each table are in sync with Table 2 of the [paper](./paper.pdf).
+Bug numbers (# columnn) in each table are in sync with Table 2 of the [paper](https://seulbae-security.github.io/pubs/robofuzz-fse22.pdf).
 
 ### 1. PX4 bugs
 
