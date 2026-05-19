@@ -28,13 +28,17 @@ class Campaign(Enum):
 
 
 class Scheduler:
-    def __init__(self, fuzzer, campaign, target):
+    def __init__(self, fuzzer, campaign, target, fast_float_determ=False):
         self.fuzzer = fuzzer
         self.campaign = campaign
         self.topic_name = target[0]
         self.msg_type_class = target[1]
         self.subscriber_node = target[2]
         self.default_msg = self.msg_type_class()
+        self.fast_float_determ = fast_float_determ
+        # Queue consumption interval: check queue every N iterations
+        self.queue_check_interval = 50
+        self.iter_since_queue_check = 0
 
         msg_type_dict = ros_commons.map_ros_types(self.msg_type_class)
         self.msg_field_list = list(
@@ -933,8 +937,31 @@ class Scheduler:
         )
         self.exec_cnt += 1
 
+        # Periodic queue consumption: interrupt deterministic stage to use
+        # interesting seeds from feedback, preventing queue starvation.
+        self.iter_since_queue_check += 1
+        if (not self.is_new_cycle
+                and self.iter_since_queue_check >= self.queue_check_interval
+                and len(self.fuzzer.queue) > 0):
+            print("QUEUE INTERRUPT: consuming seed from queue "
+                  f"({len(self.fuzzer.queue)} pending)")
+            self.iter_since_queue_check = 0
+            # Force a mini-cycle: reset state and consume from queue
+            self.cycle_cnt += 1
+            self.is_new_cycle = True
+            self.round_cnt = 0
+            self.cur_fm_field = 0
+            self.fm_field_stages = [0] * self.num_fields
+            self.fm_determ_stages = [0] * self.num_fields
+            self.fm_odata = []
+            self.num_msg_mutation = 0
+            self.bit_pos = 0
+            self.arith_val = -35
+            self.interesting_idx = 0
+
         if self.is_new_cycle:
             print("NEW CYCLE")
+            self.iter_since_queue_check = 0
             try:
                 msg = self.fuzzer.queue.popleft()
                 self.from_queue = True
@@ -992,9 +1019,20 @@ class Scheduler:
             if cur_round == 1:
                 # GO THROUGH DETERMINISTIC MUTATION STAGES
                 cur_determ_stage_id = self.fm_determ_stages[self.cur_fm_field]
-                determ_stage = mutator.APPLICABLE_STAGES[dtype.name][
-                    cur_determ_stage_id
-                ]
+
+                # Use fast stages for float types if enabled
+                if self.fast_float_determ and dtype.name in mutator.FLOAT_FAST_STAGES:
+                    applicable_stages = mutator.FLOAT_FAST_STAGES[dtype.name]
+                else:
+                    applicable_stages = mutator.APPLICABLE_STAGES[dtype.name]
+
+                # Check if all deterministic stages are done for this field
+                if cur_determ_stage_id >= len(applicable_stages):
+                    self.round_cnt += 1
+                    self.fm_field_stages[self.cur_fm_field] += 1
+                    return (None, None)
+
+                determ_stage = applicable_stages[cur_determ_stage_id]
                 print(
                     "STAGE: DETERM {}".format(
                         mutator.STAGE_NAMES[determ_stage]
@@ -1128,7 +1166,7 @@ class Scheduler:
 
                 self.fm_determ_stages[self.cur_fm_field] += 1
                 if self.fm_determ_stages[self.cur_fm_field] == len(
-                    mutator.APPLICABLE_STAGES[dtype.name]
+                    applicable_stages
                 ):
                     self.round_cnt += 1
                     self.fm_field_stages[self.cur_fm_field] += 1

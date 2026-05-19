@@ -348,6 +348,14 @@ APPLICABLE_STAGES = {
     ],
 }
 
+# Fast deterministic stages for float types — skips bit flips and integer
+# arithmetic which produce meaningless values for floating-point fields.
+# Used by TB3 and other physics-based targets where float64 dominates.
+FLOAT_FAST_STAGES = {
+    "float32": [STAGE_INTEREST_FLOAT],
+    "float64": [STAGE_INTEREST_FLOAT],
+}
+
 
 def bitlist_to_binary(bitlist):
     out = 0

@@ -9,4 +9,6 @@ fuzzing_keys
 __pycache__
 logs/
 src/logs/
+src/out
+src/err
 *.bag/

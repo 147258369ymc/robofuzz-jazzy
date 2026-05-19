@@ -626,7 +626,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
         # campaign = Campaign.RND_REPEATED
         # campaign = Campaign.INTERCEPTION
         campaign = fuzzer.config.schedule
-        scheduler = Scheduler(fuzzer, campaign, target)
+        # Use fast float deterministic stages for TB3 (skip meaningless
+        # bit flips on float64 fields)
+        fast_float = (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl)
+        scheduler = Scheduler(fuzzer, campaign, target,
+                              fast_float_determ=fast_float)
 
         field_blacklist = None
         field_whitelist = None
