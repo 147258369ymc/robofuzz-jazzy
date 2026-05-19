@@ -964,6 +964,10 @@ class Scheduler:
             self.iter_since_queue_check = 0
             try:
                 msg = self.fuzzer.queue.popleft()
+                # Skip incompatible seeds (e.g., sequence lists in single mode)
+                while isinstance(msg, list):
+                    print("SKIP: queue entry is list, not single msg")
+                    msg = self.fuzzer.queue.popleft()
                 self.from_queue = True
             except IndexError:
                 msg = self.default_msg

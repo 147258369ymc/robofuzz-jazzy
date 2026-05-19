@@ -184,13 +184,14 @@ class Fuzzer:
                 msg.angular.z = ang_z
                 self.queue.append(msg)
 
-            # Sequence seeds (for RND_SEQUENCE campaign: step/ramp/alternating)
-            seq_seeds = seed_generator.generate_sequence_seeds(
-                "tb3", Twist, seqlen=self.config.seqlen
-                    if hasattr(self.config, 'seqlen') else 10
-            )
-            for seq in seq_seeds:
-                self.queue.append(seq)
+            # Sequence seeds only for RND_SEQUENCE campaign
+            if self.config.schedule == Campaign.RND_SEQUENCE:
+                seq_seeds = seed_generator.generate_sequence_seeds(
+                    "tb3", Twist, seqlen=self.config.seqlen
+                        if hasattr(self.config, 'seqlen') else 10
+                )
+                for seq in seq_seeds:
+                    self.queue.append(seq)
 
         elif self.config.test_moveit:
             # when using joint constraints
