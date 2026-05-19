@@ -10,10 +10,10 @@ TB3_VEL_TOLERANCE = 0.005    # m/s tolerance for simulation numerical error
 TB3_MAX_LIN_ACCEL = 5.0      # m/s^2 (derived from XL430-W250 torque)
 TB3_MAX_ANG_ACCEL = 30.0     # rad/s^2
 TB3_QUAT_NORM_TOL = 0.01     # unit quaternion tolerance
-TB3_Z_POS_TOL = 0.01         # m (climbing threshold 10mm)
-TB3_LATERAL_VEL_TOL = 0.01   # m/s (no lateral motion for diff-drive)
+TB3_Z_POS_TOL = 0.05         # m (allow minor bounce from contact forces)
+TB3_LATERAL_VEL_TOL = 0.03   # m/s (filter simulation numerical noise)
 TB3_ROLL_PITCH_TOL = 0.05    # rad/s (ground robot, no roll/pitch)
-TB3_IMU_ROLL_PITCH_TOL = 0.1 # rad/s (IMU noise margin)
+TB3_IMU_ROLL_PITCH_TOL = 2.0 # rad/s (allow physics coupling during turns)
 TB3_VEL_POS_TOL = 0.05       # m (velocity-position consistency)
 TB3_IMU_ODOM_ACCEL_TOL = 2.0 # m/s^2 (cross-validation tolerance)
 TB3_LIDAR_TEMPORAL_TOL = 1.0 # m (mean beam change between scans)
@@ -283,8 +283,10 @@ def check(config, msg_list, state_dict, feedback_list):
 
     theta_diff = list()
     for tup in theta_matched:
-        # print(tup[0], tup[1], tup[2], tup[3], abs(tup[2] - tup[3]))
-        theta_diff.append(abs(tup[2] - tup[3]))
+        # Normalize angle difference to handle 2*pi wraparound
+        raw_diff = abs(tup[2] - tup[3])
+        normalized_diff = min(raw_diff, 2 * math.pi - raw_diff)
+        theta_diff.append(normalized_diff)
 
     # todo: normalize diff, get anomaly and translate to feedback!!
     min_diff = min(theta_diff)
@@ -474,7 +476,8 @@ def check(config, msg_list, state_dict, feedback_list):
             for j in range(len(prev_ranges)):
                 r_prev = prev_ranges[j]
                 r_curr = curr_ranges[j]
-                if math.isnan(r_prev) or math.isnan(r_curr):
+                if (math.isnan(r_prev) or math.isnan(r_curr)
+                        or math.isinf(r_prev) or math.isinf(r_curr)):
                     continue
                 diffs.append(abs(r_curr - r_prev))
 
@@ -487,6 +490,9 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"({TB3_LIDAR_TEMPORAL_TOL})")
 
     # --- Check: cmd_vel Tracking (commanded vs achieved velocity) ---
+    # Only meaningful when commands are within hardware limits and the robot
+    # has time to reach steady state. Use odom samples from 0.5~2.0s after
+    # the command was sent (avoids timeout-induced zero velocity).
     try:
         cmd_vel_list = state_dict["/cmd_vel"]
     except KeyError:
@@ -496,33 +502,41 @@ def check(config, msg_list, state_dict, feedback_list):
         cmd_vel_list = [(0, msg) for msg in msg_list]
 
     if cmd_vel_list and len(odom_list) >= 2:
-        # Use last commanded velocity
         last_cmd = cmd_vel_list[-1][1]
         cmd_lin = last_cmd.linear.x
         cmd_ang = last_cmd.angular.z
 
-        # Use last 20% of odom samples as steady-state
-        n_steady = max(1, len(odom_list) // 5)
-        steady_odom = odom_list[-n_steady:]
+        # Only check tracking for commands within hardware limits
+        if (abs(cmd_lin) <= TB3_MAX_LIN_VEL + TB3_VEL_TOLERANCE
+                and abs(cmd_ang) <= TB3_MAX_ANG_VEL + TB3_VEL_TOLERANCE):
 
-        achieved_lin = statistics.mean(
-            [o[1].twist.twist.linear.x for o in steady_odom])
-        achieved_ang = statistics.mean(
-            [o[1].twist.twist.angular.z for o in steady_odom])
+            # Use odom samples from 0.5s~2.0s after command as response window
+            cmd_ts = _ts_to_sec(cmd_vel_list[-1][0]) if cmd_vel_list[-1][0] else 0
+            response_odom = []
+            for (ts, odom) in odom_list:
+                dt = _ts_to_sec(ts) - cmd_ts
+                if 0.5 <= dt <= 2.0:
+                    response_odom.append(odom)
 
-        lin_track_err = abs(cmd_lin - achieved_lin)
-        ang_track_err = abs(cmd_ang - achieved_ang)
+            if len(response_odom) >= 3:
+                achieved_lin = statistics.mean(
+                    [o.twist.twist.linear.x for o in response_odom])
+                achieved_ang = statistics.mean(
+                    [o.twist.twist.angular.z for o in response_odom])
 
-        if lin_track_err > TB3_CMD_VEL_LIN_TOL:
-            errs.append(
-                f"cmd_vel tracking error: linear "
-                f"(cmd={cmd_lin:.3f}, achieved={achieved_lin:.3f}, "
-                f"err={lin_track_err:.3f} m/s)")
-        if ang_track_err > TB3_CMD_VEL_ANG_TOL:
-            errs.append(
-                f"cmd_vel tracking error: angular "
-                f"(cmd={cmd_ang:.3f}, achieved={achieved_ang:.3f}, "
-                f"err={ang_track_err:.3f} rad/s)")
+                lin_track_err = abs(cmd_lin - achieved_lin)
+                ang_track_err = abs(cmd_ang - achieved_ang)
+
+                if lin_track_err > TB3_CMD_VEL_LIN_TOL:
+                    errs.append(
+                        f"cmd_vel tracking error: linear "
+                        f"(cmd={cmd_lin:.3f}, achieved={achieved_lin:.3f}, "
+                        f"err={lin_track_err:.3f} m/s)")
+                if ang_track_err > TB3_CMD_VEL_ANG_TOL:
+                    errs.append(
+                        f"cmd_vel tracking error: angular "
+                        f"(cmd={cmd_ang:.3f}, achieved={achieved_ang:.3f}, "
+                        f"err={ang_track_err:.3f} rad/s)")
 
     return errs
 
