@@ -14,10 +14,11 @@ class Feedback:
     In practice, "feedback" will be a vector of Feedback instances.
     """
 
-    def __init__(self, name, feed_type, default_value=None):
+    def __init__(self, name, feed_type, default_value=None, min_threshold=None):
         self.name = name # name of the feedback attribute
         self.feed_type = feed_type
         self.default_value = default_value
+        self.min_threshold = min_threshold  # minimum value to be considered interesting
         self.value = default_value
         self.prev_interesting_value = None
         self.interesting_value = None # current interesting value
@@ -54,6 +55,8 @@ class Feedback:
         # compare current value to the last value that was considered
         # interesting, and update if the current value is more interesting
         if self.feed_type == FeedbackType.INC:
+            if self.min_threshold is not None and self.value < self.min_threshold:
+                return False
             if self.interesting_value < self.value:
                 self.update_interesting()
                 return True
