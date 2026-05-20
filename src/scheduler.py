@@ -799,7 +799,14 @@ class Scheduler:
 
         if self.is_new_cycle:
             try:
-                self.msg_list = self.fuzzer.queue.popleft()
+                queued = self.fuzzer.queue.popleft()
+                # Ensure msg_list is always a list of messages
+                if isinstance(queued, list):
+                    self.msg_list = queued
+                else:
+                    # Single message seed: wrap into a sequence
+                    self.msg_list = [deepcopy(queued)
+                                     for _ in range(self.num_msgs)]
                 self.from_queue = True
                 self.num_msgs = len(self.msg_list)
             except IndexError:
@@ -808,9 +815,6 @@ class Scheduler:
                 for i in range(self.num_msgs):
                     msg = self.msg_type_class()
                     self.msg_list.append(msg)
-
-                # print(len(self.msg_list))
-                # print("INIT_MSG_LIST:", self.msg_list)
 
                 self.from_queue = False
 

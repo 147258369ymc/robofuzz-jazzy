@@ -1222,6 +1222,16 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     scheduler.is_new_cycle = True
                     print("--- cycle finished ---")
 
+            elif fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl:
+                # For TB3 sequence mode: cycle every 20 rounds to consume
+                # interesting seeds from the queue regularly
+                if (scheduler.campaign == Campaign.RND_SEQUENCE
+                        and scheduler.round_cnt >= 20):
+                    scheduler.round_cnt = 0
+                    scheduler.cycle_cnt += 1
+                    scheduler.is_new_cycle = True
+                    print("--- cycle finished ---")
+
 
 def main(config):
     print(
