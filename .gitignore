@@ -12,3 +12,4 @@ src/logs/
 src/out
 src/err
 *.bag/
+analysis/

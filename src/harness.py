@@ -114,7 +114,7 @@ def run_tb3_sitl(proj_dir):
     devnull = "2>&1 > /dev/null"
 
     ros_pkg = "turtlebot3_gazebo"
-    sim_map = "turtlebot3_world.launch.py"
+    sim_map = "empty_world.launch.py"
 
     cmd_list = [
         f"DISPLAY={os.getenv('DISPLAY')}",
