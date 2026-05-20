@@ -53,4 +53,9 @@ echo ""
 echo "Starting playback (Ctrl+C to stop)..."
 echo ""
 
-ros2 bag play "$BAG_DIR" --clock
+if ros2 bag play -h 2>&1 | grep -q -- '--clock'; then
+    ros2 bag play "$BAG_DIR" --clock
+else
+    echo "Note: this ROS 2 version does not support 'ros2 bag play --clock'; playing without --clock."
+    ros2 bag play "$BAG_DIR"
+fi

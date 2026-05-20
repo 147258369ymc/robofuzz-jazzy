@@ -6,7 +6,7 @@ Case回放工具 - 在Gazebo中重现fuzzer发现的典型case
   1. 先启动Gazebo仿真环境（带GUI）:
      docker exec -it <container> bash
      source /robofuzz/targets/turtlebot3_ws/install/setup.bash
-     DISPLAY=:1 TURTLEBOT3_MODEL=burger ros2 launch turtlebot3_gazebo turtlebot3_world.launch.py
+     DISPLAY=:1 TURTLEBOT3_MODEL=burger ros2 launch turtlebot3_gazebo empty_world.launch.py
 
   2. 在另一个终端运行本脚本:
      docker exec -it <container> bash

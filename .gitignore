@@ -13,3 +13,4 @@ src/out
 src/err
 *.bag/
 analysis/
+logs_original/
