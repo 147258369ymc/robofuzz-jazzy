@@ -490,9 +490,8 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"({TB3_LIDAR_TEMPORAL_TOL})")
 
     # --- Check: cmd_vel Tracking (commanded vs achieved velocity) ---
-    # Only meaningful when commands are within hardware limits and the robot
-    # has time to reach steady state. Use odom samples from 0.5~2.0s after
-    # the command was sent (avoids timeout-induced zero velocity).
+    # In sequence mode: check each command's tracking within its active window.
+    # In single mode: check the last command in a 0.5~2.0s response window.
     try:
         cmd_vel_list = state_dict["/cmd_vel"]
     except KeyError:
@@ -502,20 +501,29 @@ def check(config, msg_list, state_dict, feedback_list):
         cmd_vel_list = [(0, msg) for msg in msg_list]
 
     if cmd_vel_list and len(odom_list) >= 2:
-        last_cmd = cmd_vel_list[-1][1]
-        cmd_lin = last_cmd.linear.x
-        cmd_ang = last_cmd.angular.z
+        # Build list of (timestamp, cmd) pairs for valid commands
+        valid_cmds = []
+        for (ts, cmd) in cmd_vel_list:
+            cmd_lin = cmd.linear.x
+            cmd_ang = cmd.angular.z
+            if (abs(cmd_lin) <= TB3_MAX_LIN_VEL + TB3_VEL_TOLERANCE
+                    and abs(cmd_ang) <= TB3_MAX_ANG_VEL + TB3_VEL_TOLERANCE):
+                valid_cmds.append((_ts_to_sec(ts), cmd_lin, cmd_ang))
 
-        # Only check tracking for commands within hardware limits
-        if (abs(cmd_lin) <= TB3_MAX_LIN_VEL + TB3_VEL_TOLERANCE
-                and abs(cmd_ang) <= TB3_MAX_ANG_VEL + TB3_VEL_TOLERANCE):
+        # For each valid command, check tracking in its active window
+        # (from 0.5s after it's sent until the next command arrives)
+        for i, (cmd_ts, cmd_lin, cmd_ang) in enumerate(valid_cmds):
+            # Determine end of this command's active window
+            if i + 1 < len(valid_cmds):
+                window_end = valid_cmds[i + 1][0]
+            else:
+                window_end = cmd_ts + 2.0
 
-            # Use odom samples from 0.5s~2.0s after command as response window
-            cmd_ts = _ts_to_sec(cmd_vel_list[-1][0]) if cmd_vel_list[-1][0] else 0
+            # Collect odom samples in [cmd_ts+0.5, window_end]
             response_odom = []
             for (ts, odom) in odom_list:
-                dt = _ts_to_sec(ts) - cmd_ts
-                if 0.5 <= dt <= 2.0:
+                t = _ts_to_sec(ts)
+                if cmd_ts + 0.5 <= t <= window_end:
                     response_odom.append(odom)
 
             if len(response_odom) >= 3:

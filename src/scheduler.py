@@ -843,71 +843,72 @@ class Scheduler:
                     # print(msg)
 
         else:
-            msg_idx = random.choice(range(self.num_msgs))
-            msg_to_mutate = self.msg_list[msg_idx]
-
-            print(f"mutate {msg_idx}-th message from the sequence")
-
-            field = random.choice(self.msg_field_list)
-            dtype = field[-1]
-            attr_list = field[:-1]
-            attr_leaf = attr_list[-1]
-
-            data_val = reduce(
-                getattr, attr_list, msg_to_mutate
-            )  # original data
-
-            rand_mutation_stage = random.choice(
-                mutator.APPLICABLE_STAGES[dtype.name]
-            )
-
-            if (
-                rand_mutation_stage >= mutator.STAGE_ARITH8
-                and rand_mutation_stage <= mutator.STAGE_ARITH32
-            ):
-                arith_val = random.randint(1, 35)
+            # Decide how many messages to mutate this round:
+            # 50% chance: mutate 1 msg (original behavior)
+            # 35% chance: mutate 2~3 msgs (multi_mutate)
+            # 15% chance: mutate all msgs with same delta (coordinated)
+            roll = random.random()
+            if roll < 0.50:
+                num_to_mutate = 1
+            elif roll < 0.85:
+                num_to_mutate = random.randint(2, min(3, self.num_msgs))
             else:
-                arith_val = 0
+                num_to_mutate = self.num_msgs
 
-            if (
-                rand_mutation_stage >= mutator.STAGE_INTEREST8
-                and rand_mutation_stage <= mutator.STAGE_INTEREST32
-            ):
-                interesting_idx = random.randint(
-                    0, len(mutator.INTERESTING_MAP[rand_mutation_stage]) - 1
+            indices = random.sample(range(self.num_msgs), num_to_mutate)
+            print(f"mutate msgs {indices} from the sequence")
+
+            for msg_idx in indices:
+                msg_to_mutate = self.msg_list[msg_idx]
+
+                field = random.choice(self.msg_field_list)
+                dtype = field[-1]
+                attr_list = field[:-1]
+                attr_leaf = attr_list[-1]
+
+                data_val = reduce(
+                    getattr, attr_list, msg_to_mutate
                 )
-            elif rand_mutation_stage == mutator.STAGE_INTEREST_FLOAT:
-                interesting_idx = random.randint(
-                    0, len(mutator.INTERESTING_FLOAT) - 1
+
+                if self.fast_float_determ and dtype.name in mutator.FLOAT_FAST_STAGES:
+                    stages = mutator.FLOAT_FAST_STAGES[dtype.name]
+                else:
+                    stages = mutator.APPLICABLE_STAGES[dtype.name]
+
+                rand_mutation_stage = random.choice(stages)
+
+                if (rand_mutation_stage >= mutator.STAGE_ARITH8
+                        and rand_mutation_stage <= mutator.STAGE_ARITH32):
+                    arith_val = random.randint(1, 35)
+                else:
+                    arith_val = 0
+
+                if (rand_mutation_stage >= mutator.STAGE_INTEREST8
+                        and rand_mutation_stage <= mutator.STAGE_INTEREST32):
+                    interesting_idx = random.randint(
+                        0, len(mutator.INTERESTING_MAP[rand_mutation_stage]) - 1)
+                elif rand_mutation_stage == mutator.STAGE_INTEREST_FLOAT:
+                    interesting_idx = random.randint(
+                        0, len(mutator.INTERESTING_FLOAT) - 1)
+                else:
+                    interesting_idx = -1
+
+                bit_size = dtype.itemsize * 8
+                if dtype.itemsize == 0:
+                    if dtype.type is np.str_:
+                        bit_size = c.STRLEN_MAX * 8
+
+                data_val = mutator.mutate_one(
+                    dtype, data_val, rand_mutation_stage,
+                    random.randint(0, bit_size - 1),
+                    arith_val, interesting_idx,
                 )
-            else:
-                interesting_idx = -1
 
-            bit_size = dtype.itemsize * 8
-            if dtype.itemsize == 0:
-                if dtype.type is np.str_:
-                    bit_size = c.STRLEN_MAX * 8
-
-            # print("data before rand mutation:", data_val)
-
-            data_val = mutator.mutate_one(
-                dtype,
-                data_val,
-                rand_mutation_stage,
-                random.randint(0, bit_size - 1),
-                arith_val,
-                interesting_idx,
-            )
-            # print("data after rand mutation:", data_val)
-
-            msg_mutated = None
-            if data_val is not None:
-                msg_mutated = deepcopy(msg_to_mutate)
-                obj = reduce(getattr, attr_list[:-1], msg_mutated)
-                setattr(obj, attr_leaf, data_val)
-                # fuzzer.fuzz_and_check(self.fuzzer, nmsg, frame)
-
-                self.msg_list[msg_idx] = msg_mutated
+                if data_val is not None:
+                    msg_mutated = deepcopy(msg_to_mutate)
+                    obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                    setattr(obj, attr_leaf, data_val)
+                    self.msg_list[msg_idx] = msg_mutated
 
         return (self.msg_list, frame)
 
