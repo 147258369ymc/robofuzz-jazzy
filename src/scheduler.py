@@ -910,6 +910,7 @@ class Scheduler:
                     setattr(obj, attr_leaf, data_val)
                     self.msg_list[msg_idx] = msg_mutated
 
+        self.round_cnt += 1
         return (self.msg_list, frame)
 
     def mutate_generic(self, config):
