@@ -686,17 +686,24 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ["angular", "z", np.dtype("float64")],
             ]
 
-            fbk = Feedback("theta_diff", FeedbackType.INC, min_threshold=0.5)
+            # Thresholds calibrated from empirical data in empty_world:
+            # theta_diff: ~1e-7 range, no threshold needed (INC is self-regulating)
+            # max_linear_accel: ~0.99-1.58 range, low threshold to filter idle noise
+            # max_angular_accel: ~0.001-0.063 range, original 2.0 was unreachable
+            # quat_norm_deviation: ~2e-16 in simulation, keep as correctness check
+            # vel_pos_inconsistency: ~0.001-0.041 range
+            # imu_odom_accel_diff: ~1.07-1.51 range
+            fbk = Feedback("theta_diff", FeedbackType.INC)
             fbk_list.append(fbk)
-            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.5)
+            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.1)
             fbk_list.append(fbk)
-            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=2.0)
+            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=0.005)
             fbk_list.append(fbk)
-            fbk = Feedback("quat_norm_deviation", FeedbackType.INC, min_threshold=0.001)
+            fbk = Feedback("quat_norm_deviation", FeedbackType.INC)
             fbk_list.append(fbk)
-            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.005)
+            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.001)
             fbk_list.append(fbk)
-            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.3)
+            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.1)
             fbk_list.append(fbk)
 
         elif fuzzer.config.tb3_sitl:
@@ -705,17 +712,24 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ["linear", "x", np.dtype("float64")],
             ]
 
-            fbk = Feedback("theta_diff", FeedbackType.INC, min_threshold=0.5)
+            # Thresholds calibrated from empirical data in empty_world:
+            # theta_diff: ~1e-7 range, no threshold (like original RoboFuzz)
+            # max_linear_accel: ~0.99-1.58, threshold filters idle jitter
+            # max_angular_accel: ~0.001-0.063, original 2.0 was unreachable
+            # quat_norm_deviation: ~2e-16, no threshold (correctness metric)
+            # vel_pos_inconsistency: ~0.001-0.041
+            # imu_odom_accel_diff: ~1.07-1.51
+            fbk = Feedback("theta_diff", FeedbackType.INC)
             fbk_list.append(fbk)
-            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.5)
+            fbk = Feedback("max_linear_accel", FeedbackType.INC, min_threshold=0.1)
             fbk_list.append(fbk)
-            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=2.0)
+            fbk = Feedback("max_angular_accel", FeedbackType.INC, min_threshold=0.005)
             fbk_list.append(fbk)
-            fbk = Feedback("quat_norm_deviation", FeedbackType.INC, min_threshold=0.001)
+            fbk = Feedback("quat_norm_deviation", FeedbackType.INC)
             fbk_list.append(fbk)
-            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.005)
+            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC, min_threshold=0.001)
             fbk_list.append(fbk)
-            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.3)
+            fbk = Feedback("imu_odom_accel_diff", FeedbackType.INC, min_threshold=0.1)
             fbk_list.append(fbk)
 
         elif fuzzer.config.rospkg == "turtlesim":
