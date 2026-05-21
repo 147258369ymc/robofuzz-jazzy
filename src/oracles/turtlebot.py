@@ -289,18 +289,16 @@ def check(config, msg_list, state_dict, feedback_list):
         theta_diff.append(normalized_diff)
 
     # todo: normalize diff, get anomaly and translate to feedback!!
-    min_diff = min(theta_diff)
-    max_diff = max(theta_diff)
-    mean = statistics.mean(theta_diff)
-    median = statistics.median(theta_diff)
+    if theta_diff:
+        max_diff = max(theta_diff)
 
-    for feedback in feedback_list:
-        if feedback.name == "theta_diff":
-            feedback.update_value(max_diff)
-            break
+        for feedback in feedback_list:
+            if feedback.name == "theta_diff":
+                feedback.update_value(max_diff)
+                break
 
-    if max_diff > 5.0:
-      errs.append(f"theta estimation error is too huge: {max_diff}")
+        if max_diff > 5.0:
+            errs.append(f"theta estimation error is too huge: {max_diff}")
 
     # NOTE: LiDAR scan basic range check disabled due to known specification
     # violation bug in the LDS driver node (scan.range inf is always triggered).

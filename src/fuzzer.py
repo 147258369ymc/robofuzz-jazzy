@@ -1154,9 +1154,6 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         os.path.join(fuzzer.config.rosbag_dir, frame, bag_dir)
                     )
 
-                for fbk in fbk_list:
-                    fbk.reset()
-
             else:
                 print("[+] no error found")
 
@@ -1173,7 +1170,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     with open(err_file, "a") as fp:
                         fp.write(str(set(rpt_errs)))
 
+            # Check feedback BEFORE reset so high-error-rate runs can
+            # still accumulate interesting seeds for exploration
             is_interesting = False
+            print(f"[debug] fbk_list len={len(fbk_list)}")
             for fbk in fbk_list:
                 # check if any feedback element is interesting
                 cur_interesting = fbk.is_interesting()
@@ -1200,6 +1200,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ) as fp:
                     for fbk in fbk_list:
                         fp.write(f"{fbk.name} {fbk.value}\n")
+
+            # For TB3: do not reset feedback on error. With ~100% error rate,
+            # resetting would prevent feedback from ever accumulating.
+            # Let feedback naturally track max values across executions.
+            if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl):
+                if errs:
+                    for fbk in fbk_list:
+                        fbk.reset()
 
             if fuzzer.config.px4_sitl:
 

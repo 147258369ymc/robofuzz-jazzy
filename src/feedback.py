@@ -49,7 +49,12 @@ class Feedback:
     def is_interesting(self):
         # transition from the initial state to any state is interesting
         if self.interesting_value is None:
-            self.update_interesting(init=True)
+            if self.value is not None:
+                self.update_interesting(init=True)
+            return False
+
+        # value not updated this round (oracle didn't reach this feedback)
+        if self.value is None:
             return False
 
         # compare current value to the last value that was considered
