@@ -1,0 +1,45 @@
+id: px4.yaw_rate.manual_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [MANUAL, ALTCTL, POSCTL]
+  require_airborne: true
+
+observations:
+  - name: yaw_rate
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: MPC_MAN_Y_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 150.0
+
+constants:
+  - name: RAD2DEG
+    value: 57.2957795
+    unit: ""
+
+derived:
+  - name: yaw_rate_dps
+    expr: "abs(yaw_rate) * RAD2DEG"
+    unit: deg/s
+
+assertions:
+  - expr: "yaw_rate_dps <= param(MPC_MAN_Y_MAX) + tolerance"
+    tolerance: 10.0
+    severity: error
+    message: "Manual yaw rate violated: {yaw_rate_dps:.1f} deg/s"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.MPC_MAN_Y_MAX
+    evidence: "Max manual yaw rate"

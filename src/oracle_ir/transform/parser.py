@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from .schema import (
+from ..schema import (
     OracleIR, Observation, Parameter, Constant, DerivedVar,
     Assertion, Scope, Window, FeedbackSpec, ProvenanceRef,
 )
@@ -52,11 +52,31 @@ def _parse_assertions(data) -> list[Assertion]:
 def _parse_scope(data: dict | None) -> Scope:
     if not data:
         return Scope()
+
+    filter_expr = data.get("filter_expr", "")
+    filter_obs_raw = data.get("filter_observations", [])
+    filter_observations = _parse_observations(filter_obs_raw)
+    require_airborne = data.get("require_airborne", False)
+
+    # 向后兼容：require_airborne → 通用 filter_expr
+    if require_airborne and not filter_expr:
+        filter_expr = "dist_bottom >= 0.15"
+        # 自动注入 filter observation（如果用户未显式声明）
+        if not filter_observations:
+            filter_observations = [Observation(
+                name="dist_bottom",
+                topic="/VehicleLocalPosition_PubSubTopic",
+                field="dist_bottom",
+                unit="m",
+            )]
+
     return Scope(
         flight_modes=data.get("flight_modes", []),
         vehicle_type=data.get("vehicle_type", ""),
-        require_airborne=data.get("require_airborne", False),
+        require_airborne=require_airborne,
         preconditions=data.get("preconditions", []),
+        filter_expr=filter_expr,
+        filter_observations=filter_observations,
     )
 
 

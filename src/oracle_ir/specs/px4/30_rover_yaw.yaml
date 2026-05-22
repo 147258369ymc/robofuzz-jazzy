@@ -1,0 +1,43 @@
+id: px4.rover.yaw_rate_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: yaw_rate
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: GND_MAN_Y_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 150.0
+
+constants:
+  - name: RAD2DEG
+    value: 57.2957795
+    unit: ""
+
+derived:
+  - name: yaw_rate_dps
+    expr: "abs(yaw_rate) * RAD2DEG"
+    unit: deg/s
+
+assertions:
+  - expr: "yaw_rate_dps <= param(GND_MAN_Y_MAX) + tolerance"
+    tolerance: 10.0
+    severity: error
+    message: "Rover yaw rate {yaw_rate_dps:.1f} exceeds GND_MAN_Y_MAX"
+
+window:
+  type: every_sample
+
+provenance:
+  - chunk_id: px4.parameter.GND_MAN_Y_MAX
+    evidence: "Max manual yaw rate for rover"

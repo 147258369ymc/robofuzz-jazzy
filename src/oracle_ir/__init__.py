@@ -9,13 +9,11 @@ from .schema import (
     OracleIR, Observation, Parameter, DerivedVar,
     Assertion, Scope, Window, FeedbackSpec, ProvenanceRef,
 )
-from .parser import load_oracle_ir, load_all_specs
-from .validator import validate_oracle_ir
-from .compiler import compile_oracle_ir
+from .transform import load_all_specs, load_oracle_ir, validate_oracle_ir, compile_oracle_ir
 
 __all__ = [
     "OracleIR", "Observation", "Parameter", "DerivedVar",
     "Assertion", "Scope", "Window", "FeedbackSpec", "ProvenanceRef",
-    "load_oracle_ir", "load_all_specs",
+    "load_all_specs", "load_oracle_ir",
     "validate_oracle_ir", "compile_oracle_ir",
 ]

@@ -1,0 +1,44 @@
+id: px4.fw.yaw_rate_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: yaw_rate
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: FW_Y_RMAX
+    source: px4.parameters
+    unit: deg/s
+    default: 50.0
+
+constants:
+  - name: RAD2DEG
+    value: 57.2957795
+    unit: ""
+
+derived:
+  - name: yaw_rate_dps
+    expr: "abs(yaw_rate) * RAD2DEG"
+    unit: deg/s
+
+assertions:
+  - expr: "yaw_rate_dps <= param(FW_Y_RMAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "FW yaw rate {yaw_rate_dps:.1f} exceeds FW_Y_RMAX"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.FW_Y_RMAX
+    evidence: "Maximum yaw rate for fixed-wing"

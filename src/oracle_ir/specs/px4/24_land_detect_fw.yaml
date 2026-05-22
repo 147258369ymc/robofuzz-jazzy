@@ -1,0 +1,58 @@
+id: px4.land_detect.fixedwing
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: vx
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vx
+    unit: m/s
+  - name: vy
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vy
+    unit: m/s
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+
+parameters:
+  - name: LNDFW_VEL_XY_MAX
+    source: px4.parameters
+    unit: m/s
+    default: 5.0
+  - name: LNDFW_VEL_Z_MAX
+    source: px4.parameters
+    unit: m/s
+    default: 3.0
+
+derived:
+  - name: horizontal_velocity
+    expr: "sqrt(vx * vx + vy * vy)"
+    unit: m/s
+  - name: climb_rate
+    expr: "abs(vz)"
+    unit: m/s
+
+assertions: []
+
+window:
+  type: every_sample
+
+feedback:
+  - name: land_detect_fw_xy
+    metric: "horizontal_velocity"
+    direction: maximize
+  - name: land_detect_fw_z
+    metric: "climb_rate"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.parameter.LNDFW_VEL_XY_MAX
+    evidence: "Fixedwing max horizontal velocity for land detection"
+  - chunk_id: px4.parameter.LNDFW_VEL_Z_MAX
+    evidence: "Fixedwing max climb rate for land detection"

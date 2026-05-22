@@ -54,8 +54,11 @@ class Scope:
     """适用条件：oracle 生效的前置条件"""
     flight_modes: list[str] = field(default_factory=list)
     vehicle_type: str = ""
-    require_airborne: bool = False
+    require_airborne: bool = False  # DEPRECATED: 使用 filter_expr 替代
     preconditions: list[str] = field(default_factory=list)
+    # 通用过滤：表达式为 true 时采样点才参与检查
+    filter_expr: str = ""
+    filter_observations: list[Any] = field(default_factory=list)  # list[Observation]
 
 
 @dataclass

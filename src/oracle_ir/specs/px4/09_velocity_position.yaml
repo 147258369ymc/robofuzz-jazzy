@@ -1,0 +1,80 @@
+id: px4.consistency.velocity_position
+type: temporal_consistency
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: vx
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vx
+    unit: m/s
+  - name: vy
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vy
+    unit: m/s
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+  - name: x
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: x
+    unit: m
+  - name: y
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: y
+    unit: m
+  - name: z
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: z
+    unit: m
+
+constants:
+  - name: TOL_VEL_POS
+    value: 0.5
+    unit: m
+
+derived:
+  - name: expected_dx
+    expr: "prev_vx * dt"
+    unit: m
+  - name: expected_dy
+    expr: "prev_vy * dt"
+    unit: m
+  - name: expected_dz
+    expr: "prev_vz * dt"
+    unit: m
+  - name: actual_dx
+    expr: "x - prev_x"
+    unit: m
+  - name: actual_dy
+    expr: "y - prev_y"
+    unit: m
+  - name: actual_dz
+    expr: "z - prev_z"
+    unit: m
+  - name: pos_err
+    expr: "sqrt((expected_dx - actual_dx)**2 + (expected_dy - actual_dy)**2 + (expected_dz - actual_dz)**2)"
+    unit: m
+
+assertions:
+  - expr: "pos_err <= TOL_VEL_POS"
+    tolerance: 0.0
+    severity: error
+    message: "Velocity-position inconsistency: {pos_err:.4f} m"
+
+window:
+  type: sequential_pairs
+  filter: airborne
+
+feedback:
+  - name: vel_pos_inconsistency
+    metric: "pos_err"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.msg.VehicleLocalPosition
+    evidence: "vx/vy/vz velocity and x/y/z position in local NED frame"

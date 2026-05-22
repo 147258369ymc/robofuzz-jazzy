@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .schema import OracleIR
+from ..schema import OracleIR
 from .expr_engine import validate_expr
 
 
@@ -43,8 +43,8 @@ def validate_oracle_ir(
         errors.append("Missing required field: type")
     if not ir.system:
         errors.append("Missing required field: system")
-    if not ir.assertions:
-        errors.append("Missing required field: assertions (at least one)")
+    if not ir.assertions and not ir.feedback:
+        errors.append("Missing required field: assertions or feedback (at least one)")
     if not ir.observations and not ir.constants:
         warnings.append("No observations or constants declared")
 

@@ -1,0 +1,71 @@
+id: px4.fw.attitude_limits
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [MANUAL, ALTCTL, POSCTL]
+  require_airborne: true
+
+observations:
+  - name: qw
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 0
+    unit: ""
+  - name: qx
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 1
+    unit: ""
+  - name: qy
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 2
+    unit: ""
+  - name: qz
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 3
+    unit: ""
+
+parameters:
+  - name: FW_MAN_R_MAX
+    source: px4.parameters
+    unit: deg
+    default: 45.0
+  - name: FW_MAN_P_MAX
+    source: px4.parameters
+    unit: deg
+    default: 45.0
+
+derived:
+  - name: roll_deg
+    expr: "abs(degrees(2.0 * (qw * qx + qy * qz)))"
+    unit: deg
+  - name: pitch_sin
+    expr: "max(-1.0, min(1.0, 2.0 * (qw * qy - qz * qx)))"
+    unit: ""
+  - name: pitch_deg
+    expr: "abs(degrees(pitch_sin))"
+    unit: deg
+
+assertions:
+  - expr: "roll_deg <= param(FW_MAN_R_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "FW manual roll {roll_deg:.1f} exceeds FW_MAN_R_MAX"
+  - expr: "pitch_deg <= param(FW_MAN_P_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "FW manual pitch {pitch_deg:.1f} exceeds FW_MAN_P_MAX"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.FW_MAN_R_MAX
+    evidence: "Max manual roll for fixed-wing"
+  - chunk_id: px4.parameter.FW_MAN_P_MAX
+    evidence: "Max manual pitch for fixed-wing"

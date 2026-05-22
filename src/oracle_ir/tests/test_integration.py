@@ -7,16 +7,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.oracle_ir.parser import load_all_specs
-from src.oracle_ir.validator import validate_oracle_ir
-from src.oracle_ir.compiler import compile_oracle_ir
+from src.oracle_ir.transform.parser import load_all_specs
+from src.oracle_ir.transform.validator import validate_oracle_ir
+from src.oracle_ir.transform.compiler import compile_oracle_ir
 
 
 def make_mock_state_dict():
     """构造模拟 state_dict，模拟一次正常飞行"""
     ts_base = 1000000000000  # 1s in ns
 
-    # VehicleLocalPosition: 正常速度
+    # VehicleLocalPosition: 正常速度，位置与速度一致
     pos_msgs = []
     for i in range(10):
         ts = ts_base + i * 100000000  # 100ms 间隔
@@ -27,7 +27,7 @@ def make_mock_state_dict():
         )
         pos_msgs.append((ts, msg))
 
-    # VehicleAcceleration: 正常加速度
+    # VehicleAcceleration: 正常加速度（平稳，低 jerk）
     acc_msgs = []
     for i in range(10):
         ts = ts_base + i * 100000000
@@ -41,24 +41,64 @@ def make_mock_state_dict():
         msg = SimpleNamespace(xyz=[0.1, 0.05, 0.2])
         ang_msgs.append((ts, msg))
 
-    # VehicleAttitude: 正常姿态（单位四元数，小倾斜）
+    # VehicleAttitude: 正常姿态（单位四元数，与角速度一致的微小旋转）
+    # 角速度 omega = [0.1, 0.05, 0.2] rad/s, dt = 0.1s
+    # 每步旋转角 = |omega| * dt = sqrt(0.01+0.0025+0.04) * 0.1 ≈ 0.0229 rad
     att_msgs = []
+    omega_mag = math.sqrt(0.1**2 + 0.05**2 + 0.2**2)  # ≈ 0.229
     for i in range(10):
         ts = ts_base + i * 100000000
-        # 约 5 度倾斜
-        msg = SimpleNamespace(q=[0.9988, 0.0436, 0.02, 0.0])
+        angle = omega_mag * 0.1 * i  # 累积旋转角
+        half_a = angle / 2
+        # 旋转轴方向 = omega / |omega|
+        ax_n = 0.1 / omega_mag
+        ay_n = 0.05 / omega_mag
+        az_n = 0.2 / omega_mag
+        msg = SimpleNamespace(q=[
+            math.cos(half_a),
+            math.sin(half_a) * ax_n,
+            math.sin(half_a) * ay_n,
+            math.sin(half_a) * az_n,
+        ])
         att_msgs.append((ts, msg))
+
+    # SensorsStatusImu: 正常传感器一致性
+    imu_msgs = []
+    for i in range(10):
+        ts = ts_base + i * 100000000
+        msg = SimpleNamespace(
+            accel_inconsistency_m_s_s=[0.01],
+            gyro_inconsistency_rad_s=[0.005],
+        )
+        imu_msgs.append((ts, msg))
+
+    # VehicleGpsPosition: 原始 GPS
+    gps_msgs = []
+    for i in range(10):
+        ts = ts_base + i * 100000000
+        msg = SimpleNamespace(lat=473977420, lon=85455940)
+        gps_msgs.append((ts, msg))
+
+    # VehicleGlobalPosition: 估计全球位置（与 GPS 一致）
+    global_pos_msgs = []
+    for i in range(10):
+        ts = ts_base + i * 100000000
+        msg = SimpleNamespace(lat=47.3977420, lon=8.5455940)
+        global_pos_msgs.append((ts, msg))
 
     return {
         "/VehicleLocalPosition_PubSubTopic": pos_msgs,
         "/VehicleAcceleration_PubSubTopic": acc_msgs,
         "/VehicleAngularVelocity_PubSubTopic": ang_msgs,
         "/VehicleAttitude_PubSubTopic": att_msgs,
+        "/SensorsStatusImu_PubSubTopic": imu_msgs,
+        "/VehicleGpsPosition_PubSubTopic": gps_msgs,
+        "/VehicleGlobalPosition_PubSubTopic": global_pos_msgs,
     }
 
 
 def make_violation_state_dict():
-    """构造违规 state_dict — 速度超限"""
+    """构造违规 state_dict — 多种违规"""
     ts_base = 1000000000000
     pos_msgs = []
     for i in range(10):
@@ -70,11 +110,33 @@ def make_violation_state_dict():
         )
         pos_msgs.append((ts, msg))
 
+    # 高 jerk 加速度（急剧变化）
+    acc_msgs = []
+    for i in range(10):
+        ts = ts_base + i * 100000000
+        ax = 5.0 * (i % 2)  # 交替 0 和 5，产生高 jerk
+        msg = SimpleNamespace(xyz=[ax, 3.0 * (i % 2), -9.8])
+        acc_msgs.append((ts, msg))
+
+    # Position hold 违规（大漂移）
+    hold_msgs = []
+    for i in range(10):
+        ts = ts_base + i * 100000000
+        msg = SimpleNamespace(
+            x=float(i) * 0.5, y=float(i) * 0.3, z=-10.0 + i * 0.1,
+            vx=1.0, vy=0.5, vz=0.1,
+            dist_bottom=10.0,
+        )
+        hold_msgs.append((ts, msg))
+
     return {
         "/VehicleLocalPosition_PubSubTopic": pos_msgs,
-        "/VehicleAcceleration_PubSubTopic": [],
+        "/VehicleAcceleration_PubSubTopic": acc_msgs,
         "/VehicleAngularVelocity_PubSubTopic": [],
         "/VehicleAttitude_PubSubTopic": [],
+        "/SensorsStatusImu_PubSubTopic": [],
+        "/VehicleGpsPosition_PubSubTopic": [],
+        "/VehicleGlobalPosition_PubSubTopic": [],
     }
 
 
@@ -164,15 +226,14 @@ def main():
         ("Section 4: Velocity Z limits", "04_velocity_z.yaml"),
         ("Section 5: Tilt angle limits", "05_tilt_angle.yaml"),
         ("Section 6: Angular rate limits", "06_angular_rate.yaml"),
+        ("Section 7: Jerk (temporal derivative)", "08_jerk.yaml"),
+        ("Section 8: Velocity-position consistency", "09_velocity_position.yaml"),
+        ("Section 9: Attitude-angular consistency", "10_attitude_angular.yaml"),
+        ("Section 10: IMU sensor inconsistency", "11_imu_inconsistency.yaml"),
+        ("Section 11: GPS discrepancy", "12_gps_discrepancy.yaml"),
+        ("Section 12: Position hold", "13_position_hold.yaml"),
     ]
-    not_covered = [
-        "Section 7: Jerk (temporal derivative over series)",
-        "Section 8: Velocity-position consistency (sequential pairs)",
-        "Section 9: Attitude-angular consistency (cross-topic temporal)",
-        "Section 10: IMU sensor inconsistency (external sensor field)",
-        "Section 11: GPS discrepancy (cross-topic matching)",
-        "Section 12: Position hold (statistical aggregation)",
-    ]
+    not_covered = []
 
     total = len(covered) + len(not_covered)
     pct = len(covered) / total * 100
@@ -180,14 +241,13 @@ def main():
     print(f"\n  Covered by OracleIR ({len(covered)}/{total} = {pct:.0f}%):")
     for desc, fname in covered:
         print(f"    [OK] {desc} → {fname}")
-    print(f"\n  Not yet covered ({len(not_covered)}/{total}):")
-    for desc in not_covered:
-        print(f"    [--] {desc}")
+    if not_covered:
+        print(f"\n  Not yet covered ({len(not_covered)}/{total}):")
+        for desc in not_covered:
+            print(f"    [--] {desc}")
     print()
-    print("  Note: Uncovered sections require temporal/statistical window")
-    print("  semantics (derivative, sequential pairs, aggregation).")
-    print("  These can be added as window.type extensions without")
-    print("  changing the core OracleIR schema.")
+    print("  All 13 sections of px4.py are now expressed as OracleIR.")
+    print("  Window types used: every_sample, sequential_pairs, aggregation.")
 
     # 最终结论
     print()

@@ -1,0 +1,33 @@
+id: px4.fw.throttle_landing
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: throttle
+    topic: /ActuatorControls_PubSubTopic
+    field: control
+    index: 3
+    unit: norm
+
+parameters:
+  - name: FW_THR_LND_MAX
+    source: px4.parameters
+    unit: norm
+    default: 1.0
+
+assertions:
+  - expr: "throttle <= param(FW_THR_LND_MAX) + tolerance"
+    tolerance: 0.05
+    severity: warning
+    message: "Landing throttle {throttle:.2f} exceeds FW_THR_LND_MAX"
+
+window:
+  type: every_sample
+
+provenance:
+  - chunk_id: px4.parameter.FW_THR_LND_MAX
+    evidence: "Throttle limit during landing below throttle limit altitude"

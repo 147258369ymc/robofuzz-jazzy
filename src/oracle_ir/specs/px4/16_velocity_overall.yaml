@@ -1,0 +1,65 @@
+id: px4.velocity.overall_limits
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: vx
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vx
+    unit: m/s
+  - name: vy
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vy
+    unit: m/s
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+
+parameters:
+  - name: MPC_XY_VEL_ALL
+    source: px4.parameters
+    unit: m/s
+    default: -10.0
+  - name: MPC_Z_VEL_ALL
+    source: px4.parameters
+    unit: m/s
+    default: -3.0
+
+derived:
+  - name: horizontal_velocity
+    expr: "sqrt(vx * vx + vy * vy)"
+    unit: m/s
+  - name: vertical_speed
+    expr: "abs(vz)"
+    unit: m/s
+  - name: xy_limit
+    expr: "abs(param(MPC_XY_VEL_ALL))"
+    unit: m/s
+  - name: z_limit
+    expr: "abs(param(MPC_Z_VEL_ALL))"
+    unit: m/s
+
+assertions:
+  - expr: "horizontal_velocity <= xy_limit + tolerance"
+    tolerance: 0.5
+    severity: error
+    message: "Overall XY velocity limit violated: {horizontal_velocity:.2f} m/s"
+  - expr: "vertical_speed <= z_limit + tolerance"
+    tolerance: 0.3
+    severity: error
+    message: "Overall Z velocity limit violated: {vertical_speed:.2f} m/s"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.MPC_XY_VEL_ALL
+    evidence: "Overall Horizontal Velocity Limit"
+  - chunk_id: px4.parameter.MPC_Z_VEL_ALL
+    evidence: "Overall Vertical Velocity Limit"

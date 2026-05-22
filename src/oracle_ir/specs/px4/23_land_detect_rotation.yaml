@@ -1,0 +1,55 @@
+id: px4.land_detect.mc_rotation
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: omega_x
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 0
+    unit: rad/s
+  - name: omega_y
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 1
+    unit: rad/s
+  - name: omega_z
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: LNDMC_ROT_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 20.0
+
+constants:
+  - name: RAD2DEG
+    value: 57.2957795
+    unit: ""
+
+derived:
+  - name: rotation_rate
+    expr: "sqrt(omega_x*omega_x + omega_y*omega_y + omega_z*omega_z) * RAD2DEG"
+    unit: deg/s
+
+assertions: []
+
+window:
+  type: every_sample
+
+feedback:
+  - name: land_detect_rotation
+    metric: "rotation_rate"
+    direction: maximize
+    min_threshold: 1.0
+
+provenance:
+  - chunk_id: px4.parameter.LNDMC_ROT_MAX
+    evidence: "Multicopter max rotation for land detection"
