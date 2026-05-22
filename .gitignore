@@ -14,3 +14,4 @@ src/err
 *.bag/
 analysis/
 logs_original/
+preprocessed/
