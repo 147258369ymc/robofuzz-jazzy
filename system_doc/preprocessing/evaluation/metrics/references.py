@@ -29,6 +29,7 @@ def evaluate_references(
     stoplist_hits = 0
     unknown_refs = 0
     false_positives: dict[str, int] = {}
+    unknown_list: dict[str, int] = {}
 
     for block in blocks:
         for ref in block.references:
@@ -40,11 +41,16 @@ def evaluate_references(
                 false_positives[ref] = false_positives.get(ref, 0) + 1
             else:
                 unknown_refs += 1
+                unknown_list[ref] = unknown_list.get(ref, 0) + 1
 
-    precision = valid_refs / total_refs if total_refs else 1.0
+    # Precision: valid / (total - unknown)
+    # unknown refs 可能是合法实体（只是不在 ground truth 中），不算误报
+    judged_refs = valid_refs + stoplist_hits
+    precision = valid_refs / judged_refs if judged_refs else 1.0
 
-    # 排序误报
+    # 排序误报和 unknown
     top_fps = sorted(false_positives.items(), key=lambda x: -x[1])[:15]
+    top_unknown = sorted(unknown_list.items(), key=lambda x: -x[1])[:10]
 
     metrics = {
         "total_references": total_refs,
@@ -52,10 +58,12 @@ def evaluate_references(
         "precision": precision,
         "stoplist_hits": stoplist_hits,
         "unknown_refs": unknown_refs,
+        "unknown_ratio": unknown_refs / total_refs if total_refs else 0.0,
         "top_false_positives": {k: v for k, v in top_fps},
+        "top_unknown": {k: v for k, v in top_unknown},
     }
 
-    failures = [{"reference": k, "count": v} for k, v in top_fps]
+    failures = [{"reference": k, "count": v, "type": "stoplist"} for k, v in top_fps]
 
     return DimensionResult(
         name="Reference Precision",

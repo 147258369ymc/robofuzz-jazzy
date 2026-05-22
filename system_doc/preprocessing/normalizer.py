@@ -12,7 +12,7 @@ from .chunkers.base import RawChunk
 # 常见实体名称模式（用于提取引用关系）
 _ENTITY_PATTERNS = [
     re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b"),       # CamelCase: VehicleLocalPosition
-    re.compile(r"\b([A-Z][A-Z0-9_]{3,})\b"),                 # UPPER_CASE: MPC_VEL_MANUAL (至少4字符)
+    re.compile(r"\b([A-Z][A-Z0-9]*_[A-Z0-9_]{2,})\b"),      # UPPER_WITH_UNDERSCORE: MPC_VEL_MANUAL (必须含下划线)
     re.compile(r"\b((?:VEHICLE_CMD|MAV_CMD)_[A-Z_]+)\b"),    # 命令名
 ]
 

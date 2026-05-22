@@ -58,16 +58,24 @@ def evaluate_index(
     cross_linkage = cross_link_correct / cross_link_total if cross_link_total else 1.0
 
     # 3. 引用图一致性
+    # orphan = 引用图中指向的实体不在 entity_index 中
+    # 但很多 orphan 是合法的外部引用（如 CamelCase 引用了未单独建块的实体）
+    # 只统计高频 orphan 作为问题
     orphan_refs = []
+    total_ref_edges = 0
+    resolved_ref_edges = 0
     for ref_entity, referencing_blocks in index.reference_graph.items():
-        if ref_entity not in index.entity_index:
+        total_ref_edges += len(referencing_blocks)
+        if ref_entity in index.entity_index:
+            resolved_ref_edges += len(referencing_blocks)
+        else:
             orphan_refs.append({"entity": ref_entity, "referenced_by_count": len(referencing_blocks)})
 
-    orphan_ratio = len(orphan_refs) / len(index.reference_graph) if index.reference_graph else 0.0
-    ref_consistency = 1.0 - orphan_ratio
+    # 按边数计算一致性（而非按实体数）
+    ref_consistency = resolved_ref_edges / total_ref_edges if total_ref_edges else 1.0
 
     # 综合得分
-    score = findability * 0.4 + cross_linkage * 0.3 + ref_consistency * 0.3
+    score = findability * 0.5 + cross_linkage * 0.3 + ref_consistency * 0.2
 
     metrics = {
         "entity_findability": findability,

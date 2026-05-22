@@ -157,8 +157,10 @@ class PreprocessingPipeline:
 
         chunker = self._chunkers[doc_type]
 
-        # 应用文件级参数覆盖
+        # 如果有文件级参数覆盖，创建新实例避免污染共享状态
         if file_config and file_config.chunker_params:
+            import copy
+            chunker = copy.copy(chunker)
             for key, val in file_config.chunker_params.items():
                 if hasattr(chunker, key):
                     setattr(chunker, key, val)

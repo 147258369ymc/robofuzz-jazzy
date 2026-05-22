@@ -21,19 +21,19 @@ def _register_validator(tag: str):
 
 @_register_validator("velocity_constraint")
 def _validate_velocity(block: SpecBlock) -> bool:
-    """严格验证：名称含 VEL/SPEED 或 unit 含速度单位"""
-    name_ok = bool(re.search(r"(VEL|SPEED|AIRSPEED)", block.name, re.I))
+    """严格验证：名称含 VEL/SPEED/AIRSPD 且有约束语义"""
+    name_ok = bool(re.search(r"(VEL|SPEED|AIRSPD)", block.name, re.I))
     unit_ok = block.structured_fields.get("units", "") in ("m/s", "km/h", "kn", "cm/s")
     unit_ok2 = block.structured_fields.get("unit", "") in ("m/s", "km/h", "kn", "cm/s")
-    desc_ok = bool(re.search(r"(velocity|speed)\s*(max|min|limit|setpoint)", block.natural_language, re.I))
-    return name_ok or unit_ok or unit_ok2 or desc_ok
+    return name_ok or unit_ok or unit_ok2
 
 
 @_register_validator("attitude_constraint")
 def _validate_attitude(block: SpecBlock) -> bool:
-    name_ok = bool(re.search(r"(ROLL|PITCH|YAW|ATT|TILT)", block.name, re.I))
+    name_ok = bool(re.search(r"(ROLL|PITCH|YAW|ATT|TILT|MAN_[RPY])", block.name, re.I))
     unit_ok = block.structured_fields.get("units", "") in ("rad", "deg", "rad/s", "deg/s")
-    return name_ok or unit_ok
+    unit_ok2 = block.structured_fields.get("unit", "") in ("rad", "deg", "rad/s", "deg/s")
+    return name_ok or unit_ok or unit_ok2
 
 
 @_register_validator("flight_mode")

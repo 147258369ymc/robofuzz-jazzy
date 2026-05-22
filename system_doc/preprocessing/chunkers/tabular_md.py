@@ -122,9 +122,12 @@ class TableMarkdownChunker(BaseChunker):
             if not has_table and len(sec["lines"]) < 3:
                 continue
             chunk_type = self._infer_section_type(sec["heading"], text)
+            # 清理 heading 名称：去掉 "(ID: xx)"、"[DEPRECATED]" 等后缀
+            clean_name = re.sub(r"\s*\((?:ID:\s*)?\d+\)\s*", "", sec["heading"]).strip()
+            clean_name = re.sub(r"\s*\[.*?\]\s*$", "", clean_name).strip()
             chunks.append(RawChunk(
                 content=text,
-                name=sec["heading"],
+                name=clean_name,
                 chunk_type=chunk_type,
                 index=len(chunks),
                 parent_heading=parent_heading,

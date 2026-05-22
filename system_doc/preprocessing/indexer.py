@@ -66,17 +66,17 @@ class IndexBuilder:
 
     # 自动语义标签规则（可扩展）
     TAG_RULES: list[tuple[re.Pattern, str]] = [
-        (re.compile(r"(velocity|vel_max|vel_min|speed\s*(limit|max|min))", re.I), "velocity_constraint"),
-        (re.compile(r"(attitude|roll\s*max|pitch\s*max|yaw\s*rate)", re.I), "attitude_constraint"),
-        (re.compile(r"(altitude|height|alt_max|alt_min)", re.I), "altitude_constraint"),
-        (re.compile(r"(position|pos_max|waypoint|lat|lon|gps)", re.I), "position_constraint"),
-        (re.compile(r"(flight.?mode|offboard|manual\s*control|posctl|altctl|stabilized)", re.I), "flight_mode"),
+        (re.compile(r"(MPC_.*VEL|MPC_XY_VEL|FW_AIRSPD_M[AI][XN]|vel_max|vel_min|VEL_MANUAL|XY_VEL_MAX)", re.I), "velocity_constraint"),
+        (re.compile(r"(MC_ROLL|MC_PITCH|MC_YAW|MAN_[RPY]_MAX|ATT_.*MAX|TILT_MAX|FW_[RPY]_LIM)", re.I), "attitude_constraint"),
+        (re.compile(r"(altitude|height|alt_max|alt_min|climb_rate|sink_rate|MPC_Z_)", re.I), "altitude_constraint"),
+        (re.compile(r"(position\s*(max|min|limit|error)|waypoint|pos_max|pos_min|gps\s*(loss|fail))", re.I), "position_constraint"),
+        (re.compile(r"(flight.?mode|offboard|manual\s*control|posctl|altctl|stabilized|FLTMODE)", re.I), "flight_mode"),
         (re.compile(r"\b(imu|gyro|accel|baro|mag|lidar|sonar)\b", re.I), "sensor"),
         (re.compile(r"(timeout|timer|delay|interval|deadband)", re.I), "temporal"),
         (re.compile(r"(battery|voltage|current|power|energy)", re.I), "power"),
-        (re.compile(r"(geofence|fence|boundary|limit)", re.I), "geofence"),
+        (re.compile(r"(geofence|geo_fence|fence_act|GF_)", re.I), "geofence"),
         (re.compile(r"(motor|actuator|servo|pwm|thrust)", re.I), "actuator"),
-        (re.compile(r"(failsafe|fail_act|emergency|abort)", re.I), "safety"),
+        (re.compile(r"(failsafe|fail_act|emergency|abort|CBRK)", re.I), "safety"),
     ]
 
     def build(self, blocks: list[SpecBlock]) -> SpecIndex:
@@ -109,8 +109,8 @@ class IndexBuilder:
         return index
 
     def _auto_tag(self, block: SpecBlock) -> list[str]:
-        """基于规则自动生成语义标签"""
-        text = f"{block.name} {block.natural_language}"
+        """基于规则自动生成语义标签 — 只检查 name 以避免 NL 中的交叉引用干扰"""
+        text = block.name
         tags = set()
         for pattern, tag in self.TAG_RULES:
             if pattern.search(text):

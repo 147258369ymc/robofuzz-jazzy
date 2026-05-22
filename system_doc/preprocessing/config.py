@@ -46,8 +46,16 @@ PX4_CONFIG = TargetConfig(
             chunker_override="tabular_markdown",
             chunker_params={"row_level_chunking": True},
         ),
-        FileConfig("uorb_message_reference.md"),
-        FileConfig("vehicle_command_reference.md"),
+        FileConfig(
+            "uorb_message_reference.md",
+            chunker_override="tabular_markdown",
+            chunker_params={"row_level_chunking": True},
+        ),
+        FileConfig(
+            "vehicle_command_reference.md",
+            chunker_override="tabular_markdown",
+            chunker_params={"row_level_chunking": True},
+        ),
         FileConfig("mavlink_common_messages.md"),
         FileConfig(
             "mavlink_parameter_protocol.md",

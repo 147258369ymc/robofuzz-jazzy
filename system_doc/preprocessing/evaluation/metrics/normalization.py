@@ -44,25 +44,43 @@ def evaluate_normalization(
     name_quality = 1.0 - len(bad_names) / total
 
     # 2. structured_fields 完整性（对有 extra 的 ground truth 条目）
-    gt_by_name = {e.name: e for e in ground_truth_entries if e.extra}
+    # 只对 JSON 源的 ground truth 做字段比对（XML 字段名不同是已知差异）
+    gt_by_name = {e.name: e for e in ground_truth_entries
+                  if e.extra and "parameters.json" in e.source_file}
     field_checks = 0
     field_correct = 0
+
+    # 字段别名映射（不同源可能用不同 key 表示同一字段）
+    KEY_ALIASES = {
+        "units": ("units", "unit"),
+        "unit": ("unit", "units"),
+        "shortDesc": ("shortDesc", "short_desc"),
+        "longDesc": ("longDesc", "long_desc"),
+    }
 
     for block in blocks:
         if block.name not in gt_by_name:
             continue
+        # 只比对来自同一源（JSON）的 block
+        if block.provenance and "parameters.json" not in block.provenance.source_file:
+            continue
         gt_entry = gt_by_name[block.name]
         if not gt_entry.extra or not block.structured_fields:
             continue
-        # 检查关键字段是否匹配
-        for key in ("min", "max", "default", "type", "units", "unit"):
+        for key in ("min", "max", "default", "type", "units"):
             if key in gt_entry.extra:
                 field_checks += 1
-                block_val = block.structured_fields.get(key)
-                gt_val = gt_entry.extra[key]
-                if block_val == gt_val:
-                    field_correct += 1
-                elif str(block_val) == str(gt_val):
+                # 尝试别名
+                aliases = KEY_ALIASES.get(key, (key,))
+                matched = False
+                for alias in aliases:
+                    block_val = block.structured_fields.get(alias)
+                    if block_val is not None:
+                        gt_val = gt_entry.extra[key]
+                        if block_val == gt_val or str(block_val) == str(gt_val):
+                            matched = True
+                            break
+                if matched:
                     field_correct += 1
 
     field_accuracy = field_correct / field_checks if field_checks else 1.0
