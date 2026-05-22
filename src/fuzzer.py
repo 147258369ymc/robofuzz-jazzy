@@ -19,7 +19,7 @@ import subprocess as sp
 import signal
 import pprint
 import importlib
-from collections import deque
+from collections import deque  # kept for non-PX4 targets
 from copy import deepcopy
 import json
 import shutil
@@ -55,6 +55,41 @@ from ros2_fuzzer.process_handling import FuzzedNodeHandler
 from std_msgs.msg import Bool, String
 from tracer import APITracer
 from turtlesim.msg import Pose
+
+
+class SeedQueue:
+    """Quality-aware seed queue that replaces FIFO deque.
+
+    Instead of always popping the oldest seed (which causes low-quality early
+    seeds to dominate), this queue uses random selection so that high-quality
+    seeds accumulated later have equal chance of being picked.
+
+    Capacity is bounded: when full, the oldest entry is evicted.
+    """
+
+    MAX_SIZE = 50
+
+    def __init__(self):
+        self._items = []  # list of seeds
+
+    def append(self, seed):
+        if len(self._items) >= self.MAX_SIZE:
+            # Evict oldest (index 0) to make room
+            self._items.pop(0)
+        self._items.append(seed)
+
+    def popleft(self):
+        """Pick a random seed and remove it (replaces FIFO popleft)."""
+        if not self._items:
+            raise IndexError("pop from empty queue")
+        idx = random.randint(0, len(self._items) - 1)
+        return self._items.pop(idx)
+
+    def __len__(self):
+        return len(self._items)
+
+    def __bool__(self):
+        return len(self._items) > 0
 
 
 class Fuzzer:
@@ -135,7 +170,11 @@ class Fuzzer:
     def init_queue(self):
         print("[*] Initializing test case queue")
 
-        self.queue = deque()
+        # PX4 uses quality-aware SeedQueue; others keep FIFO deque
+        if self.config.px4_sitl:
+            self.queue = SeedQueue()
+        else:
+            self.queue = deque()
 
         if self.config.px4_sitl:
             if self.config.fuzz_seed:

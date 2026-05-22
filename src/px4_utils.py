@@ -392,7 +392,7 @@ def get_init_manual_control_msg():
     # corresponds to joystick position
     msg.x = 0.0 # pitch [-1:1]
     msg.y = 0.0 # roll [-1:1]
-    msg.z = 0.75 # throttle [0:1] - 0.5 is neutral, but gently throttle upwards
+    msg.z = 0.5 # throttle [0:1] - 0.5 is neutral (hover)
     msg.r = 0.0 # yaw [-1:1]
 
     return msg

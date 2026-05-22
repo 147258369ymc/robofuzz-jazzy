@@ -688,19 +688,17 @@ class Scheduler:
         print("QUEUE LEN:", len(self.fuzzer.queue))
 
         if self.is_new_cycle:
-            try:
+            # Pick a seed from queue (random selection, not FIFO)
+            if len(self.fuzzer.queue) > 0:
                 self.msg_list = self.fuzzer.queue.popleft()
                 self.from_queue = True
                 self.num_msgs = len(self.msg_list)
-            except IndexError:
+            else:
                 self.msg_list = []
 
                 for i in range(self.num_msgs):
                     msg = self.msg_type_class()
                     self.msg_list.append(msg)
-
-                # print(len(self.msg_list))
-                # print("INIT_MSG_LIST:", self.msg_list)
 
                 self.from_queue = False
 
@@ -732,41 +730,32 @@ class Scheduler:
                         obj = reduce(getattr, attr_list[:-1], msg)
                         setattr(obj, attr_leaf, data_val)
 
-                # for msg in self.msg_list:
-                    # print(msg)
-
         else:
-            msg_idx = random.choice(range(self.num_msgs))
-            msg_to_mutate = self.msg_list[msg_idx]
-
+            # --- Block mutation for PX4 POSCTL ---
+            # In POSCTL mode, single-message mutations are ineffective because
+            # the position controller brakes immediately when stick returns to
+            # center. Mutate a BLOCK of consecutive messages with the same value
+            # to simulate sustained stick input.
+            block_len = random.randint(5, min(30, self.num_msgs // 3))
+            start_idx = random.randint(0, self.num_msgs - block_len)
 
             field = random.choice(self.msg_field_list)
             dtype = field[-1]
             attr_list = field[:-1]
             attr_leaf = attr_list[-1]
 
-            print(f"mutate {field} of {msg_idx}-th message from the sequence")
-
-            data_val = reduce(
-                getattr, attr_list, msg_to_mutate
-            )  # original data
-
-            print("data before rand mutation:", data_val)
-
             if field[0] == "z":
                 data_val = mutator.gen_int_in_range(0, 1000) / 1000
             else:
                 data_val = mutator.gen_int_in_range(-1000, 1000) / 1000
-            print("data after rand mutation:", data_val)
 
-            msg_mutated = None
-            if data_val is not None:
-                msg_mutated = deepcopy(msg_to_mutate)
+            print(f"block mutate {field} msgs[{start_idx}:{start_idx+block_len}] = {data_val}")
+
+            for idx in range(start_idx, start_idx + block_len):
+                msg_mutated = deepcopy(self.msg_list[idx])
                 obj = reduce(getattr, attr_list[:-1], msg_mutated)
                 setattr(obj, attr_leaf, data_val)
-                # fuzzer.fuzz_and_check(self.fuzzer, nmsg, frame)
-
-                self.msg_list[msg_idx] = msg_mutated
+                self.msg_list[idx] = msg_mutated
 
         self.round_cnt += 1
         return (self.msg_list, frame)
