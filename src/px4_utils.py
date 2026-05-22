@@ -311,21 +311,18 @@ class Px4BridgeNode:
             print("[offboard controller] sending:", msg)
 
     def put_in_air(self):
-        # Climb to ~3m: z=700 (moderate throttle) for 40 iterations (4s)
-        # Original was z=800 for 100 iterations (11s) which is overkill.
-        # 3m buffer is safe: PX4 POSCTL limits descent to MPC_Z_VEL_MAX_DN
-        # (default 1 m/s) and has ground-proximity deceleration.
-        for i in range(40):
+        # Climb with z=900 (strong throttle) for 50 iterations (5s).
+        # Reaches ~5m in POSCTL, giving safe buffer for fuzz exploration.
+        for i in range(50):
             self.master.mav.manual_control_send(
                 self.master.target_system,
                 0,
                 0,
-                700,
+                900,
                 0,
                 0
             )
             time.sleep(0.1)
-        time.sleep(0.5)
 
     def mav_set_flight_mode(self, mode_str="MANUAL"):
         # Set manual mode
