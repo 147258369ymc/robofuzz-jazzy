@@ -680,6 +680,18 @@ def fuzz_msg(fuzzer, fuzz_targets):
             fbk = Feedback("gps_lon_inconsistency", FeedbackType.INC)
             fbk_list.append(fbk)
 
+            # Deep physical oracle feedback metrics
+            fbk = Feedback("max_tilt_angle", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_xy_velocity", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_angular_rate", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_jerk", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC)
+            fbk_list.append(fbk)
+
         elif fuzzer.config.tb3_hitl:
             field_whitelist = [
                 ["linear", "x", np.dtype("float64")],
