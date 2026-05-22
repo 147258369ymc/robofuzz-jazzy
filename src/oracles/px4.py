@@ -288,8 +288,14 @@ def check(config, msg_list, state_dict, feedback_list):
 
     # =================================================================
     # Section 7: Jerk Limit (derivative of acceleration)
+    # MPC_JERK_MAX is a trajectory planner constraint, only meaningful
+    # in modes where the trajectory generator is active (OFFBOARD, AUTO).
+    # In MANUAL/POSCTL/ALTCTL the pilot has direct stick control and
+    # jerk is not rate-limited by the firmware.
     # =================================================================
     max_jerk_val = 0.0
+    jerk_applicable = config.flight_mode in ("OFFBOARD", "AUTO_MISSION",
+                                             "AUTO_LOITER", "AUTO_RTL")
     if len(vehicle_acceleration_list) >= 4:
         # 3-sample moving average to smooth noise before differentiation
         acc_smooth = []
@@ -317,11 +323,13 @@ def check(config, msg_list, state_dict, feedback_list):
             jerk_hor = math.sqrt(jerk_x * jerk_x + jerk_y * jerk_y)
             max_jerk_val = max(max_jerk_val, jerk_hor)
 
-            jerk_limit = thr["MPC_JERK_MAX"] + TOL_JERK
-            if jerk_hor > jerk_limit:
-                errs.append(
-                    f"{ts_curr} MPC_JERK_MAX violated: {jerk_hor:.1f} > {jerk_limit:.1f} m/s³"
-                )
+            if jerk_applicable:
+                jerk_limit = thr["MPC_JERK_MAX"] + TOL_JERK
+                if jerk_hor > jerk_limit:
+                    errs.append(
+                        f"{ts_curr} MPC_JERK_MAX violated: "
+                        f"{jerk_hor:.1f} > {jerk_limit:.1f} m/s³"
+                    )
 
     # =================================================================
     # Section 8: Velocity-Position Consistency

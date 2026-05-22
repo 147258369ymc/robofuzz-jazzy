@@ -69,6 +69,12 @@ class TableMarkdownChunker(BaseChunker):
                     if j < len(cells):
                         row_dict[h] = cells[j]
                 name = cells[0] if cells else f"row_{idx}"
+                # 如果名称是纯数字，加入 parent_heading 上下文
+                if name.isdigit() and current_heading:
+                    # 清理 heading 中的附加信息如 "(16)"
+                    clean_heading = re.sub(r"\s*\(.*?\)\s*$", "", current_heading).strip()
+                    clean_heading = re.sub(r"[^a-zA-Z0-9_]", "_", clean_heading)
+                    name = f"{clean_heading}.param{name}"
                 chunks.append(RawChunk(
                     content=line,
                     name=name,

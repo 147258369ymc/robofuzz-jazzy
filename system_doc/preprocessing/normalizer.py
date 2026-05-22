@@ -12,9 +12,27 @@ from .chunkers.base import RawChunk
 # 常见实体名称模式（用于提取引用关系）
 _ENTITY_PATTERNS = [
     re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b"),       # CamelCase: VehicleLocalPosition
-    re.compile(r"\b([A-Z][A-Z0-9_]{2,})\b"),                 # UPPER_CASE: MPC_VEL_MANUAL
+    re.compile(r"\b([A-Z][A-Z0-9_]{3,})\b"),                 # UPPER_CASE: MPC_VEL_MANUAL (至少4字符)
     re.compile(r"\b((?:VEHICLE_CMD|MAV_CMD)_[A-Z_]+)\b"),    # 命令名
 ]
+
+# 引用过滤集：类型名、通用关键词等不应被当作实体引用
+_REFERENCE_FILTER = {
+    # 数据类型
+    "FLOAT", "DOUBLE", "INT32", "UINT8", "UINT16", "UINT32", "UINT64",
+    "INT8", "INT16", "BOOL", "STRING", "CHAR", "VOID",
+    "Float", "Double", "Int32", "String", "Bool", "Float32", "Float64",
+    # 通用关键词
+    "ONLY", "READ", "WRITE", "THIS", "THAT", "THEN", "WHEN", "WITH",
+    "FROM", "INTO", "OVER", "UNDER", "AFTER", "BEFORE", "BETWEEN",
+    "TRUE", "FALSE", "NULL", "NONE", "TODO", "NOTE", "DEPRECATED",
+    "IMPORTANT", "WARNING", "REQUIRED", "OPTIONAL", "DEFAULT",
+    "ENABLED", "DISABLED", "UNKNOWN", "INVALID", "VALID",
+    "MAX", "MIN", "ALL", "ANY", "SET", "GET", "NEW", "OLD",
+    # 通用缩写
+    "GNSS", "ASCII", "JSON", "XML", "YAML", "GPIO", "SPI", "UART", "USB",
+    "NaN", "Inf", "Standard", "Category",
+}
 
 
 class Normalizer:
@@ -116,6 +134,6 @@ class Normalizer:
             for match in pattern.finditer(text):
                 entity = match.group(1)
                 # 过滤掉太短或太通用的
-                if len(entity) > 3 and entity != chunk.name:
+                if len(entity) > 3 and entity != chunk.name and entity not in _REFERENCE_FILTER:
                     refs.add(entity)
         return sorted(refs)[:20]  # 限制数量

@@ -1213,10 +1213,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     for fbk in fbk_list:
                         fp.write(f"{fbk.name} {fbk.value}\n")
 
-            # For TB3: do not reset feedback on error. With ~100% error rate,
-            # resetting would prevent feedback from ever accumulating.
-            # Let feedback naturally track max values across executions.
-            if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl):
+            # Do not reset feedback on error for targets with high error rates.
+            # Resetting would prevent feedback from ever accumulating, making
+            # coverage-guided exploration impossible.
+            if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl
+                    or fuzzer.config.px4_sitl):
                 if errs:
                     for fbk in fbk_list:
                         fbk.reset()
