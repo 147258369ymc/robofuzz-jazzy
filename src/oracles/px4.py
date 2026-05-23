@@ -432,9 +432,12 @@ def check(config, msg_list, state_dict, feedback_list):
     lon_diff = []
     skip = 0
     for (ts_gps_raw, gps_raw) in vehicle_gps_list:
+        if not vehicle_global_position_list:
+            break
         ts_diff = 9999999999999999999
         last_updated = 0
         updated = 0
+        gps_estim = vehicle_global_position_list[0][1]
 
         for i in range(skip, len(vehicle_global_position_list)):
             ts_gps_estim = vehicle_global_position_list[i][0]
