@@ -1255,11 +1255,26 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # Do not reset feedback on error for targets with high error rates.
             # Resetting would prevent feedback from ever accumulating, making
             # coverage-guided exploration impossible.
+            # Exception: reset crash-sensitive metrics when a crash is detected
+            # (attitude > 170 deg), as crash data poisons the feedback ceiling.
             if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl
                     or fuzzer.config.px4_sitl):
                 if errs:
                     for fbk in fbk_list:
                         fbk.reset()
+
+            if fuzzer.config.px4_sitl and errs:
+                is_crash = any("Attitude" in e and
+                    float(e.split()[-2]) > 170
+                    for e in errs if "Attitude" in e)
+                if is_crash:
+                    crash_metrics = {"max_angular_rate", "max_jerk",
+                                     "vel_pos_inconsistency",
+                                     "max_xy_velocity", "max_tilt_angle"}
+                    for fbk in fbk_list:
+                        if fbk.name in crash_metrics:
+                            fbk.reset()
+                    print("[feedback] crash detected, reset polluted metrics")
 
             if fuzzer.config.px4_sitl:
 
