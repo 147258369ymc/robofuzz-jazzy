@@ -240,8 +240,21 @@ class Px4BridgeNode:
             # Set mode
             self.mav_set_flight_mode(mode_str=mode_str)
 
-            # arm
-            self.send_command_arm()
+            # arm (with retry on failure)
+            try:
+                self.send_command_arm()
+            except RuntimeError as e:
+                print(f"[!] {e}, retrying after PX4 restart...")
+                self._restart_px4_stack()
+                self.init_mavlink()
+                self.mav_set_param(
+                    "COM_RC_LOSS_T", 30,
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+                msg = get_init_manual_control_msg()
+                self.send_command(msg)
+                time.sleep(1)
+                self.mav_set_flight_mode(mode_str=mode_str)
+                self.send_command_arm()  # second failure will propagate
 
         else:
             # The vehicle must be already be receiving a stream of target
@@ -263,7 +276,8 @@ class Px4BridgeNode:
             self.publish_arm_command()
             time.sleep(0.1)
 
-    def send_command_arm(self):
+    def send_command_arm(self, timeout=15):
+        """Arm the vehicle with a timeout. Raises RuntimeError if arm fails."""
         self.master.mav.command_long_send(
             self.master.target_system,
             self.master.target_component,
@@ -272,8 +286,26 @@ class Px4BridgeNode:
             1, 0, 0, 0, 0, 0, 0
         )
 
-        self.master.motors_armed_wait()
-        time.sleep(1)
+        t_start = time.time()
+        while time.time() - t_start < timeout:
+            msg = self.master.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            if msg and msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                time.sleep(1)
+                return
+        raise RuntimeError(f"Arm failed: timeout after {timeout}s")
+
+    def _restart_px4_stack(self):
+        """Kill PX4 + Gazebo and restart the SITL stack."""
+        print("[!] Restarting PX4 SITL stack...")
+        os.system("pkill -9 px4")
+        os.system("pkill -9 gzserver")
+        os.system("pkill -9 gz")
+        time.sleep(3)
+        import harness
+        proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        harness.run_px4_stack_sh(proj_root)
+        time.sleep(12)
+        print("[!] PX4 SITL stack restarted")
 
     def send_command_takeoff(self, alt=10.0):
         print(f"[+] (MAVLink) send takeoff command")
