@@ -299,7 +299,7 @@ class Px4BridgeNode:
         print("[!] Restarting PX4 SITL stack...")
         os.system("pkill -9 px4")
         os.system("pkill -9 gzserver")
-        os.system("pkill -9 gz")
+        os.system("pkill -9 -f 'gz model'")
         time.sleep(3)
         import harness
         proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

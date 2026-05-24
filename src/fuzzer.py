@@ -420,6 +420,8 @@ class Fuzzer:
 
         if self.config.px4_sitl:
             os.system("pkill px4")
+            os.system("pkill -9 gzserver")
+            os.system("pkill -9 -f 'gz model'")
             self.running = False
 
         elif self.config.tb3_hitl:
