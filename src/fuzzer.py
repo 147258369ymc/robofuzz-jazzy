@@ -419,9 +419,12 @@ class Fuzzer:
             return
 
         if self.config.px4_sitl:
-            os.system("pkill px4")
+            os.system("pkill -9 -f sitl_run")
+            os.system("pkill -9 px4")
             os.system("pkill -9 gzserver")
             os.system("pkill -9 -f 'gz model'")
+            os.system("pkill -9 -f px4-simulator")
+            time.sleep(2)
             self.running = False
 
         elif self.config.tb3_hitl:
