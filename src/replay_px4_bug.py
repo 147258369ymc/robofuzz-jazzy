@@ -140,7 +140,7 @@ class PX4BugReplayer:
         print(f"[+] 已连接 (sysid={self.master.target_system})")
 
     def reset_drone(self):
-        """重置无人机状态：DISARM → 重置Gazebo模型位姿 → 等待稳定"""
+        """重置无人机状态：DISARM → 重置Gazebo模型 → reboot PX4 → 重连"""
         m = self.master
         print("[*] 重置无人机状态...")
 
@@ -162,51 +162,91 @@ class PX4BugReplayer:
             )
             print("[+] Gazebo 模型位姿已重置")
         except (sp.TimeoutExpired, FileNotFoundError) as e:
-            print(f"[!] gz model 重置失败: {e}，尝试 MAVLink reboot")
-            m.mav.command_long_send(
-                m.target_system, m.target_component,
-                mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 0,
-                1, 0, 0, 0, 0, 0, 0
-            )
-            time.sleep(8)
-            # 重新连接
-            self.master.close()
-            self.connect()
-            return
+            print(f"[!] gz model 重置失败: {e}")
 
-        # 3. 等待 PX4 识别到 landed 状态
-        time.sleep(3)
-        print("[+] 无人机已重置，可以重新起飞")
+        # 3. Reboot PX4 固件 (重置EKF/commander/所有内部状态)
+        print("[*] Reboot PX4...")
+        m.mav.command_long_send(
+            m.target_system, m.target_component,
+            mavutil.mavlink.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 0,
+            1, 0, 0, 0, 0, 0, 0  # param1=1: reboot autopilot
+        )
+
+        # 4. 关闭旧连接，等待PX4重启 (EKF收敛需要~15秒)
+        time.sleep(15)
+        self.master.close()
+
+        # 5. 重新连接
+        print("[*] 重新连接 MAVLink...")
+        self.master = mavutil.mavlink_connection(self.connection_str)
+        self.master.wait_heartbeat(timeout=30)
+        if self.master.target_system == 0:
+            raise RuntimeError("PX4 reboot 后 heartbeat 超时")
+        print(f"[+] PX4 已重启并重连 (sysid={self.master.target_system})")
+
+        # 6. 等待 EKF 完全收敛 + micrortps 重新同步
+        print("[*] 等待 EKF 收敛...")
+        time.sleep(5)
 
     def arm_and_takeoff(self, alt=5.0):
-        """设置POSCTL模式 → 解锁 → 油门悬停等待起飞"""
+        """模拟fuzzer的完整起飞流程: COM_RC_LOSS_T → dummy RC → POSCTL → ARM → climb"""
         m = self.master
-        # 设置 POSCTL 模式 (main_mode=3, sub_mode=0)
+
+        # 1. 设置 COM_RC_LOSS_T = 30 防止 RC loss failsafe
+        print("[*] 设置 COM_RC_LOSS_T = 30")
+        m.mav.param_set_send(
+            m.target_system, m.target_component,
+            b'COM_RC_LOSS_T',
+            30.0,
+            mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        )
+        time.sleep(0.5)
+
+        # 2. 发送 dummy manual_control 让 PX4 识别到 RC 连接
+        print("[*] 发送 RC 信号...")
+        for _ in range(10):
+            self._send_rc(0, 0, 0.5, 0)
+            time.sleep(0.1)
+
+        time.sleep(1)
+
+        # 3. 设置 POSCTL 模式 (base_mode=1 custom, main_mode=3 POSCTL)
+        print("[*] 设置 POSCTL 模式")
         m.mav.command_long_send(
             m.target_system, m.target_component,
             mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
-            209, 3, 0, 0, 0, 0, 0  # base_mode=209(armed+custom), main=3
+            1,   # base_mode: MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+            3,   # main_mode: PX4_CUSTOM_MAIN_MODE_POSCTL
+            0, 0, 0, 0, 0
         )
         time.sleep(1)
 
-        # ARM
+        # 4. ARM
         print("[*] 解锁...")
         m.mav.command_long_send(
             m.target_system, m.target_component,
             mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
             1, 0, 0, 0, 0, 0, 0
         )
-        ack = m.recv_match(type='COMMAND_ACK', blocking=True, timeout=10)
-        if not ack or ack.result != 0:
-            raise RuntimeError(f"ARM 失败: {ack}")
+        # 等待 armed 状态
+        t_start = time.time()
+        while time.time() - t_start < 15:
+            hb = m.recv_match(type='HEARTBEAT', blocking=True, timeout=1)
+            if hb and hb.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+                break
+        else:
+            raise RuntimeError("ARM 超时")
         print("[+] 已解锁")
+        time.sleep(1)
 
-        # 发送悬停油门让飞机起飞
-        print(f"[*] 起飞中 (目标高度 ~{alt}m)...")
-        for _ in range(int(5 * self.rate_hz)):  # 5秒爬升
-            self._send_rc(0, 0, 0.7, 0)  # z=0.7 上升
-            time.sleep(self.interval)
+        # 5. 起飞: throttle=0.9 持续5秒 (与fuzzer的put_in_air一致)
+        print(f"[*] 起飞中 (throttle=0.9, 5秒)...")
+        for _ in range(50):
+            self._send_rc(0, 0, 0.9, 0)
+            time.sleep(0.1)
+
         # 稳定悬停2秒
+        print("[*] 悬停稳定中...")
         for _ in range(int(2 * self.rate_hz)):
             self._send_rc(0, 0, 0.5, 0)
             time.sleep(self.interval)
@@ -241,20 +281,23 @@ class PX4BugReplayer:
         print(f"\n[+] 回放完成: 共发送 {sent}/{total_msgs} 条消息")
 
     def hold_and_land(self):
-        """回放后悬停观察，然后降落"""
+        """回放后悬停观察，然后缓慢降落"""
         print("[*] 悬停观察 3 秒...")
         for _ in range(int(3 * self.rate_hz)):
             self._send_rc(0, 0, 0.5, 0)
             time.sleep(self.interval)
-        print("[*] 降落中...")
-        m = self.master
-        m.mav.command_long_send(
-            m.target_system, m.target_component,
-            mavutil.mavlink.MAV_CMD_NAV_LAND, 0,
-            0, 0, 0, 0, 0, 0, 0
+        # 缓慢降低油门 (0.5 → 0.35)，避免摔太快
+        print("[*] 缓降中...")
+        for _ in range(int(8 * self.rate_hz)):
+            self._send_rc(0, 0, 0.35, 0)
+            time.sleep(self.interval)
+        # DISARM
+        self.master.mav.command_long_send(
+            self.master.target_system, self.master.target_component,
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0,
+            0, 21196, 0, 0, 0, 0, 0  # force disarm
         )
-        time.sleep(5)
-        print("[+] 降落指令已发送")
+        print("[+] 已降落并锁定")
 
     def close(self):
         if self.master:
