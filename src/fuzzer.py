@@ -198,6 +198,37 @@ class Fuzzer:
 
             self.queue.append(msg_list)
 
+            # --- Boundary seed injection (方案C) ---
+            # Add extreme multi-axis seeds to help fuzzer reach oracle boundaries faster.
+            if self.config.use_mavlink:
+                boundary_seeds = [
+                    # Multi-axis extreme: max pitch + max roll → tilt > 45°
+                    {"x": 1.0, "y": 1.0, "z": 0.5, "r": 0.0},
+                    {"x": -1.0, "y": -1.0, "z": 0.5, "r": 0.0},
+                    {"x": 1.0, "y": -1.0, "z": 0.5, "r": 1.0},
+                    # Max throttle + full pitch → high velocity + altitude
+                    {"x": 1.0, "y": 0.0, "z": 1.0, "r": 0.0},
+                    {"x": 0.0, "y": 1.0, "z": 1.0, "r": 0.0},
+                    # Direction flip seed: first half +1, second half -1
+                    "flip_x",
+                    "flip_y",
+                ]
+                for seed_spec in boundary_seeds:
+                    seed_list = []
+                    for i in range(self.config.seqlen):
+                        msg = px4_utils.get_init_manual_control_msg()
+                        if isinstance(seed_spec, dict):
+                            msg.x = seed_spec["x"]
+                            msg.y = seed_spec["y"]
+                            msg.z = seed_spec["z"]
+                            msg.r = seed_spec["r"]
+                        elif seed_spec == "flip_x":
+                            msg.x = 1.0 if i < self.config.seqlen // 2 else -1.0
+                        elif seed_spec == "flip_y":
+                            msg.y = 1.0 if i < self.config.seqlen // 2 else -1.0
+                        seed_list.append(msg)
+                    self.queue.append(seed_list)
+
         elif self.config.tb3_sitl or self.config.tb3_hitl:
             # Seed pool: boundary values derived from TurtleBot3 Burger specs
             # Max linear velocity: 0.22 m/s, Max angular velocity: 2.84 rad/s
@@ -419,11 +450,22 @@ class Fuzzer:
             return
 
         if self.config.px4_sitl:
-            os.system("pkill -9 -f sitl_run")
-            os.system("pkill -9 px4")
-            os.system("pkill -9 gzserver")
-            os.system("pkill -9 -f 'gz model'")
-            os.system("pkill -9 -f px4-simulator")
+            for cmd in [
+                "pkill -9 -f sitl_run",
+                "pkill -9 px4",
+                "pkill -9 gzserver",
+                "pkill -9 -f 'gz [m]odel'",
+                "pkill -9 -f 'px4[-]simulator'",
+            ]:
+                try:
+                    sp.run(cmd, shell=True, timeout=5)
+                except sp.TimeoutExpired:
+                    print(f"[!] timeout: {cmd}")
+            # Remove PX4 instance lock so next start doesn't see stale daemon
+            try:
+                os.remove("/tmp/px4_lock-0")
+            except FileNotFoundError:
+                pass
             time.sleep(2)
             self.running = False
 
@@ -734,6 +776,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
             fbk = Feedback("max_jerk", FeedbackType.INC)
             fbk_list.append(fbk)
             fbk = Feedback("vel_pos_inconsistency", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("max_altitude", FeedbackType.INC)
+            fbk_list.append(fbk)
+            # Combined multi-axis feedback: guides toward simultaneous extreme inputs
+            fbk = Feedback("combined_tilt_velocity", FeedbackType.INC)
             fbk_list.append(fbk)
 
         elif fuzzer.config.tb3_hitl:
@@ -1072,17 +1119,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
             if fuzzer.config.test_rcl or fuzzer.config.test_cli:
                 wait_lock = ".waitlock"
 
-            (retval, failure_msg) = executor.execute(
-                mode,
-                msg_list,
-                frame,
-                frequency,
-                repeat,
-                pre_exec_list=pre_exec_list,
-                post_exec_list=post_exec_list,
-                pub_function=pub_function,
-                wait_lock=wait_lock,
-            )
+            try:
+                (retval, failure_msg) = executor.execute(
+                    mode,
+                    msg_list,
+                    frame,
+                    frequency,
+                    repeat,
+                    pre_exec_list=pre_exec_list,
+                    post_exec_list=post_exec_list,
+                    pub_function=pub_function,
+                    wait_lock=wait_lock,
+                )
+            except RuntimeError as e:
+                print(f"[!] Execution failed: {e}, skipping cycle")
+                fuzzer.kill_target()
+                continue
             # fuzzer.oh_.check_oracle() # will move everything into checker
             # (turtlesim, sros, ...)
             executor.clear_execution()
@@ -1275,7 +1327,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 if is_crash:
                     crash_metrics = {"max_angular_rate", "max_jerk",
                                      "vel_pos_inconsistency",
-                                     "max_xy_velocity", "max_tilt_angle"}
+                                     "max_xy_velocity", "max_tilt_angle",
+                                     "combined_tilt_velocity"}
                     for fbk in fbk_list:
                         if fbk.name in crash_metrics:
                             fbk.reset()
@@ -1297,13 +1350,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
                 if fuzzer.config.exp_pgfuzz:
                     # cycles better be smaller
-                    if scheduler.round_cnt == 8:
+                    if scheduler.round_cnt >= 8:
                         scheduler.round_cnt = 0
                         scheduler.cycle_cnt += 1
                         scheduler.is_new_cycle = True
                         print("--- cycle finished ---")
                 else:
-                    if scheduler.round_cnt == 5:
+                    if scheduler.round_cnt >= 5:
                         scheduler.round_cnt = 0
                         scheduler.cycle_cnt += 1
                         scheduler.is_new_cycle = True

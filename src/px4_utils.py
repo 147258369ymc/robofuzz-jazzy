@@ -88,9 +88,16 @@ class Px4BridgeNode:
 
     def init_mavlink(self):
         self.use_mavlink = True
-        # using mavlink for generic communication
+        # Close old connection to release the UDP port
+        if hasattr(self, 'master') and self.master:
+            try:
+                self.master.close()
+            except Exception:
+                pass
         self.master = mavutil.mavlink_connection("udpin:127.0.0.1:14550")
-        self.master.wait_heartbeat()
+        self.master.wait_heartbeat(timeout=30)
+        if self.master.target_system == 0:
+            raise RuntimeError("MAVLink heartbeat timeout")
 
     def timesync_callback(self, msg):
         self.ts = msg.timestamp
@@ -296,10 +303,17 @@ class Px4BridgeNode:
 
     def _restart_px4_stack(self):
         """Kill PX4 + Gazebo and restart the SITL stack."""
+        import subprocess as sp
         print("[!] Restarting PX4 SITL stack...")
-        os.system("pkill -9 px4")
-        os.system("pkill -9 gzserver")
-        os.system("pkill -9 -f 'gz model'")
+        for cmd in ["pkill -9 px4", "pkill -9 gzserver", "pkill -9 -f 'gz [m]odel'"]:
+            try:
+                sp.run(cmd, shell=True, timeout=5)
+            except sp.TimeoutExpired:
+                print(f"[!] timeout: {cmd}")
+        try:
+            os.remove("/tmp/px4_lock-0")
+        except FileNotFoundError:
+            pass
         time.sleep(3)
         import harness
         proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

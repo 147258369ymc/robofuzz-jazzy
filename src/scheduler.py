@@ -739,23 +739,82 @@ class Scheduler:
             block_len = random.randint(5, min(30, self.num_msgs // 3))
             start_idx = random.randint(0, self.num_msgs - block_len)
 
-            field = random.choice(self.msg_field_list)
-            dtype = field[-1]
-            attr_list = field[:-1]
-            attr_leaf = attr_list[-1]
+            roll = random.random()
 
-            if field[0] == "z":
-                data_val = mutator.gen_int_in_range(0, 1000) / 1000
+            if roll < 0.30:
+                # --- Multi-axis combined mutation (方案A) ---
+                # Mutate 2-3 fields simultaneously on the same block to
+                # produce combined effects (e.g., tilt > 45° needs x+y).
+                num_fields = random.randint(2, min(3, len(self.msg_field_list)))
+                fields = random.sample(self.msg_field_list, num_fields)
+                field_vals = []
+                for f in fields:
+                    if f[0] == "z":
+                        val = mutator.gen_int_in_range(0, 1000) / 1000
+                    else:
+                        val = mutator.gen_int_in_range(-1000, 1000) / 1000
+                    field_vals.append((f, val))
+
+                desc = " + ".join(f"{f[0]}={v}" for f, v in field_vals)
+                print(f"multi-axis mutate msgs[{start_idx}:{start_idx+block_len}] {desc}")
+
+                for idx in range(start_idx, start_idx + block_len):
+                    msg_mutated = deepcopy(self.msg_list[idx])
+                    for f, val in field_vals:
+                        attr_list = f[:-1]
+                        attr_leaf = attr_list[-1]
+                        obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                        setattr(obj, attr_leaf, val)
+                    self.msg_list[idx] = msg_mutated
+
+            elif roll < 0.50:
+                # --- Direction flip mutation (方案B) ---
+                # Insert a block followed by its opposite to produce high
+                # angular rate and jerk from rapid direction changes.
+                half_len = block_len // 2
+                field = random.choice(self.msg_field_list)
+                attr_list = field[:-1]
+                attr_leaf = attr_list[-1]
+
+                if field[0] == "z":
+                    val1 = mutator.gen_int_in_range(500, 1000) / 1000
+                    val2 = mutator.gen_int_in_range(0, 500) / 1000
+                else:
+                    val1 = mutator.gen_int_in_range(500, 1000) / 1000
+                    val2 = -val1
+
+                print(f"flip mutate {field} msgs[{start_idx}:{start_idx+block_len}] {val1} -> {val2}")
+
+                for idx in range(start_idx, start_idx + half_len):
+                    msg_mutated = deepcopy(self.msg_list[idx])
+                    obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                    setattr(obj, attr_leaf, val1)
+                    self.msg_list[idx] = msg_mutated
+                for idx in range(start_idx + half_len, start_idx + block_len):
+                    msg_mutated = deepcopy(self.msg_list[idx])
+                    obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                    setattr(obj, attr_leaf, val2)
+                    self.msg_list[idx] = msg_mutated
+
             else:
-                data_val = mutator.gen_int_in_range(-1000, 1000) / 1000
+                # --- Standard single-axis block mutation ---
+                field = random.choice(self.msg_field_list)
+                dtype = field[-1]
+                attr_list = field[:-1]
+                attr_leaf = attr_list[-1]
 
-            print(f"block mutate {field} msgs[{start_idx}:{start_idx+block_len}] = {data_val}")
+                if field[0] == "z":
+                    data_val = mutator.gen_int_in_range(0, 1000) / 1000
+                else:
+                    data_val = mutator.gen_int_in_range(-1000, 1000) / 1000
 
-            for idx in range(start_idx, start_idx + block_len):
-                msg_mutated = deepcopy(self.msg_list[idx])
-                obj = reduce(getattr, attr_list[:-1], msg_mutated)
-                setattr(obj, attr_leaf, data_val)
-                self.msg_list[idx] = msg_mutated
+                print(f"block mutate {field} msgs[{start_idx}:{start_idx+block_len}] = {data_val}")
+
+                for idx in range(start_idx, start_idx + block_len):
+                    msg_mutated = deepcopy(self.msg_list[idx])
+                    obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                    setattr(obj, attr_leaf, data_val)
+                    self.msg_list[idx] = msg_mutated
 
         self.round_cnt += 1
         return (self.msg_list, frame)

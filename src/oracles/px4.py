@@ -25,6 +25,10 @@ PX4_DEFAULTS = {
     "MC_ROLLRATE_MAX": 220.0,     # deg/s
     "MC_PITCHRATE_MAX": 220.0,    # deg/s
     "MC_YAWRATE_MAX": 200.0,      # deg/s
+    "FD_FAIL_R": 60.0,            # deg - FailureDetector max roll
+    "FD_FAIL_P": 60.0,            # deg - FailureDetector max pitch
+    "WV_YRATE_MAX": 90.0,         # deg/s - Weathervane max yaw rate
+    "LNDMC_ALT_MAX": -1.0,        # m - Max altitude (-1 = disabled)
 }
 
 # Simulation tolerances (to avoid false positives from numerical noise)
@@ -35,6 +39,9 @@ TOL_RATE = 5.0         # deg/s
 TOL_JERK = 2.0         # m/s³
 TOL_QUAT_NORM = 0.01
 TOL_VEL_POS = 0.1      # m
+TOL_FD = 5.0           # deg - FailureDetector tolerance
+TOL_WV_YRATE = 10.0    # deg/s - Weathervane yaw rate tolerance
+TOL_ALT = 5.0          # m - Altitude tolerance
 GROUND_DIST = 0.15     # m - threshold for ground contact filtering
 GROUND_TS_WINDOW = 0.25e9  # nanoseconds
 
@@ -72,6 +79,20 @@ def _quat_to_tilt_deg(q):
     cos_tilt = 1.0 - 2.0 * (qx * qx + qy * qy)
     cos_tilt = max(-1.0, min(1.0, cos_tilt))
     return math.degrees(math.acos(cos_tilt))
+
+
+def _quat_to_euler_deg(q):
+    """Compute roll and pitch (degrees) from PX4 quaternion [w, x, y, z]."""
+    qw, qx, qy, qz = q[0], q[1], q[2], q[3]
+    # Roll (x-axis rotation)
+    sinr_cosp = 2.0 * (qw * qx + qy * qz)
+    cosr_cosp = 1.0 - 2.0 * (qx * qx + qy * qy)
+    roll_deg = abs(math.degrees(math.atan2(sinr_cosp, cosr_cosp)))
+    # Pitch (y-axis rotation)
+    sinp = 2.0 * (qw * qy - qz * qx)
+    sinp = max(-1.0, min(1.0, sinp))
+    pitch_deg = abs(math.degrees(math.asin(sinp)))
+    return roll_deg, pitch_deg
 
 
 def _is_valid(value):
@@ -288,14 +309,10 @@ def check(config, msg_list, state_dict, feedback_list):
 
     # =================================================================
     # Section 7: Jerk Limit (derivative of acceleration)
-    # MPC_JERK_MAX is a trajectory planner constraint, only meaningful
-    # in modes where the trajectory generator is active (OFFBOARD, AUTO).
-    # In MANUAL/POSCTL/ALTCTL the pilot has direct stick control and
-    # jerk is not rate-limited by the firmware.
+    # Although MPC_JERK_MAX is a trajectory planner constraint for AUTO
+    # modes, excessive jerk in any mode indicates physical anomaly.
     # =================================================================
     max_jerk_val = 0.0
-    jerk_applicable = config.flight_mode in ("OFFBOARD", "AUTO_MISSION",
-                                             "AUTO_LOITER", "AUTO_RTL")
     if len(vehicle_acceleration_list) >= 4:
         # 3-sample moving average to smooth noise before differentiation
         acc_smooth = []
@@ -323,13 +340,12 @@ def check(config, msg_list, state_dict, feedback_list):
             jerk_hor = math.sqrt(jerk_x * jerk_x + jerk_y * jerk_y)
             max_jerk_val = max(max_jerk_val, jerk_hor)
 
-            if jerk_applicable:
-                jerk_limit = thr["MPC_JERK_MAX"] + TOL_JERK
-                if jerk_hor > jerk_limit:
-                    errs.append(
-                        f"{ts_curr} MPC_JERK_MAX violated: "
-                        f"{jerk_hor:.1f} > {jerk_limit:.1f} m/s³"
-                    )
+            jerk_limit = thr["MPC_JERK_MAX"] + TOL_JERK
+            if jerk_hor > jerk_limit:
+                errs.append(
+                    f"{ts_curr} MPC_JERK_MAX violated: "
+                    f"{jerk_hor:.1f} > {jerk_limit:.1f} m/s³"
+                )
 
     # =================================================================
     # Section 8: Velocity-Position Consistency
@@ -417,6 +433,56 @@ def check(config, msg_list, state_dict, feedback_list):
                 )
 
     # =================================================================
+    # Section 9b: Failure Detector - Roll/Pitch Limits (FD_FAIL_R/P)
+    # =================================================================
+    for (ts, att) in vehicle_attitude_list:
+        if _is_on_ground(ts, filter_ts_list):
+            continue
+        q = [att.q[j] for j in range(4)]
+        if not all(_is_valid(v) for v in q):
+            continue
+        roll_deg, pitch_deg = _quat_to_euler_deg(q)
+        fd_roll_limit = thr["FD_FAIL_R"] + TOL_FD
+        fd_pitch_limit = thr["FD_FAIL_P"] + TOL_FD
+        if roll_deg > fd_roll_limit:
+            errs.append(
+                f"{ts} FD_FAIL_R violated: roll {roll_deg:.1f} > {fd_roll_limit:.1f} deg"
+            )
+        if pitch_deg > fd_pitch_limit:
+            errs.append(
+                f"{ts} FD_FAIL_P violated: pitch {pitch_deg:.1f} > {fd_pitch_limit:.1f} deg"
+            )
+
+    # =================================================================
+    # Section 9c: Weathervane Yaw Rate Limit (WV_YRATE_MAX)
+    # =================================================================
+    for (ts, ang) in vehicle_angular_velocity_list:
+        if _is_on_ground(ts, filter_ts_list):
+            continue
+        if not _is_valid(ang.xyz[2]):
+            continue
+        yaw_rate_dps = abs(ang.xyz[2]) * 180.0 / math.pi
+        wv_limit = thr["WV_YRATE_MAX"] + TOL_WV_YRATE
+        if yaw_rate_dps > wv_limit:
+            errs.append(
+                f"{ts} WV_YRATE_MAX violated: {yaw_rate_dps:.1f} > {wv_limit:.1f} deg/s"
+            )
+
+    # =================================================================
+    # Section 9d: Maximum Altitude Check (LNDMC_ALT_MAX)
+    # =================================================================
+    max_altitude_val = 0.0
+    for (ts, pos) in vehicle_local_position_list:
+        # PX4 NED: z is negative when above ground
+        altitude = abs(pos.z) if _is_valid(pos.z) else 0.0
+        max_altitude_val = max(max_altitude_val, altitude)
+        alt_limit = thr["LNDMC_ALT_MAX"]
+        if alt_limit > 0 and altitude > alt_limit + TOL_ALT:
+            errs.append(
+                f"{ts} LNDMC_ALT_MAX violated: {altitude:.1f} > {alt_limit + TOL_ALT:.1f} m"
+            )
+
+    # =================================================================
     # Section 10: IMU Sensor Inconsistency (feedback-driven)
     # =================================================================
     acc_inconsistency_list = []
@@ -502,5 +568,12 @@ def check(config, msg_list, state_dict, feedback_list):
             feedback.update_value(max_jerk_val)
         elif feedback.name == "vel_pos_inconsistency":
             feedback.update_value(max_vel_pos_err)
+        elif feedback.name == "max_altitude":
+            feedback.update_value(max_altitude_val)
+        elif feedback.name == "combined_tilt_velocity":
+            # Combined metric: tilt * velocity rewards simultaneous extremes
+            # tilt_deg in [0,180], xy_vel in [0,~12], product rewards both high
+            combined = max_tilt_val * max_xy_vel_val
+            feedback.update_value(combined)
 
     return errs
