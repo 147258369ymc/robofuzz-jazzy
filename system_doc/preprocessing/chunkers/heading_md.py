@@ -35,6 +35,15 @@ class HeadingMarkdownChunker(BaseChunker):
         chunks = []
         current_section: dict | None = None
         parent_stack: list[str] = []
+        # Track if we have any sub-headings at min_level+
+        has_sub_headings = any(
+            _HEADING_RE.match(l) and len(_HEADING_RE.match(l).group(1)) >= self.min_level
+            for l in lines
+        )
+
+        # If no sub-headings, treat entire file as one chunk
+        if not has_sub_headings:
+            return self._chunk_as_whole(content, lines, file_path)
 
         for i, line in enumerate(lines):
             m = _HEADING_RE.match(line)
@@ -74,6 +83,25 @@ class HeadingMarkdownChunker(BaseChunker):
         if current_section:
             chunks.append(self._make_chunk(current_section, len(chunks)))
         return chunks
+
+    def _chunk_as_whole(self, content: str, lines: list[str], file_path: Path) -> list[RawChunk]:
+        """将只有单个顶层 heading 的文档作为整体块处理"""
+        # Find the title from the first heading
+        title = file_path.stem
+        for line in lines:
+            m = _HEADING_RE.match(line)
+            if m:
+                title = m.group(2).strip()
+                break
+        return [RawChunk(
+            content=content,
+            name=title,
+            chunk_type="config_desc",
+            index=0,
+            parent_heading="",
+            location="L1",
+            extra={"level": 1, "whole_file": True},
+        )]
 
     def _make_chunk(self, section: dict, index: int) -> RawChunk:
         text = "\n".join(section["lines"])

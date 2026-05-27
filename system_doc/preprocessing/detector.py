@@ -7,10 +7,14 @@ import re
 
 
 class DocType(Enum):
-    STRUCTURED_DATA = "structured_data"        # JSON/XML/YAML
+    STRUCTURED_DATA = "structured_data"        # JSON/XML
+    YAML_PARAMS = "yaml_params"                # YAML 参数文件
     TABULAR_MARKDOWN = "tabular_markdown"      # 含大量表格的 Markdown
     PROSE_MARKDOWN = "prose_markdown"           # 叙述性 Markdown
     PROTOCOL_SPEC = "protocol_spec"            # 协议时序/流程描述
+    SOURCE_CODE = "source_code"                # C++/Python 源码
+    ROS_INTERFACE = "ros_interface"            # .msg/.srv/.action
+    ROBOT_MODEL = "robot_model"                # .sdf/.urdf
 
 
 # 协议关键词
@@ -45,8 +49,20 @@ class DocTypeDetector:
 
         # 扩展名判断
         suffix = file_path.suffix.lower()
-        if suffix in (".json", ".xml", ".yaml", ".yml"):
+        if suffix in (".json", ".xml"):
             return DocType.STRUCTURED_DATA
+
+        if suffix in (".yaml", ".yml"):
+            return DocType.YAML_PARAMS
+
+        if suffix in (".msg", ".srv", ".action"):
+            return DocType.ROS_INTERFACE
+
+        if suffix in (".sdf", ".urdf", ".xacro"):
+            return DocType.ROBOT_MODEL
+
+        if suffix in (".cpp", ".hpp", ".c", ".h", ".py"):
+            return DocType.SOURCE_CODE
 
         # Markdown 细分
         if suffix in (".md", ".markdown"):

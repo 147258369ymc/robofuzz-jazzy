@@ -16,6 +16,10 @@ from .chunkers import (
     TableMarkdownChunker,
     HeadingMarkdownChunker,
     ProtocolFlowChunker,
+    YamlParamChunker,
+    SourceCodeChunker,
+    RosInterfaceChunker,
+    RobotModelChunker,
 )
 from .normalizer import Normalizer
 from .indexer import IndexBuilder, SpecIndex
@@ -53,9 +57,13 @@ class PreprocessingPipeline:
                 json_array_key=self.config.json_array_key,
                 xml_element_tag=self.config.xml_element_tag,
             ),
+            DocType.YAML_PARAMS.value: YamlParamChunker(),
             DocType.TABULAR_MARKDOWN.value: TableMarkdownChunker(),
             DocType.PROSE_MARKDOWN.value: HeadingMarkdownChunker(),
             DocType.PROTOCOL_SPEC.value: ProtocolFlowChunker(),
+            DocType.SOURCE_CODE.value: SourceCodeChunker(),
+            DocType.ROS_INTERFACE.value: RosInterfaceChunker(),
+            DocType.ROBOT_MODEL.value: RobotModelChunker(),
         }
 
     def register_chunker(self, doc_type: str, chunker: BaseChunker):
@@ -125,10 +133,19 @@ class PreprocessingPipeline:
                 else:
                     logger.warning(f"File not found: {fp}")
         else:
-            # 无显式配置时，自动发现所有文件
-            for fp in sorted(doc_root.iterdir()):
-                if fp.is_file() and fp.name != "README.md":
-                    results.append((fp, None))
+            # 无显式配置时，递归发现所有可处理的文件
+            skip_names = {"README.md", ".git", "__pycache__", ".gitignore"}
+            skip_suffixes = {".stl", ".dae", ".png", ".jpg", ".pgm", ".pyc"}
+            for fp in sorted(doc_root.rglob("*")):
+                if not fp.is_file():
+                    continue
+                if fp.name in skip_names:
+                    continue
+                if fp.suffix.lower() in skip_suffixes:
+                    continue
+                if any(part.startswith(".") for part in fp.parts):
+                    continue
+                results.append((fp, None))
         return results
 
     def _process_file(

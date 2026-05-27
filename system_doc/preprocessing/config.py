@@ -40,11 +40,14 @@ PX4_CONFIG = TargetConfig(
     xml_element_tag="parameter",
     file_configs=[
         FileConfig("parameters.json"),
-        FileConfig("parameters.xml"),
+        # parameters.xml 与 parameters.json 内容完全相同（同一构建产物的两种格式），跳过避免冗余
+        FileConfig("parameters.xml", skip=True),
+        # parameter_reference_v1.12.md 是同批参数的 Markdown 渲染，跳过避免三重冗余
         FileConfig(
             "parameter_reference_v1.12.md",
             chunker_override="tabular_markdown",
             chunker_params={"row_level_chunking": True},
+            skip=True,
         ),
         FileConfig(
             "uorb_message_reference.md",
@@ -67,14 +70,12 @@ PX4_CONFIG = TargetConfig(
 )
 
 
-# TurtleBot3 配置模板（示例，展示可迁移性）
+# TurtleBot3 配置：使用精简后的 turtlebot3_clean 目录，包含所有格式的文件。
 TURTLEBOT3_CONFIG = TargetConfig(
     name="turtlebot3",
-    version="humble",
-    doc_root="system_doc/turtlebot3",
-    file_configs=[
-        # 添加 TurtleBot3 文档时在此配置
-    ],
+    version="foxy-2.1.1",
+    doc_root="system_doc/turtlebot3_clean",
+    # 不指定 file_configs → 自动递归发现所有文件并按扩展名分派分块器
 )
 
 

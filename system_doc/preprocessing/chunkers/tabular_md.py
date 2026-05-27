@@ -111,10 +111,13 @@ class TableMarkdownChunker(BaseChunker):
             sections.append(current)
 
         # 只保留含表格的 section（level >= 2）
+        # 如果没有 level >= 2 的 section，回退到处理 level-1
         chunks = []
         parent_heading = ""
+        has_subsections = any(sec["level"] >= 2 for sec in sections)
+
         for idx, sec in enumerate(sections):
-            if sec["level"] == 1:
+            if has_subsections and sec["level"] == 1:
                 parent_heading = sec["heading"]
                 continue
             text = "\n".join(sec["lines"])
