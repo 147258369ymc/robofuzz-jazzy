@@ -33,17 +33,21 @@ PX4_DEFAULTS = {
 
 # Simulation tolerances (to avoid false positives from numerical noise)
 TOL_VEL = 0.5          # m/s
-TOL_ACC = 1.0          # m/s²
+TOL_VEL_Z = 1.0        # m/s - vertical velocity needs larger tolerance (PID transient)
+TOL_ACC = 1.5          # m/s² - raised from 1.0; PID transient overshoot is ~4%
 TOL_TILT = 2.0         # deg
 TOL_RATE = 5.0         # deg/s
 TOL_JERK = 2.0         # m/s³
 TOL_QUAT_NORM = 0.01
-TOL_VEL_POS = 0.1      # m
+TOL_VEL_POS = 1.0      # m - raised from 0.1; GPS correction causes discrete position jumps
 TOL_FD = 5.0           # deg - FailureDetector tolerance
 TOL_WV_YRATE = 10.0    # deg/s - Weathervane yaw rate tolerance
 TOL_ALT = 5.0          # m - Altitude tolerance
 GROUND_DIST = 0.15     # m - threshold for ground contact filtering
 GROUND_TS_WINDOW = 0.25e9  # nanoseconds
+
+# Duration filter: ignore violations shorter than this (seconds)
+MIN_VIOLATION_DURATION = 0.1  # 100ms - filters out normal PID transients
 
 
 # =========================================================================
@@ -188,8 +192,13 @@ def check(config, msg_list, state_dict, feedback_list):
             errs.append(f"{ts} VehicleAttitude quaternion norm ({quat_norm:.6f}) deviates from 1.0")
 
     # =================================================================
-    # Section 3: Acceleration Limits (refactored with dynamic thresholds)
+    # Section 3: Acceleration Limits
+    # Note: MPC_ACC_DOWN/UP_MAX are setpoint constraints in PX4's
+    # trajectory planner. In POSCTL mode they don't directly limit
+    # actual acceleration. We only report sustained violations (>100ms)
+    # to filter normal PID transients.
     # =================================================================
+    acc_violation_start = {}  # key: violation_type, value: first_ts
     for (ts, acc) in vehicle_acceleration_list:
         if _is_on_ground(ts, filter_ts_list):
             continue
@@ -204,12 +213,26 @@ def check(config, msg_list, state_dict, feedback_list):
             limit = thr["MPC_ACC_HOR_MAX"] + TOL_ACC
             if hor_acc > limit:
                 errs.append(f"{ts} MPC_ACC_HOR_MAX violated: {hor_acc:.2f} > {limit:.1f}")
+
             up_limit = thr["MPC_ACC_UP_MAX"] + TOL_ACC
             if acc_z < -up_limit:
-                errs.append(f"{ts} MPC_ACC_UP_MAX violated: {acc_z:.2f} < -{up_limit:.1f}")
+                key = "ACC_UP"
+                if key not in acc_violation_start:
+                    acc_violation_start[key] = ts
+                elif (ts - acc_violation_start[key]) / 1e9 >= MIN_VIOLATION_DURATION:
+                    errs.append(f"{ts} MPC_ACC_UP_MAX violated: {acc_z:.2f} < -{up_limit:.1f} (sustained)")
+            else:
+                acc_violation_start.pop("ACC_UP", None)
+
             dn_limit = thr["MPC_ACC_DOWN_MAX"] + TOL_ACC
             if acc_z > dn_limit:
-                errs.append(f"{ts} MPC_ACC_DOWN_MAX violated: {acc_z:.2f} > {dn_limit:.1f}")
+                key = "ACC_DN"
+                if key not in acc_violation_start:
+                    acc_violation_start[key] = ts
+                elif (ts - acc_violation_start[key]) / 1e9 >= MIN_VIOLATION_DURATION:
+                    errs.append(f"{ts} MPC_ACC_DOWN_MAX violated: {acc_z:.2f} > {dn_limit:.1f} (sustained)")
+            else:
+                acc_violation_start.pop("ACC_DN", None)
 
     # =================================================================
     # Section 4: Velocity Limits
@@ -237,8 +260,8 @@ def check(config, msg_list, state_dict, feedback_list):
 
         # Vertical velocity
         if config.flight_mode in ("POSCTL", "ALTCTL", "OFFBOARD", "LOITER"):
-            up_lim = thr["MPC_Z_VEL_MAX_UP"] + TOL_VEL
-            dn_lim = thr["MPC_Z_VEL_MAX_DN"] + TOL_VEL
+            up_lim = thr["MPC_Z_VEL_MAX_UP"] + TOL_VEL_Z
+            dn_lim = thr["MPC_Z_VEL_MAX_DN"] + TOL_VEL_Z
             # PX4 NED: vz > 0 = going down, vz < 0 = going up
             if vz < 0 and abs(vz) > up_lim:
                 errs.append(f"{ts} MPC_Z_VEL_MAX_UP violated: {vz:.2f}")
@@ -309,11 +332,22 @@ def check(config, msg_list, state_dict, feedback_list):
 
     # =================================================================
     # Section 7: Jerk Limit (derivative of acceleration)
-    # Although MPC_JERK_MAX is a trajectory planner constraint for AUTO
-    # modes, excessive jerk in any mode indicates physical anomaly.
+    # MPC_JERK_MAX is a trajectory planner constraint that ONLY applies
+    # in AUTO modes (FlightTaskAutoLineSmoothVel). In POSCTL/MANUAL/ALTCTL
+    # there is no jerk limiting — stick input maps directly to velocity
+    # setpoint. We only check jerk in AUTO/OFFBOARD modes.
+    # In other modes, we still compute max_jerk for feedback but use a
+    # much higher threshold (100 m/s³) to only catch true anomalies.
     # =================================================================
     max_jerk_val = 0.0
     if len(vehicle_acceleration_list) >= 4:
+        # Determine jerk threshold based on flight mode
+        if config.flight_mode in ("AUTO", "OFFBOARD"):
+            jerk_threshold = thr["MPC_JERK_MAX"] + TOL_JERK
+        else:
+            # POSCTL/MANUAL/ALTCTL: no firmware jerk limit, only flag crashes
+            jerk_threshold = 100.0  # m/s³ - only true anomalies
+
         # 3-sample moving average to smooth noise before differentiation
         acc_smooth = []
         for i in range(1, len(vehicle_acceleration_list) - 1):
@@ -340,15 +374,17 @@ def check(config, msg_list, state_dict, feedback_list):
             jerk_hor = math.sqrt(jerk_x * jerk_x + jerk_y * jerk_y)
             max_jerk_val = max(max_jerk_val, jerk_hor)
 
-            jerk_limit = thr["MPC_JERK_MAX"] + TOL_JERK
-            if jerk_hor > jerk_limit:
+            if jerk_hor > jerk_threshold:
                 errs.append(
                     f"{ts_curr} MPC_JERK_MAX violated: "
-                    f"{jerk_hor:.1f} > {jerk_limit:.1f} m/s³"
+                    f"{jerk_hor:.1f} > {jerk_threshold:.1f} m/s³"
                 )
 
     # =================================================================
     # Section 8: Velocity-Position Consistency
+    # Note: EKF2 fuses GPS at 5-10Hz causing discrete position jumps.
+    # Use velocity-scaled tolerance: faster flight = larger acceptable error.
+    # TOL_VEL_POS=1.0m base + 0.2*|v|*dt to account for GPS corrections.
     # =================================================================
     max_vel_pos_err = 0.0
     if len(vehicle_local_position_list) >= 2:
@@ -379,9 +415,13 @@ def check(config, msg_list, state_dict, feedback_list):
             )
             max_vel_pos_err = max(max_vel_pos_err, pos_err)
 
-            if pos_err > TOL_VEL_POS:
+            # Velocity-scaled tolerance: base + proportional to speed
+            vel_mag = math.sqrt(pos_prev.vx**2 + pos_prev.vy**2 + pos_prev.vz**2)
+            adaptive_tol = TOL_VEL_POS + 0.2 * vel_mag * dt
+            if pos_err > adaptive_tol:
                 errs.append(
-                    f"{ts_curr} Velocity-position inconsistency: {pos_err:.4f} m"
+                    f"{ts_curr} Velocity-position inconsistency: "
+                    f"{pos_err:.4f} m (tol={adaptive_tol:.3f})"
                 )
 
     # =================================================================
@@ -455,18 +495,23 @@ def check(config, msg_list, state_dict, feedback_list):
 
     # =================================================================
     # Section 9c: Weathervane Yaw Rate Limit (WV_YRATE_MAX)
+    # WV_YRATE_MAX only constrains the Weathervane module's yaw output.
+    # In POSCTL/MANUAL/ALTCTL, yaw is controlled by MPC_MAN_Y_MAX
+    # (already checked in Section 6). Only check WV_YRATE_MAX in
+    # AUTO/OFFBOARD modes where Weathervane is active.
     # =================================================================
-    for (ts, ang) in vehicle_angular_velocity_list:
-        if _is_on_ground(ts, filter_ts_list):
-            continue
-        if not _is_valid(ang.xyz[2]):
-            continue
-        yaw_rate_dps = abs(ang.xyz[2]) * 180.0 / math.pi
-        wv_limit = thr["WV_YRATE_MAX"] + TOL_WV_YRATE
-        if yaw_rate_dps > wv_limit:
-            errs.append(
-                f"{ts} WV_YRATE_MAX violated: {yaw_rate_dps:.1f} > {wv_limit:.1f} deg/s"
-            )
+    if config.flight_mode in ("AUTO", "OFFBOARD", "LOITER"):
+        for (ts, ang) in vehicle_angular_velocity_list:
+            if _is_on_ground(ts, filter_ts_list):
+                continue
+            if not _is_valid(ang.xyz[2]):
+                continue
+            yaw_rate_dps = abs(ang.xyz[2]) * 180.0 / math.pi
+            wv_limit = thr["WV_YRATE_MAX"] + TOL_WV_YRATE
+            if yaw_rate_dps > wv_limit:
+                errs.append(
+                    f"{ts} WV_YRATE_MAX violated: {yaw_rate_dps:.1f} > {wv_limit:.1f} deg/s"
+                )
 
     # =================================================================
     # Section 9d: Maximum Altitude Check (LNDMC_ALT_MAX)
@@ -497,33 +542,32 @@ def check(config, msg_list, state_dict, feedback_list):
     lat_diff = []
     lon_diff = []
     skip = 0
-    for (ts_gps_raw, gps_raw) in vehicle_gps_list:
-        if not vehicle_global_position_list:
-            break
-        ts_diff = 9999999999999999999
-        last_updated = 0
-        updated = 0
-        gps_estim = vehicle_global_position_list[0][1]
+    if vehicle_global_position_list:
+        for (ts_gps_raw, gps_raw) in vehicle_gps_list:
+            ts_diff = 9999999999999999999
+            last_updated = 0
+            updated = 0
+            gps_estim = vehicle_global_position_list[0][1]
 
-        for i in range(skip, len(vehicle_global_position_list)):
-            ts_gps_estim = vehicle_global_position_list[i][0]
-            gps_estim = vehicle_global_position_list[i][1]
+            for i in range(skip, len(vehicle_global_position_list)):
+                ts_gps_estim = vehicle_global_position_list[i][0]
+                gps_estim = vehicle_global_position_list[i][1]
 
-            ts_diff_last = abs(ts_gps_raw - ts_gps_estim)
-            if ts_diff_last <= ts_diff:
-                ts_diff = ts_diff_last
-                last_updated = updated
-                updated = 1
-            else:
-                last_updated = updated
-                updated = 0
+                ts_diff_last = abs(ts_gps_raw - ts_gps_estim)
+                if ts_diff_last <= ts_diff:
+                    ts_diff = ts_diff_last
+                    last_updated = updated
+                    updated = 1
+                else:
+                    last_updated = updated
+                    updated = 0
 
-            if last_updated == 1 and updated == 0:
-                skip = i
-                break
+                if last_updated == 1 and updated == 0:
+                    skip = i
+                    break
 
-        lat_diff.append(gps_raw.lat - int(gps_estim.lat * 10000000))
-        lon_diff.append(gps_raw.lon - int(gps_estim.lon * 10000000))
+            lat_diff.append(gps_raw.lat - int(gps_estim.lat * 10000000))
+            lon_diff.append(gps_raw.lon - int(gps_estim.lon * 10000000))
 
     # =================================================================
     # Section 12: Position Hold Check (PGFUZZ / LOITER mode)
@@ -542,9 +586,104 @@ def check(config, msg_list, state_dict, feedback_list):
             diff_str = f"x {max(diff_x):.2f} y {max(diff_y):.2f} z {max(diff_z):.2f}"
             errs.append(f"Position changed in hold mode: {diff_str}")
 
+    # --- Retrieve additional state data for new checks ---
+    actuator_outputs_list = _safe_get(state_dict, "/ActuatorOutputs_PubSubTopic")
+    vehicle_odometry_list2 = _safe_get(state_dict, "/VehicleOdometry_PubSubTopic")
+    vehicle_control_mode_list = _safe_get(state_dict, "/VehicleControlMode_PubSubTopic")
+    vehicle_status_list = _safe_get(state_dict, "/VehicleStatus_PubSubTopic")
+
     # =================================================================
-    # Section 13: Update Feedback Metrics
+    # Section 14: Actuator Saturation Detection
+    # If ALL motors are at max (or min) for >200ms, the drone has lost
+    # control authority. This is a real safety issue — not a parameter
+    # threshold, but a physical inability to control the vehicle.
     # =================================================================
+    max_saturation_duration = 0.0
+    saturation_start_ts = None
+    MOTOR_MAX = 1900  # PWM max (PX4 default: 1000-2000, saturated at ~1900+)
+    MOTOR_MIN = 1100  # PWM min (idle ~1100)
+    SATURATION_DURATION_LIMIT = 0.2  # seconds
+
+    for (ts, act) in actuator_outputs_list:
+        if not hasattr(act, 'output'):
+            continue
+        outputs = act.output[:4]  # first 4 motors for quadrotor
+        if len(outputs) == 0 or not all(_is_valid(float(o)) for o in outputs):
+            continue
+
+        # Check if all motors saturated high or all saturated low
+        all_max = all(o >= MOTOR_MAX for o in outputs)
+        all_min = all(o <= MOTOR_MIN for o in outputs)
+
+        if all_max or all_min:
+            if saturation_start_ts is None:
+                saturation_start_ts = ts
+            else:
+                duration = (ts - saturation_start_ts) / 1e9
+                max_saturation_duration = max(max_saturation_duration, duration)
+                if duration >= SATURATION_DURATION_LIMIT:
+                    sat_type = "MAX" if all_max else "MIN"
+                    errs.append(
+                        f"{ts} Actuator saturation ({sat_type}): "
+                        f"all motors saturated for {duration:.3f}s"
+                    )
+        else:
+            saturation_start_ts = None
+
+    # =================================================================
+    # Section 15: Odometry Cross-Validation
+    # VehicleOdometry and VehicleLocalPosition should report consistent
+    # position/velocity. Large divergence indicates EKF output routing
+    # bug (similar to Bug 2 but for different topic pairs).
+    # =================================================================
+    max_odom_pos_err = 0.0
+    if vehicle_odometry_list2 and vehicle_local_position_list:
+        odom_idx = 0
+        for (ts_pos, pos) in vehicle_local_position_list:
+            # Find closest odometry sample
+            while (odom_idx < len(vehicle_odometry_list2) - 1
+                   and vehicle_odometry_list2[odom_idx + 1][0] <= ts_pos):
+                odom_idx += 1
+            if odom_idx >= len(vehicle_odometry_list2):
+                break
+            ts_odom, odom = vehicle_odometry_list2[odom_idx]
+            if abs(ts_odom - ts_pos) > 0.1e9:  # >100ms apart, skip
+                continue
+            if not hasattr(odom, 'x') or not hasattr(pos, 'x'):
+                continue
+            if not all(_is_valid(v) for v in (odom.x, odom.y, odom.z,
+                                               pos.x, pos.y, pos.z)):
+                continue
+            odom_err = math.sqrt(
+                (odom.x - pos.x)**2 + (odom.y - pos.y)**2 + (odom.z - pos.z)**2
+            )
+            max_odom_pos_err = max(max_odom_pos_err, odom_err)
+            # Threshold: 2m divergence between two topics that should agree
+            if odom_err > 2.0:
+                errs.append(
+                    f"{ts_pos} Odometry-Position divergence: {odom_err:.2f}m"
+                )
+
+    # =================================================================
+    # Section 16: Control Loop Timing Violation
+    # PX4's position controller runs at 50Hz (20ms). If consecutive
+    # VehicleLocalPosition samples have gaps >100ms, the control loop
+    # may have stalled — indicating a real firmware issue.
+    # =================================================================
+    max_control_gap = 0.0
+    CONTROL_GAP_LIMIT = 0.1  # 100ms — 5x the expected 20ms period
+    if len(vehicle_local_position_list) >= 2:
+        for i in range(1, len(vehicle_local_position_list)):
+            ts_prev = vehicle_local_position_list[i - 1][0]
+            ts_curr = vehicle_local_position_list[i][0]
+            gap = (ts_curr - ts_prev) / 1e9
+            if gap > 0:
+                max_control_gap = max(max_control_gap, gap)
+            if gap > CONTROL_GAP_LIMIT:
+                errs.append(
+                    f"{ts_curr} Control loop gap: {gap*1000:.1f}ms "
+                    f"(expected <20ms)"
+                )
     for feedback in feedback_list:
         if feedback.name == "imu_accel_inconsistency":
             if acc_inconsistency_list:
@@ -575,5 +714,11 @@ def check(config, msg_list, state_dict, feedback_list):
             # tilt_deg in [0,180], xy_vel in [0,~12], product rewards both high
             combined = max_tilt_val * max_xy_vel_val
             feedback.update_value(combined)
+        elif feedback.name == "actuator_saturation":
+            feedback.update_value(max_saturation_duration)
+        elif feedback.name == "odom_pos_divergence":
+            feedback.update_value(max_odom_pos_err)
+        elif feedback.name == "control_loop_gap":
+            feedback.update_value(max_control_gap)
 
     return errs

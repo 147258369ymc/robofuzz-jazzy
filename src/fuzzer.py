@@ -782,6 +782,15 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # Combined multi-axis feedback: guides toward simultaneous extreme inputs
             fbk = Feedback("combined_tilt_velocity", FeedbackType.INC)
             fbk_list.append(fbk)
+            # New: guides fuzzer toward control authority loss
+            fbk = Feedback("actuator_saturation", FeedbackType.INC)
+            fbk_list.append(fbk)
+            # New: guides fuzzer toward EKF routing inconsistencies
+            fbk = Feedback("odom_pos_divergence", FeedbackType.INC)
+            fbk_list.append(fbk)
+            # New: guides fuzzer toward control loop stalls
+            fbk = Feedback("control_loop_gap", FeedbackType.INC)
+            fbk_list.append(fbk)
 
         elif fuzzer.config.tb3_hitl:
             field_whitelist = [
@@ -1256,11 +1265,15 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 for exec_cnt in range(repeat):
                     # copy rosbags to {log_dir}/rosbags/{frame}/
                     bag_dir = f"states-{exec_cnt}.bag"
-                    os.makedirs(os.path.join(fuzzer.config.rosbag_dir, frame))
-                    shutil.copytree(
-                        bag_dir,
-                        os.path.join(fuzzer.config.rosbag_dir, frame, bag_dir)
-                    )
+                    try:
+                        os.makedirs(os.path.join(fuzzer.config.rosbag_dir, frame), exist_ok=True)
+                        shutil.copytree(
+                            bag_dir,
+                            os.path.join(fuzzer.config.rosbag_dir, frame, bag_dir),
+                            dirs_exist_ok=True
+                        )
+                    except Exception as e:
+                        print(f"[!] rosbag copy failed: {e}")
 
             else:
                 print("[+] no error found")
