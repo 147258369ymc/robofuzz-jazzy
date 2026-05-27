@@ -94,6 +94,138 @@ class APIConfig:
         else:
             raise ValueError(f"未知 provider: {self.provider}")
 
+    def call_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        tools: list[dict],
+    ) -> dict:
+        """
+        带 tool_use 的调用接口。
+
+        返回完整的 response 对象（dict 化），包含 content blocks。
+        调用方需要自行处理 tool_use / end_turn 的 stop_reason。
+        """
+        if self.provider == "anthropic":
+            client = self._anthropic_client()
+            resp = client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+            # 转为 dict 方便统一处理
+            return {
+                "stop_reason": resp.stop_reason,
+                "content": [_block_to_dict(b) for b in resp.content],
+            }
+        elif self.provider == "openai":
+            # OpenAI function calling 格式转换
+            client = self._openai_client()
+            oai_tools = [_anthropic_tool_to_openai(t) for t in tools]
+            oai_messages = [{"role": "system", "content": system_prompt}]
+            oai_messages.extend(_convert_messages_to_openai(messages))
+            resp = client.chat.completions.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=oai_messages,
+                tools=oai_tools if oai_tools else None,
+            )
+            return _openai_response_to_anthropic(resp)
+        else:
+            raise ValueError(f"未知 provider: {self.provider}")
+
+
+# ============================================================
+# 格式转换辅助函数
+# ============================================================
+
+def _block_to_dict(block) -> dict:
+    """将 Anthropic SDK 的 content block 转为 dict"""
+    if block.type == "text":
+        return {"type": "text", "text": block.text}
+    elif block.type == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": block.input,
+        }
+    return {"type": block.type}
+
+
+def _anthropic_tool_to_openai(tool: dict) -> dict:
+    """Anthropic tool schema → OpenAI function calling schema"""
+    return {
+        "type": "function",
+        "function": {
+            "name": tool["name"],
+            "description": tool.get("description", ""),
+            "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+        },
+    }
+
+
+def _convert_messages_to_openai(messages: list[dict]) -> list[dict]:
+    """Anthropic messages 格式 → OpenAI messages 格式"""
+    import json as _json
+    result = []
+    for msg in messages:
+        role = msg["role"]
+        content = msg.get("content")
+        if isinstance(content, str):
+            result.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            for block in content:
+                if block.get("type") == "text":
+                    result.append({"role": role, "content": block["text"]})
+                elif block.get("type") == "tool_use":
+                    result.append({
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": _json.dumps(block["input"]),
+                            },
+                        }],
+                    })
+                elif block.get("type") == "tool_result":
+                    result.append({
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id", ""),
+                        "content": block.get("content", ""),
+                    })
+    return result
+
+
+def _openai_response_to_anthropic(resp) -> dict:
+    """OpenAI response → Anthropic-style dict"""
+    import json as _json
+    choice = resp.choices[0]
+    msg = choice.message
+    content = []
+    if msg.content:
+        content.append({"type": "text", "text": msg.content})
+    if msg.tool_calls:
+        for tc in msg.tool_calls:
+            content.append({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": _json.loads(tc.function.arguments),
+            })
+    stop_reason = "tool_use" if msg.tool_calls else "end_turn"
+    return {"stop_reason": stop_reason, "content": content}
+
+
+# ============================================================
+# 配置加载
+# ============================================================
 
 def load_config(profile: str | None = None) -> APIConfig:
     """
@@ -110,7 +242,6 @@ def load_config(profile: str | None = None) -> APIConfig:
     data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     profiles = data.get("profiles", {})
 
-    # 确定使用哪个 profile
     if profile is None:
         profile = os.environ.get("ORACLE_API_PROFILE", data.get("active_profile"))
 
@@ -120,7 +251,6 @@ def load_config(profile: str | None = None) -> APIConfig:
 
     cfg = profiles[profile]
 
-    # 支持环境变量覆盖 api_key（安全考虑）
     api_key = cfg.get("api_key", "") or ""
     if not api_key:
         env_key = "ANTHROPIC_API_KEY" if cfg["provider"] == "anthropic" else "OPENAI_API_KEY"

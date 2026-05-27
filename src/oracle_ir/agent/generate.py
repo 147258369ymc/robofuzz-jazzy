@@ -380,6 +380,8 @@ def main():
     parser.add_argument("--target", required=True, help="目标系统名 (px4, turtlebot3, ...)")
     parser.add_argument("--block-id", help="指定单个 block_id")
     parser.add_argument("--tag", help="按语义标签批量生成 (如 velocity_constraint)")
+    parser.add_argument("--mode", choices=["simple", "agent"], default="agent",
+                        help="生成模式: simple=单次调用, agent=tool_use自主循环 (默认 agent)")
     parser.add_argument("--dry-run", action="store_true", help="只打印 prompt，不调 API")
     parser.add_argument("--output", default=None, help="输出目录")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -403,7 +405,7 @@ def main():
         print(f"  python -m system_doc.preprocessing.run_pipeline --target {target}")
         return
 
-    # 加载 descriptor（可选，用于生成 Agent 的系统描述）
+    # 加载 descriptor（可选）
     descriptor_context = ""
     descriptor_path = PROJECT_ROOT / "src" / "oracle_ir" / "targets" / f"{target}.yaml"
     if descriptor_path.exists():
@@ -418,6 +420,7 @@ def main():
     index = json.loads(index_path.read_text(encoding="utf-8"))
     print(f"目标: {target_display}")
     print(f"已加载 {len(blocks)} 个 SpecBlock")
+    print(f"模式: {args.mode}")
 
     # 确定要处理的 block_ids
     if args.block_id:
@@ -425,7 +428,6 @@ def main():
     elif args.tag:
         tag_index = index.get("tag_index", {})
         all_ids = tag_index.get(args.tag, [])
-        # 只处理 parameter 类型的 block
         target_ids = [bid for bid in all_ids
                       if blocks.get(bid, {}).get("block_type") == "parameter"]
         print(f"标签 '{args.tag}' 下有 {len(target_ids)} 个参数待生成")
@@ -433,7 +435,20 @@ def main():
         print("请指定 --block-id 或 --tag")
         return
 
-    # 逐个生成
+    # ─── Agent 模式 ───
+    if args.mode == "agent" and not args.dry_run:
+        from src.oracle_ir.agent.agent_loop import run_agent_batch
+        run_agent_batch(
+            block_ids=target_ids,
+            target_name=target_display,
+            descriptor_context=descriptor_context,
+            blocks_dir=blocks_dir,
+            index_path=index_path,
+            specs_dir=output_dir,
+        )
+        return
+
+    # ─── Simple 模式（原有逻辑） ───
     success, fail = 0, 0
     for bid in target_ids:
         print(f"\n--- 生成: {bid} ---")
