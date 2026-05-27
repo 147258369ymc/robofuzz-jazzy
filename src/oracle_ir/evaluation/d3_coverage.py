@@ -62,6 +62,11 @@ def evaluate_coverage(
     details = []
     failures = []
 
+    # 从 specs 中推断目标系统名称
+    system_prefix = ""
+    if specs:
+        system_prefix = f"{specs[0].system}.parameter."
+
     # Step 1: 从 SpecIndex 中提取"应该被覆盖的约束参数"
     tag_index = index_data.get("tag_index", {})
     constraint_block_ids: set[str] = set()
@@ -71,7 +76,10 @@ def evaluate_coverage(
     # 过滤: 只保留 parameter 类型且 shortDesc 含限制语义的
     should_cover: dict[str, str] = {}  # param_name → shortDesc
     for bid in constraint_block_ids:
-        if not bid.startswith("px4.parameter."):
+        # 动态匹配：使用推断的系统前缀，或回退到通用 ".parameter." 检测
+        if system_prefix and not bid.startswith(system_prefix):
+            continue
+        if not system_prefix and ".parameter." not in bid:
             continue
         # 去除后缀 _1, _2 (多源重复)
         block_path = blocks_dir / f"{bid}.json"

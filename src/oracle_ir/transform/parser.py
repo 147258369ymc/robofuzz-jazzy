@@ -59,16 +59,14 @@ def _parse_scope(data: dict | None) -> Scope:
     require_airborne = data.get("require_airborne", False)
 
     # 向后兼容：require_airborne → 通用 filter_expr
+    # 具体的 filter_expr 和 observation 应由 spec 自身声明，
+    # 此处仅设置标志位，不再注入硬编码的 topic/阈值
     if require_airborne and not filter_expr:
-        filter_expr = "dist_bottom >= 0.15"
-        # 自动注入 filter observation（如果用户未显式声明）
+        filter_expr = data.get("airborne_expr", "dist_bottom >= 0.15")
         if not filter_observations:
-            filter_observations = [Observation(
-                name="dist_bottom",
-                topic="/VehicleLocalPosition_PubSubTopic",
-                field="dist_bottom",
-                unit="m",
-            )]
+            airborne_obs = data.get("airborne_observation")
+            if airborne_obs:
+                filter_observations = _parse_observations([airborne_obs])
 
     return Scope(
         flight_modes=data.get("flight_modes", []),

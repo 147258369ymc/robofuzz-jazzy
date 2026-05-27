@@ -1,0 +1,33 @@
+# OracleIR Agent API 配置
+# 修改此文件即可切换 API 提供商 / 模型 / 地址，无需改代码
+
+# 当前激活的配置（对应下面 profiles 中的 key）
+active_profile: claude_awsq
+
+profiles:
+  # 你的逆向 Claude API
+  claude_awsq:
+    provider: anthropic          # anthropic | openai
+    base_url: "https://right.codes/claude-aws"   # 改成你的实际地址
+    api_key: "sk-670b93b884e24a07859351011c4c1de4"            # 改成你的实际 key
+    model: "claude-opus-4-6"
+    max_tokens: 4096
+    temperature: 0.0
+
+  # 官方 Anthropic（备用）
+  anthropic_official:
+    provider: anthropic
+    base_url: ""                 # 留空用默认 https://api.anthropic.com
+    api_key: ""                  # 留空则从环境变量 ANTHROPIC_API_KEY 读取
+    model: "claude-sonnet-4-20250514"
+    max_tokens: 4096
+    temperature: 0.0
+
+  # OpenAI 兼容接口（如 vLLM / ollama / one-api）
+  openai_compatible:
+    provider: openai
+    base_url: "http://localhost:11434/v1"
+    api_key: "sk-xxx"
+    model: "gpt-4o"
+    max_tokens: 4096
+    temperature: 0.0

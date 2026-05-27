@@ -8,19 +8,19 @@ Agent 接收以下 SpecBlock 信息：
 
 ```json
 {
-  "block_id": "px4.parameter.MPC_XY_VEL_MAX",
+  "block_id": "{system}.parameter.{PARAM_NAME}",
   "block_type": "parameter",
   "structured_fields": {
-    "name": "MPC_XY_VEL_MAX",
+    "name": "{PARAM_NAME}",
     "default": 12.0,
     "min": 0.0,
     "max": 20.0,
     "units": "m/s",
     "shortDesc": "Maximum horizontal velocity",
-    "group": "Multicopter Position Control"
+    "group": "Position Control"
   },
   "tags": ["velocity_constraint"],
-  "references": ["MPC_VEL_MANUAL"]
+  "references": ["RELATED_PARAM"]
 }
 ```
 
@@ -41,7 +41,7 @@ scope:
 # ─── 必填：观测变量 ───
 observations:
   - name: "{var_name}"
-    topic: "/{TopicName}_PubSubTopic"
+    topic: "/{TopicName}"       # 使用目标系统的实际 topic 名称
     field: "{field_name}"
     unit: "{unit}"
     index: null             # 数组字段填索引，标量填 null

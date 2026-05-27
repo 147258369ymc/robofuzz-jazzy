@@ -33,8 +33,8 @@ def evaluate_semantics(
     param_blocks: dict[str, dict] = {}
     for ir in specs:
         for param in ir.parameters:
-            # 尝试加载对应的 SpecBlock
-            block_path = blocks_dir / f"px4.parameter.{param.name}.json"
+            # 尝试加载对应的 SpecBlock（使用 ir.system 动态构建路径）
+            block_path = blocks_dir / f"{ir.system}.parameter.{param.name}.json"
             if block_path.exists() and param.name not in param_blocks:
                 param_blocks[param.name] = json.loads(block_path.read_text())
 

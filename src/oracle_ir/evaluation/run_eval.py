@@ -18,17 +18,18 @@ def run_evaluation(
     spec_dir: Path | None = None,
     index_path: Path | None = None,
     blocks_dir: Path | None = None,
+    target: str = "px4",
 ) -> EvalReport:
     """运行完整的 4 维评估"""
 
-    # 默认路径
+    # 默认路径：基于 target 参数动态构建
     project_root = Path(__file__).parent.parent.parent.parent
     if spec_dir is None:
-        spec_dir = project_root / "src" / "oracle_ir" / "specs" / "px4"
+        spec_dir = project_root / "src" / "oracle_ir" / "specs" / target
     if index_path is None:
-        index_path = project_root / "system_doc" / "preprocessed" / "px4" / "index.json"
+        index_path = project_root / "system_doc" / "preprocessed" / target / "index.json"
     if blocks_dir is None:
-        blocks_dir = project_root / "system_doc" / "preprocessed" / "px4" / "blocks"
+        blocks_dir = project_root / "system_doc" / "preprocessed" / target / "blocks"
 
     # 加载数据
     specs = load_all_specs(spec_dir)
@@ -88,5 +89,17 @@ def print_report(report: EvalReport):
 
 
 if __name__ == "__main__":
-    report = run_evaluation()
+    import argparse
+    ap = argparse.ArgumentParser(description="OracleIR Evaluation Runner")
+    ap.add_argument("--target", default="px4", help="目标系统名称 (如 px4, turtlebot3, franka_arm)")
+    ap.add_argument("--spec-dir", type=Path, default=None)
+    ap.add_argument("--index-path", type=Path, default=None)
+    ap.add_argument("--blocks-dir", type=Path, default=None)
+    args = ap.parse_args()
+    report = run_evaluation(
+        spec_dir=args.spec_dir,
+        index_path=args.index_path,
+        blocks_dir=args.blocks_dir,
+        target=args.target,
+    )
     print_report(report)

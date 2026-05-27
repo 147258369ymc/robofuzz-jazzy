@@ -37,7 +37,7 @@ def evaluate_logic(
 
     for ir in specs:
         for param in ir.parameters:
-            block_path = blocks_dir / f"px4.parameter.{param.name}.json"
+            block_path = blocks_dir / f"{ir.system}.parameter.{param.name}.json"
             if not block_path.exists():
                 continue
             block = json.loads(block_path.read_text())

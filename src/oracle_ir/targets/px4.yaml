@@ -1,0 +1,116 @@
+# PX4 多旋翼无人机目标描述符
+name: px4
+display_name: "PX4 Multicopter"
+version: "a264541861"
+middleware: ros2
+description: "PX4 自驾仪多旋翼无人机，通过 uORB/DDS 桥接到 ROS2"
+
+topic_suffix: "_PubSubTopic"
+
+topics:
+  - name: /VehicleLocalPosition_PubSubTopic
+    msg_type: VehicleLocalPosition
+    fields: [x, y, z, vx, vy, vz, ax, ay, az, heading, dist_bottom]
+    field_units: {x: m, y: m, z: m, vx: m/s, vy: m/s, vz: m/s, dist_bottom: m}
+    frequency_hz: 50.0
+
+  - name: /VehicleAttitude_PubSubTopic
+    msg_type: VehicleAttitude
+    fields: [q]
+    field_units: {q: "quaternion"}
+    frequency_hz: 50.0
+
+  - name: /VehicleAngularVelocity_PubSubTopic
+    msg_type: VehicleAngularVelocity
+    fields: [xyz]
+    field_units: {xyz: rad/s}
+    frequency_hz: 50.0
+
+  - name: /VehicleAcceleration_PubSubTopic
+    msg_type: VehicleAcceleration
+    fields: [xyz]
+    field_units: {xyz: m/s2}
+    frequency_hz: 50.0
+
+  - name: /SensorGps_PubSubTopic
+    msg_type: SensorGps
+    fields: [lat, lon, alt, vel_n_m_s, vel_e_m_s, vel_d_m_s]
+    field_units: {lat: deg, lon: deg, alt: m}
+    frequency_hz: 10.0
+
+operating_modes:
+  - name: manual
+    description: "手动遥控模式"
+  - name: posctl
+    description: "位置控制模式"
+  - name: altctl
+    description: "高度控制模式"
+  - name: offboard
+    description: "外部控制模式"
+  - name: auto_mission
+    description: "自主任务模式"
+  - name: auto_loiter
+    description: "悬停模式"
+
+constraint_types:
+  - category: velocity
+    description: "线速度限制"
+    relevant_topics: [/VehicleLocalPosition_PubSubTopic]
+    param_patterns: [".*VEL.*", ".*SPEED.*", ".*AIRSPD.*"]
+  - category: attitude
+    description: "姿态角度限制"
+    relevant_topics: [/VehicleAttitude_PubSubTopic]
+    param_patterns: [".*ROLL.*", ".*PITCH.*", ".*YAW.*", ".*TILT.*"]
+  - category: altitude
+    description: "高度限制"
+    relevant_topics: [/VehicleLocalPosition_PubSubTopic]
+    param_patterns: [".*ALT.*", ".*HEIGHT.*", ".*Z_.*"]
+  - category: acceleration
+    description: "加速度限制"
+    relevant_topics: [/VehicleAcceleration_PubSubTopic]
+    param_patterns: [".*ACC.*", ".*JERK.*"]
+
+safety_conditions:
+  - name: is_airborne
+    description: "无人机已离地（dist_bottom >= 0.15m）"
+    check_expr: "dist_bottom >= 0.15"
+    required_topics: [/VehicleLocalPosition_PubSubTopic]
+  - name: is_armed
+    description: "电机已解锁"
+    check_expr: "armed == 1"
+    required_topics: [/VehicleStatus_PubSubTopic]
+
+param_naming:
+  velocity_constraint:
+    - "MPC_.*VEL"
+    - "MPC_XY_VEL"
+    - "FW_AIRSPD_M[AI][XN]"
+    - "VEL_MANUAL"
+    - "XY_VEL_MAX"
+  attitude_constraint:
+    - "MC_ROLL"
+    - "MC_PITCH"
+    - "MC_YAW"
+    - "MAN_[RPY]_MAX"
+    - "TILT_MAX"
+    - "FW_[RPY]_LIM"
+  altitude_constraint:
+    - "MPC_Z_"
+    - "ALT_MAX"
+    - "ALT_MIN"
+  sensor:
+    - "\\b(imu|gyro|accel|baro|mag)\\b"
+  safety:
+    - "failsafe"
+    - "CBRK"
+    - "emergency"
+  flight_mode:
+    - "flight.?mode"
+    - "offboard"
+    - "posctl"
+    - "altctl"
+    - "FLTMODE"
+  geofence:
+    - "geofence"
+    - "GF_"
+    - "fence_act"

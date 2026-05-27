@@ -60,6 +60,15 @@ class Scope:
     filter_expr: str = ""
     filter_observations: list[Any] = field(default_factory=list)  # list[Observation]
 
+    @property
+    def operating_modes(self) -> list[str]:
+        """通用别名：对非飞行器目标使用 operating_modes 语义等价于 flight_modes"""
+        return self.flight_modes
+
+    @operating_modes.setter
+    def operating_modes(self, value: list[str]):
+        self.flight_modes = value
+
 
 @dataclass
 class Window:
