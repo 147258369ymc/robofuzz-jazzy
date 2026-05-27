@@ -37,9 +37,11 @@ class PreprocessingPipeline:
         result.save("system_doc/preprocessed/")
     """
 
-    def __init__(self, config: TargetConfig, project_root: Path | None = None):
+    def __init__(self, config: TargetConfig, project_root: Path | None = None,
+                 descriptor_path: Path | None = None):
         self.config = config
         self.project_root = project_root or Path.cwd()
+        self.descriptor_path = descriptor_path
         self.detector = DocTypeDetector()
         self._chunkers: dict[str, BaseChunker] = {}
         self._setup_chunkers()
@@ -96,8 +98,11 @@ class PreprocessingPipeline:
         # 去重（同名同类型的 block 合并 ID）
         all_blocks = self._deduplicate_ids(all_blocks)
 
-        # 构建索引
-        index_builder = IndexBuilder()
+        # 构建索引（如果有 descriptor 则使用目标特定的标签规则）
+        if self.descriptor_path and self.descriptor_path.exists():
+            index_builder = IndexBuilder.from_descriptor(self.descriptor_path)
+        else:
+            index_builder = IndexBuilder()
         index = index_builder.build(all_blocks)
 
         return PipelineResult(

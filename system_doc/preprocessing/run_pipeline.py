@@ -34,6 +34,10 @@ def main():
         "--verbose", "-v", action="store_true",
         help="显示详细日志",
     )
+    parser.add_argument(
+        "--descriptor", default=None,
+        help="目标描述符路径 (如 src/oracle_ir/targets/px4.yaml)，用于生成目标特定的标签规则",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -44,7 +48,17 @@ def main():
     config = get_config(args.target)
     output_dir = args.output or f"system_doc/preprocessed/{args.target}"
 
-    pipeline = PreprocessingPipeline(config, project_root=PROJECT_ROOT)
+    descriptor_path = None
+    if args.descriptor:
+        descriptor_path = Path(args.descriptor)
+    else:
+        # 自动查找: src/oracle_ir/targets/{target}.yaml
+        auto_path = PROJECT_ROOT / "src" / "oracle_ir" / "targets" / f"{args.target}.yaml"
+        if auto_path.exists():
+            descriptor_path = auto_path
+
+    pipeline = PreprocessingPipeline(config, project_root=PROJECT_ROOT,
+                                     descriptor_path=descriptor_path)
     result = pipeline.run()
 
     print(result.summary)
