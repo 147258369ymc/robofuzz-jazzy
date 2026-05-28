@@ -230,39 +230,73 @@ class Fuzzer:
                         seed_list.append(msg)
                     self.queue.append(seed_list)
 
-        elif self.config.tb3_sitl or self.config.tb3_hitl:
-            # Seed pool: boundary values derived from TurtleBot3 Burger specs
-            # Max linear velocity: 0.22 m/s, Max angular velocity: 2.84 rad/s
-            from geometry_msgs.msg import Twist
-            import seed_generator
+            elif self.config.px4_ros:
+                # --- ROS velocity mode boundary seeds ---
+                # Domain: vx/vy [-12,12], vz [-1,5], yaw [-pi,pi], yawspeed [-3.49,3.49]
+                from px4_msgs.msg import TrajectorySetpoint
+                ros_boundary_seeds = [
+                    # Multi-axis extreme: max horizontal velocity diagonal
+                    {"vx": 12.0, "vy": 12.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 0.0},
+                    {"vx": -12.0, "vy": -12.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 0.0},
+                    # Max descent + lateral speed
+                    {"vx": 12.0, "vy": 0.0, "vz": 5.0, "yaw": 0.0, "yawspeed": 0.0},
+                    # Yaw spin + forward velocity (gyroscopic coupling)
+                    {"vx": 8.0, "vy": 0.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 3.14},
+                    # Direction flip seeds
+                    "flip_vx",
+                    "flip_vy",
+                    # Spiral: forward + climb + yaw spin
+                    {"vx": 6.0, "vy": 6.0, "vz": -0.8, "yaw": 0.0, "yawspeed": 2.0},
+                ]
+                for seed_spec in ros_boundary_seeds:
+                    seed_list = []
+                    for i in range(self.config.seqlen):
+                        msg = TrajectorySetpoint()
+                        if isinstance(seed_spec, dict):
+                            msg.vx = seed_spec["vx"]
+                            msg.vy = seed_spec["vy"]
+                            msg.vz = seed_spec["vz"]
+                            msg.yaw = seed_spec["yaw"]
+                            msg.yawspeed = seed_spec["yawspeed"]
+                        elif seed_spec == "flip_vx":
+                            msg.vx = 12.0 if i < self.config.seqlen // 2 else -12.0
+                        elif seed_spec == "flip_vy":
+                            msg.vy = 12.0 if i < self.config.seqlen // 2 else -12.0
+                        seed_list.append(msg)
+                    self.queue.append(seed_list)
+            if self.config.tb3_sitl or self.config.tb3_hitl:
+                # Seed pool: boundary values derived from TurtleBot3 Burger specs
+                # Max linear velocity: 0.22 m/s, Max angular velocity: 2.84 rad/s
+                from geometry_msgs.msg import Twist
+                import seed_generator
 
-            # Single-message seeds (for RND_SINGLE and RND_REPEATED campaigns)
-            tb3_seeds = [
-                (0.22, 0.0),     # max forward
-                (-0.22, 0.0),    # max reverse
-                (0.0, 2.84),     # max left turn
-                (0.0, -2.84),    # max right turn
-                (0.22, 2.84),    # max forward + max left
-                (0.22, -2.84),   # max forward + max right
-                (-0.22, 2.84),   # max reverse + max left
-                (0.11, 1.42),    # mid-range values
-                (0.20, 0.0),     # near-boundary forward
-                (0.0, 2.80),     # near-boundary turn
-            ]
-            for (lin_x, ang_z) in tb3_seeds:
-                msg = Twist()
-                msg.linear.x = lin_x
-                msg.angular.z = ang_z
-                self.queue.append(msg)
+                # Single-message seeds (for RND_SINGLE and RND_REPEATED campaigns)
+                tb3_seeds = [
+                    (0.22, 0.0),     # max forward
+                    (-0.22, 0.0),    # max reverse
+                    (0.0, 2.84),     # max left turn
+                    (0.0, -2.84),    # max right turn
+                    (0.22, 2.84),    # max forward + max left
+                    (0.22, -2.84),   # max forward + max right
+                    (-0.22, 2.84),   # max reverse + max left
+                    (0.11, 1.42),    # mid-range values
+                    (0.20, 0.0),     # near-boundary forward
+                    (0.0, 2.80),     # near-boundary turn
+                ]
+                for (lin_x, ang_z) in tb3_seeds:
+                    msg = Twist()
+                    msg.linear.x = lin_x
+                    msg.angular.z = ang_z
+                    self.queue.append(msg)
 
-            # Sequence seeds only for RND_SEQUENCE campaign
-            if self.config.schedule == Campaign.RND_SEQUENCE:
-                seq_seeds = seed_generator.generate_sequence_seeds(
-                    "tb3", Twist, seqlen=self.config.seqlen
-                        if hasattr(self.config, 'seqlen') else 10
-                )
-                for seq in seq_seeds:
-                    self.queue.append(seq)
+                # Sequence seeds only for RND_SEQUENCE campaign
+                if self.config.schedule == Campaign.RND_SEQUENCE:
+                    seq_seeds = seed_generator.generate_sequence_seeds(
+                        "tb3", Twist, seqlen=self.config.seqlen
+                            if hasattr(self.config, 'seqlen') else 10
+                    )
+                    for seq in seq_seeds:
+                        self.queue.append(seq)
 
         elif self.config.test_moveit:
             # when using joint constraints
@@ -959,6 +993,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
             elif scheduler.campaign == Campaign.RND_SEQUENCE:
                 if fuzzer.config.use_mavlink:
                     (msg_list, frame) = scheduler.mutate_sequence_mav(config)
+                elif fuzzer.config.px4_ros:
+                    (msg_list, frame) = scheduler.mutate_sequence_ros(
+                        config, fbk_list)
                 else:
                     (msg_list, frame) = scheduler.mutate_sequence(config)
 

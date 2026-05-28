@@ -122,8 +122,8 @@ class Px4BridgeNode:
     def publish_offboard_control_mode(self):
         msg = OffboardControlMode()
         msg.timestamp = self.ts
-        msg.position = True
-        msg.velocity = False
+        msg.position = False
+        msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -266,8 +266,11 @@ class Px4BridgeNode:
         else:
             # The vehicle must be already be receiving a stream of target
             # setpoints (>2Hz) before this mode can be engaged.
+            # Use zero velocity (hover in velocity control mode).
             dummy = TrajectorySetpoint()
-            dummy.z = -0.5
+            dummy.vx = 0.0
+            dummy.vy = 0.0
+            dummy.vz = 0.0
             for i in range(50):
                 rclpy.spin_once(self.node_handle)
                 self.publish_offboard_control_mode()

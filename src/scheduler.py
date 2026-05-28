@@ -15,6 +15,9 @@ from ros2_fuzzer import ros_commons
 import px4_utils
 from px4_prep.blacklist import blacklist as param_blacklist
 from px4_prep.blacklist import tested as param_tested
+from mutation_profile import (
+    MutationProfile, STRATEGY_MULTI_AXIS, STRATEGY_FLIP, STRATEGY_SINGLE_BLOCK
+)
 
 
 class Campaign(Enum):
@@ -818,6 +821,180 @@ class Scheduler:
 
         self.round_cnt += 1
         return (self.msg_list, frame)
+
+    def mutate_sequence_ros(self, config, fbk_list=None, profile=None):
+        """
+        Block-level, domain-constrained, feedback-adaptive mutation for
+        PX4 OFFBOARD velocity control mode (ROS path).
+
+        Args:
+            config: RuntimeConfig instance.
+            fbk_list: List of Feedback instances for adaptive strategy selection.
+            profile: Optional MutationProfile override. Defaults to px4_ros_velocity.
+        """
+        if profile is None:
+            if not hasattr(self, '_ros_profile'):
+                self._ros_profile = MutationProfile.px4_ros_velocity()
+            profile = self._ros_profile
+
+        frame = str(time.time())
+
+        meta_file = os.path.join(config.meta_dir, "meta-{}".format(frame))
+        with open(meta_file, "w") as fp:
+            fp.write(
+                self.subscriber_node + "\t"
+                + self.topic_name + "\t"
+                + str(self.msg_type_class) + "\t"
+                + str(self.cycle_cnt) + "\t"
+                + str(self.round_cnt)
+            )
+
+        print(
+            "\n\x1b[92mCYCLE:", self.cycle_cnt,
+            "ROUND:", self.round_cnt, "\x1b[0m", frame,
+        )
+        print("QUEUE LEN:", len(self.fuzzer.queue))
+
+        if self.is_new_cycle:
+            self._ros_init_cycle(profile)
+        else:
+            self._ros_mutate_round(profile, fbk_list)
+
+        self.round_cnt += 1
+        return (self.msg_list, frame)
+
+    # --- ROS mutation internals ---
+
+    def _ros_init_cycle(self, profile):
+        """Initialize or reseed msg_list for a new ROS mutation cycle."""
+        if len(self.fuzzer.queue) > 0:
+            queued = self.fuzzer.queue.popleft()
+            if isinstance(queued, list):
+                self.msg_list = queued
+            else:
+                self.msg_list = [deepcopy(queued)
+                                 for _ in range(self.num_msgs)]
+            self.from_queue = True
+            self.num_msgs = len(self.msg_list)
+            print("seed from queue")
+        else:
+            self.msg_list = []
+            for i in range(self.num_msgs):
+                msg = self.msg_type_class()
+                self.msg_list.append(msg)
+            self.from_queue = False
+            print("generate initial msg list (domain-constrained)")
+
+            for msg_idx in range(self.num_msgs):
+                msg = self.msg_list[msg_idx]
+                for field in self.msg_field_list:
+                    attr_list = field[:-1]
+                    attr_leaf = attr_list[-1]
+                    fr = profile.get_range(attr_leaf)
+                    data_val = fr.sample()
+                    obj = reduce(getattr, attr_list[:-1], msg)
+                    setattr(obj, attr_leaf, data_val)
+
+        self.is_new_cycle = False
+
+    def _ros_mutate_round(self, profile, fbk_list):
+        """Apply one round of block mutation using the selected strategy."""
+        # Determine which feedback triggered most recently for adaptation
+        recent_feedback = None
+        if fbk_list:
+            for fbk in fbk_list:
+                if fbk.value is not None and fbk.interesting_value is not None:
+                    if fbk.value >= fbk.interesting_value:
+                        recent_feedback = fbk.name
+                        break
+
+        strategy = profile.select_strategy(recent_feedback)
+
+        min_block, max_block = profile.block_len_range
+        max_block = min(max_block, self.num_msgs // 3)
+        if max_block < min_block:
+            max_block = min_block
+        block_len = random.randint(min_block, max_block)
+        start_idx = random.randint(0, self.num_msgs - block_len)
+
+        if strategy == STRATEGY_MULTI_AXIS:
+            self._ros_multi_axis(profile, start_idx, block_len)
+        elif strategy == STRATEGY_FLIP:
+            self._ros_direction_flip(profile, start_idx, block_len)
+        else:
+            self._ros_single_block(profile, start_idx, block_len)
+
+    def _ros_multi_axis(self, profile, start_idx, block_len):
+        """Mutate 2-3 fields simultaneously on a block of messages."""
+        num_fields = random.randint(2, min(3, len(self.msg_field_list)))
+        fields = random.sample(self.msg_field_list, num_fields)
+        field_vals = []
+        for f in fields:
+            attr_leaf = f[-2] if len(f) > 2 else f[0]
+            fr = profile.get_range(attr_leaf)
+            val = fr.sample_high_magnitude()
+            field_vals.append((f, val))
+
+        desc = " + ".join(f"{f[0]}={v:.2f}" for f, v in field_vals)
+        print(f"[ros] multi-axis msgs[{start_idx}:{start_idx+block_len}] {desc}")
+
+        for idx in range(start_idx, start_idx + block_len):
+            msg_mutated = deepcopy(self.msg_list[idx])
+            for f, val in field_vals:
+                attr_list = f[:-1]
+                attr_leaf = attr_list[-1]
+                obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                setattr(obj, attr_leaf, val)
+            self.msg_list[idx] = msg_mutated
+
+    def _ros_direction_flip(self, profile, start_idx, block_len):
+        """Split block in half: first half gets +val, second half gets -val."""
+        half_len = block_len // 2
+        field = random.choice(self.msg_field_list)
+        attr_list = field[:-1]
+        attr_leaf = attr_list[-1]
+        fr = profile.get_range(attr_leaf)
+
+        # Generate a high-magnitude value for the flip
+        val1 = fr.sample_high_magnitude()
+        # For symmetric ranges, flip sign; for asymmetric (like vz), sample opposite end
+        if fr.low < 0:
+            val2 = -val1
+            val2 = fr.clamp(val2)
+        else:
+            # Asymmetric range: sample from opposite end
+            val2 = fr.low + (fr.high - val1)
+
+        print(f"[ros] flip {attr_leaf} msgs[{start_idx}:{start_idx+block_len}]"
+              f" {val1:.2f} -> {val2:.2f}")
+
+        for idx in range(start_idx, start_idx + half_len):
+            msg_mutated = deepcopy(self.msg_list[idx])
+            obj = reduce(getattr, attr_list[:-1], msg_mutated)
+            setattr(obj, attr_leaf, val1)
+            self.msg_list[idx] = msg_mutated
+        for idx in range(start_idx + half_len, start_idx + block_len):
+            msg_mutated = deepcopy(self.msg_list[idx])
+            obj = reduce(getattr, attr_list[:-1], msg_mutated)
+            setattr(obj, attr_leaf, val2)
+            self.msg_list[idx] = msg_mutated
+
+    def _ros_single_block(self, profile, start_idx, block_len):
+        """Set one field to a constant value across the entire block."""
+        field = random.choice(self.msg_field_list)
+        attr_list = field[:-1]
+        attr_leaf = attr_list[-1]
+        fr = profile.get_range(attr_leaf)
+        data_val = fr.sample()
+
+        print(f"[ros] block {attr_leaf} msgs[{start_idx}:{start_idx+block_len}]"
+              f" = {data_val:.2f}")
+
+        for idx in range(start_idx, start_idx + block_len):
+            msg_mutated = deepcopy(self.msg_list[idx])
+            obj = reduce(getattr, attr_list[:-1], msg_mutated)
+            setattr(obj, attr_leaf, data_val)
+            self.msg_list[idx] = msg_mutated
 
     def mutate_sequence(self, config):
         frame = str(time.time())
