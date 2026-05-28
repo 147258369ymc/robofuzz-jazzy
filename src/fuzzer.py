@@ -34,6 +34,7 @@ import mutator
 import harness
 import checker
 from rosbag_parser import RosbagParser
+from ulg_parser import UlgStateParser, find_latest_ulg, cleanup_ulg_files, preserve_ulg_on_error
 from checker import StateMonitorNode
 from executor import Executor, ExecMode
 from scheduler import Scheduler, Campaign
@@ -1161,22 +1162,39 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 continue # don't check states as nothing's published
 
             state_dict_list = []
+            ulg_path = None  # track for error preservation
             # repeated campaigns result in multiple bag files
             for exec_cnt in range(repeat):
 
-                parser = RosbagParser(
-                    f"states-{exec_cnt}.bag/states-{exec_cnt}.bag_0.db3"
-                )
+                if fuzzer.config.use_ulg and fuzzer.config.px4_sitl:
+                    # --- ULG path: read PX4 internal log (bypasses bridge) ---
+                    ulg_path = find_latest_ulg()
+                    if ulg_path is None:
+                        print("[-] no ULG file found. Skipping oracle.")
+                        continue
+                    parser = UlgStateParser(ulg_path)
+                    if parser.abort:
+                        print("[-] corrupted ULG file. Skipping.")
+                        continue
+                    state_msgs_dict = parser.process_messages()
+                    if len(state_msgs_dict) == 0:
+                        print("[-] ULG empty after takeoff filter, using all")
+                        state_msgs_dict = parser.process_all_messages()
+                else:
+                    # --- Rosbag path: original behavior ---
+                    parser = RosbagParser(
+                        f"states-{exec_cnt}.bag/states-{exec_cnt}.bag_0.db3"
+                    )
 
-                if parser.abort:
-                    print("[-] corrupted recorded states. Abort.")
-                    continue
+                    if parser.abort:
+                        print("[-] corrupted recorded states. Abort.")
+                        continue
 
-                state_msgs_dict = parser.process_messages()
-                # if dict is empty, fallback to all messages w/o ts filtering
-                if len(state_msgs_dict) == 0:
-                    print("[-] watch failed")
-                    state_msgs_dict = parser.process_all_messages()
+                    state_msgs_dict = parser.process_messages()
+                    # if dict is empty, fallback to all messages w/o ts filtering
+                    if len(state_msgs_dict) == 0:
+                        print("[-] watch failed")
+                        state_msgs_dict = parser.process_all_messages()
 
                 # state_dict = checker.group_msgs_by_topic(state_msgs_dict)
 
@@ -1262,21 +1280,31 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 with open(err_file, "a") as fp:
                     fp.write(str(errs))
 
-                for exec_cnt in range(repeat):
-                    # copy rosbags to {log_dir}/rosbags/{frame}/
-                    bag_dir = f"states-{exec_cnt}.bag"
-                    try:
-                        os.makedirs(os.path.join(fuzzer.config.rosbag_dir, frame), exist_ok=True)
-                        shutil.copytree(
-                            bag_dir,
-                            os.path.join(fuzzer.config.rosbag_dir, frame, bag_dir),
-                            dirs_exist_ok=True
-                        )
-                    except Exception as e:
-                        print(f"[!] rosbag copy failed: {e}")
+                if fuzzer.config.use_ulg and fuzzer.config.px4_sitl:
+                    # Preserve .ulg as evidence
+                    if ulg_path:
+                        preserve_ulg_on_error(
+                            ulg_path, fuzzer.config.log_dir, frame)
+                else:
+                    for exec_cnt in range(repeat):
+                        # copy rosbags to {log_dir}/rosbags/{frame}/
+                        bag_dir = f"states-{exec_cnt}.bag"
+                        try:
+                            os.makedirs(os.path.join(fuzzer.config.rosbag_dir, frame), exist_ok=True)
+                            shutil.copytree(
+                                bag_dir,
+                                os.path.join(fuzzer.config.rosbag_dir, frame, bag_dir),
+                                dirs_exist_ok=True
+                            )
+                        except Exception as e:
+                            print(f"[!] rosbag copy failed: {e}")
 
             else:
                 print("[+] no error found")
+
+            # Clean up old .ulg files to prevent disk fill
+            if fuzzer.config.use_ulg and fuzzer.config.px4_sitl:
+                cleanup_ulg_files(keep_latest=1)
 
             if scheduler.campaign == Campaign.RND_REPEATED:
                 rpt_errs = checker.run_rpt_checks(
@@ -1684,6 +1712,11 @@ if __name__ == "__main__":
         action="store_true",
         help="shortcut for testing moveit library",
     )
+    argparser.add_argument(
+        "--use-ulg",
+        action="store_true",
+        help="use PX4 internal .ulg logs instead of rosbag for oracle (bypasses microRTPS bridge)",
+    )
 
     args = argparser.parse_args()
 
@@ -1912,6 +1945,8 @@ if __name__ == "__main__":
         config.test_moveit = True
     else:
         config.test_moveit = False
+
+    config.use_ulg = args.use_ulg
 
     config.exec_cmd = None
     ret = config.find_package_metadata()
