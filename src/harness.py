@@ -91,7 +91,7 @@ def run_px4_stack_sh(proj_dir):
     model = "iris"
 
     cmd_list = [
-        "PX4_SITL_WORLD=church",
+        "PX4_SITL_WORLD=empty",
         os.path.join(px4_dir, "Tools", "sitl_run.sh"),
         os.path.join(px4_dir, "build", "px4_sitl_rtps", "bin", "px4"),
         "none",

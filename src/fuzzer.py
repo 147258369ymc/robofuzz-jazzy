@@ -59,32 +59,89 @@ from turtlesim.msg import Pose
 
 
 class SeedQueue:
-    """Quality-aware seed queue that replaces FIFO deque.
+    """Quality-aware seed queue with deduplication, staleness decay, and warmup.
 
-    Instead of always popping the oldest seed (which causes low-quality early
-    seeds to dominate), this queue uses random selection so that high-quality
-    seeds accumulated later have equal chance of being picked.
-
-    Capacity is bounded: when full, the oldest entry is evicted.
+    Seeds stay in the pool until they become "stale" (selected MAX_SELECTIONS
+    times). Weighted random selection favors fresher seeds. During warmup,
+    each initial seed is guaranteed at least one selection before random
+    selection begins.
     """
 
     MAX_SIZE = 50
+    MAX_SELECTIONS = 5
 
     def __init__(self):
-        self._items = []  # list of seeds
+        self._items = []
+        self._select_count = []
+        self._warmup_done = False
+        self._initial_count = 0
 
-    def append(self, seed):
+    def append(self, seed, is_readd=False):
+        """Add seed. Duplicates are silently rejected on re-add."""
+        if is_readd and self._is_duplicate(seed):
+            return
         if len(self._items) >= self.MAX_SIZE:
-            # Evict oldest (index 0) to make room
             self._items.pop(0)
+            self._select_count.pop(0)
         self._items.append(seed)
+        self._select_count.append(0)
+        if not is_readd:
+            self._initial_count += 1
 
     def popleft(self):
-        """Pick a random seed and remove it (replaces FIFO popleft)."""
+        """Weighted random selection, favoring fresher seeds."""
         if not self._items:
             raise IndexError("pop from empty queue")
-        idx = random.randint(0, len(self._items) - 1)
-        return self._items.pop(idx)
+        # Warmup: rotate through initial seeds sequentially
+        if not self._warmup_done:
+            for idx, sc in enumerate(self._select_count):
+                if sc == 0:
+                    self._select_count[idx] += 1
+                    return self._items[idx]
+            self._warmup_done = True
+        # Normal: weight = 1/(1+select_count)
+        weights = [1.0 / (1 + sc) for sc in self._select_count]
+        idx = random.choices(range(len(self._items)), weights=weights, k=1)[0]
+        self._select_count[idx] += 1
+        # Evict stale seeds — but never evict the last one
+        if self._select_count[idx] >= self.MAX_SELECTIONS:
+            if len(self._items) > 1:
+                self._items.pop(idx)
+                self._select_count.pop(idx)
+                return self.popleft()
+            else:
+                # Last seed: reset its counter instead of evicting
+                self._select_count[idx] = 0
+        return self._items[idx]
+
+    def _is_duplicate(self, seed):
+        for existing in self._items:
+            if self._seeds_similar(seed, existing):
+                return True
+        return False
+
+    @staticmethod
+    def _seeds_similar(a, b, threshold=0.05):
+        if type(a) != type(b):
+            return False
+        if isinstance(a, list) and isinstance(b, list):
+            if len(a) != len(b):
+                return False
+            for i in [0, len(a) // 2, len(a) - 1]:
+                if not SeedQueue._msg_similar(a[i], b[i], threshold):
+                    return False
+            return True
+        return SeedQueue._msg_similar(a, b, threshold)
+
+    @staticmethod
+    def _msg_similar(a, b, threshold):
+        for attr in ('vx', 'vy', 'vz', 'yawspeed', 'x', 'y', 'z', 'r'):
+            va = getattr(a, attr, None)
+            vb = getattr(b, attr, None)
+            if va is not None and vb is not None:
+                if abs(va - vb) > threshold:
+                    return False
+        return True
 
     def __len__(self):
         return len(self._items)
@@ -238,15 +295,15 @@ class Fuzzer:
                     # Multi-axis extreme: max horizontal velocity diagonal
                     {"vx": 12.0, "vy": 12.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 0.0},
                     {"vx": -12.0, "vy": -12.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 0.0},
-                    # Max descent + lateral speed
-                    {"vx": 12.0, "vy": 0.0, "vz": 5.0, "yaw": 0.0, "yawspeed": 0.0},
+                    # Max climb + lateral speed (NED: negative vz = climb)
+                    {"vx": 12.0, "vy": 0.0, "vz": -5.0, "yaw": 0.0, "yawspeed": 0.0},
                     # Yaw spin + forward velocity (gyroscopic coupling)
                     {"vx": 8.0, "vy": 0.0, "vz": 0.0, "yaw": 0.0, "yawspeed": 3.14},
                     # Direction flip seeds
                     "flip_vx",
                     "flip_vy",
                     # Spiral: forward + climb + yaw spin
-                    {"vx": 6.0, "vy": 6.0, "vz": -0.8, "yaw": 0.0, "yawspeed": 2.0},
+                    {"vx": 6.0, "vy": 6.0, "vz": -3.0, "yaw": 0.0, "yawspeed": 2.0},
                 ]
                 for seed_spec in ros_boundary_seeds:
                     seed_list = []
@@ -264,7 +321,7 @@ class Fuzzer:
                             msg.vy = 12.0 if i < self.config.seqlen // 2 else -12.0
                         seed_list.append(msg)
                     self.queue.append(seed_list)
-            if self.config.tb3_sitl or self.config.tb3_hitl:
+            elif self.config.tb3_sitl or self.config.tb3_hitl:
                 # Seed pool: boundary values derived from TurtleBot3 Burger specs
                 # Max linear velocity: 0.22 m/s, Max angular velocity: 2.84 rad/s
                 from geometry_msgs.msg import Twist
@@ -485,23 +542,9 @@ class Fuzzer:
             return
 
         if self.config.px4_sitl:
-            for cmd in [
-                "pkill -9 -f sitl_run",
-                "pkill -9 px4",
-                "pkill -9 gzserver",
-                "pkill -9 -f 'gz [m]odel'",
-                "pkill -9 -f 'px4[-]simulator'",
-            ]:
-                try:
-                    sp.run(cmd, shell=True, timeout=5)
-                except sp.TimeoutExpired:
-                    print(f"[!] timeout: {cmd}")
-            # Remove PX4 instance lock so next start doesn't see stale daemon
-            try:
-                os.remove("/tmp/px4_lock-0")
-            except FileNotFoundError:
-                pass
-            time.sleep(2)
+            # Only kill PX4, keep Gazebo alive for reuse across iterations
+            # (original RoboFuzz behavior — avoids zombie/port issues)
+            os.system("pkill px4")
             self.running = False
 
         elif self.config.tb3_hitl:
@@ -1378,7 +1421,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     # takes the entire list
                     msg_to_queue = msg_list
 
-                fuzzer.queue.append(deepcopy(msg_to_queue))
+                # Diminishing returns: limit re-queue per cycle
+                if not hasattr(scheduler, '_seed_interesting_count'):
+                    scheduler._seed_interesting_count = 0
+                scheduler._seed_interesting_count += 1
+
+                if scheduler._seed_interesting_count <= 3:
+                    if isinstance(fuzzer.queue, SeedQueue):
+                        fuzzer.queue.append(deepcopy(msg_to_queue), is_readd=True)
+                    else:
+                        fuzzer.queue.append(deepcopy(msg_to_queue))
+                else:
+                    print("[feedback] diminishing — skip re-queue")
+
+                # Reset stagnation counter
+                if hasattr(scheduler, '_no_interesting_rounds'):
+                    scheduler._no_interesting_rounds = 0
 
                 with open(
                     os.path.join(fuzzer.config.cov_dir, frame),
@@ -1432,12 +1490,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         scheduler.round_cnt = 0
                         scheduler.cycle_cnt += 1
                         scheduler.is_new_cycle = True
+                        scheduler._seed_interesting_count = 0
                         print("--- cycle finished ---")
                 else:
                     if scheduler.round_cnt >= 5:
                         scheduler.round_cnt = 0
                         scheduler.cycle_cnt += 1
                         scheduler.is_new_cycle = True
+                        scheduler._seed_interesting_count = 0
                         print("--- cycle finished ---")
 
             elif fuzzer.config.test_moveit:
@@ -1575,6 +1635,11 @@ def main(config):
 
 
 if __name__ == "__main__":
+    # Ignore SIGHUP/SIGPIPE so terminal disconnection doesn't kill the fuzzer.
+    # This allows long-running experiments to survive SSH/docker session drops.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
     argparser = argparse.ArgumentParser()
 
     argparser.add_argument(
@@ -1835,7 +1900,7 @@ if __name__ == "__main__":
         from px4_msgs.msg import VehicleCommand
         import px4_utils
         config.px4_mission_file = args.px4_mission
-        config.flight_mode = "OFFBOARD"
+        config.flight_mode = args.px4_flight_mode.upper()
     elif args.px4_sitl_mav:
         config.px4_sitl = True
         config.px4_ros = False

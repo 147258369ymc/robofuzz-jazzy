@@ -20,8 +20,28 @@ class FieldRange:
     high: float
 
     def sample(self) -> float:
-        """Generate a random value within the domain range."""
+        """Generate a random value within the domain range,
+        with 15% chance of producing an out-of-range extreme value
+        that can stress the controller into undefined behavior."""
+        if random.random() < 0.15:
+            return self._sample_extreme()
         return random.uniform(self.low, self.high)
+
+    def _sample_extreme(self) -> float:
+        """Generate values outside normal range to trigger controller edge cases.
+        Includes very large values, near-zero denorms, and boundary values."""
+        roll = random.random()
+        span = self.high - self.low
+        if roll < 0.3:
+            # 2x-5x beyond range
+            multiplier = random.uniform(2.0, 5.0)
+            return random.choice([self.high * multiplier, self.low * multiplier])
+        elif roll < 0.6:
+            # Exact boundary values (often trigger off-by-one in controllers)
+            return random.choice([self.low, self.high, 0.0])
+        else:
+            # Very large values that may overflow controller integrators
+            return random.choice([1e6, -1e6, 1e3, -1e3])
 
     def sample_high_magnitude(self) -> float:
         """Sample from the upper/lower 30% of the range (extreme values)."""
@@ -38,6 +58,7 @@ class FieldRange:
 STRATEGY_MULTI_AXIS = "multi_axis"
 STRATEGY_FLIP = "flip"
 STRATEGY_SINGLE_BLOCK = "single_block"
+STRATEGY_RANDOM = "random"
 
 # Default feedback-to-strategy mappings for PX4
 _PX4_FEEDBACK_STRATEGY_MAP = {
@@ -107,14 +128,15 @@ class MutationProfile:
             field_ranges={
                 "vx": FieldRange("vx", -12.0, 12.0),
                 "vy": FieldRange("vy", -12.0, 12.0),
-                "vz": FieldRange("vz", -1.0, 5.0),
+                "vz": FieldRange("vz", -5.0, 1.0),
                 "yaw": FieldRange("yaw", -math.pi, math.pi),
                 "yawspeed": FieldRange("yawspeed", -3.49, 3.49),
             },
             strategy_weights={
-                STRATEGY_MULTI_AXIS: 0.30,
+                STRATEGY_MULTI_AXIS: 0.35,
                 STRATEGY_FLIP: 0.20,
-                STRATEGY_SINGLE_BLOCK: 0.50,
+                STRATEGY_SINGLE_BLOCK: 0.30,
+                STRATEGY_RANDOM: 0.15,
             },
             block_len_range=(5, 30),
             feedback_strategy_map=_PX4_FEEDBACK_STRATEGY_MAP,

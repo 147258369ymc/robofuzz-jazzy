@@ -671,7 +671,7 @@ def check(config, msg_list, state_dict, feedback_list):
     # may have stalled — indicating a real firmware issue.
     # =================================================================
     max_control_gap = 0.0
-    CONTROL_GAP_LIMIT = 0.1  # 100ms — 5x the expected 20ms period
+    CONTROL_GAP_LIMIT = 0.15 if getattr(config, 'use_ulg', False) else 0.1
     if len(vehicle_local_position_list) >= 2:
         for i in range(1, len(vehicle_local_position_list)):
             ts_prev = vehicle_local_position_list[i - 1][0]

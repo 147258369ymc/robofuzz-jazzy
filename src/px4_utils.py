@@ -119,11 +119,18 @@ class Px4BridgeNode:
         # print(msg)
         self.pub_vehiclecommand.publish(msg)
 
-    def publish_offboard_control_mode(self):
+    def publish_offboard_control_mode(self, use_velocity=False):
         msg = OffboardControlMode()
         msg.timestamp = self.ts
-        msg.position = False
-        msg.velocity = True
+        if use_velocity:
+            # Velocity control: direct velocity-to-thrust mapping
+            msg.position = False
+            msg.velocity = True
+        else:
+            # Position control: position controller tracks velocity setpoints
+            # with overshoot potential — better for bug finding
+            msg.position = True
+            msg.velocity = False
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
@@ -266,14 +273,14 @@ class Px4BridgeNode:
         else:
             # The vehicle must be already be receiving a stream of target
             # setpoints (>2Hz) before this mode can be engaged.
-            # Use zero velocity (hover in velocity control mode).
+            # Use POSITION mode for takeoff.
             dummy = TrajectorySetpoint()
-            dummy.vx = 0.0
-            dummy.vy = 0.0
-            dummy.vz = 0.0
+            dummy.x = 0.0
+            dummy.y = 0.0
+            dummy.z = -8.0  # NED: 8m above ground
             for i in range(50):
                 rclpy.spin_once(self.node_handle)
-                self.publish_offboard_control_mode()
+                self.publish_offboard_control_mode(use_velocity=False)
                 self.publish_trajectory(dummy)
                 time.sleep(0.1)
 
@@ -285,6 +292,14 @@ class Px4BridgeNode:
             rclpy.spin_once(self.node_handle)
             self.publish_arm_command()
             time.sleep(0.1)
+
+            # Wait for takeoff: keep sending position setpoint until airborne
+            # (similar to put_in_air() in MAVLink mode)
+            for i in range(80):
+                rclpy.spin_once(self.node_handle)
+                self.publish_offboard_control_mode(use_velocity=False)
+                self.publish_trajectory(dummy)
+                time.sleep(0.1)
 
     def send_command_arm(self, timeout=15):
         """Arm the vehicle with a timeout. Raises RuntimeError if arm fails."""
@@ -305,14 +320,11 @@ class Px4BridgeNode:
         raise RuntimeError(f"Arm failed: timeout after {timeout}s")
 
     def _restart_px4_stack(self):
-        """Kill PX4 + Gazebo and restart the SITL stack."""
+        """Kill PX4 and restart (keep Gazebo alive for reuse)."""
         import subprocess as sp
-        print("[!] Restarting PX4 SITL stack...")
-        for cmd in ["pkill -9 px4", "pkill -9 gzserver", "pkill -9 -f 'gz [m]odel'"]:
-            try:
-                sp.run(cmd, shell=True, timeout=5)
-            except sp.TimeoutExpired:
-                print(f"[!] timeout: {cmd}")
+        print("[!] Restarting PX4...")
+        sp.run("pkill -9 px4", shell=True, timeout=5,
+               stdout=sp.DEVNULL, stderr=sp.DEVNULL)
         try:
             os.remove("/tmp/px4_lock-0")
         except FileNotFoundError:
@@ -322,7 +334,7 @@ class Px4BridgeNode:
         proj_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         harness.run_px4_stack_sh(proj_root)
         time.sleep(12)
-        print("[!] PX4 SITL stack restarted")
+        print("[!] PX4 restarted")
 
     def send_command_takeoff(self, alt=10.0):
         print(f"[+] (MAVLink) send takeoff command")
@@ -355,7 +367,13 @@ class Px4BridgeNode:
 
         else:
             rclpy.spin_once(self.node_handle)
-            self.publish_offboard_control_mode()
+            # Fuzz phase uses velocity mode so vx/vy/vz are interpreted as
+            # velocity setpoints. Position fields must be NaN to prevent
+            # PX4 from tracking them as position targets.
+            self.publish_offboard_control_mode(use_velocity=True)
+            msg.x = float('nan')
+            msg.y = float('nan')
+            msg.z = float('nan')
             self.publish_trajectory(msg)
             print("[offboard controller] sending:", msg)
 

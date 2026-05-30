@@ -16,7 +16,8 @@ import px4_utils
 from px4_prep.blacklist import blacklist as param_blacklist
 from px4_prep.blacklist import tested as param_tested
 from mutation_profile import (
-    MutationProfile, STRATEGY_MULTI_AXIS, STRATEGY_FLIP, STRATEGY_SINGLE_BLOCK
+    MutationProfile, STRATEGY_MULTI_AXIS, STRATEGY_FLIP, STRATEGY_SINGLE_BLOCK,
+    STRATEGY_RANDOM
 )
 
 
@@ -868,32 +869,39 @@ class Scheduler:
     def _ros_init_cycle(self, profile):
         """Initialize or reseed msg_list for a new ROS mutation cycle."""
         if len(self.fuzzer.queue) > 0:
-            queued = self.fuzzer.queue.popleft()
-            if isinstance(queued, list):
-                self.msg_list = queued
-            else:
-                self.msg_list = [deepcopy(queued)
-                                 for _ in range(self.num_msgs)]
-            self.from_queue = True
-            self.num_msgs = len(self.msg_list)
-            print("seed from queue")
-        else:
-            self.msg_list = []
-            for i in range(self.num_msgs):
-                msg = self.msg_type_class()
-                self.msg_list.append(msg)
-            self.from_queue = False
-            print("generate initial msg list (domain-constrained)")
+            try:
+                queued = self.fuzzer.queue.popleft()
+            except IndexError:
+                queued = None
+            if queued is not None:
+                if isinstance(queued, list):
+                    self.msg_list = queued
+                else:
+                    self.msg_list = [deepcopy(queued)
+                                     for _ in range(self.num_msgs)]
+                self.from_queue = True
+                self.num_msgs = len(self.msg_list)
+                print("seed from queue")
+                self.is_new_cycle = False
+                return
 
-            for msg_idx in range(self.num_msgs):
-                msg = self.msg_list[msg_idx]
-                for field in self.msg_field_list:
-                    attr_list = field[:-1]
-                    attr_leaf = attr_list[-1]
-                    fr = profile.get_range(attr_leaf)
-                    data_val = fr.sample()
-                    obj = reduce(getattr, attr_list[:-1], msg)
-                    setattr(obj, attr_leaf, data_val)
+        # Queue empty or popleft failed: generate fresh random seed
+        self.msg_list = []
+        for i in range(self.num_msgs):
+            msg = self.msg_type_class()
+            self.msg_list.append(msg)
+        self.from_queue = False
+        print("generate fresh random seed (queue exhausted)")
+
+        for msg_idx in range(self.num_msgs):
+            msg = self.msg_list[msg_idx]
+            for field in self.msg_field_list:
+                attr_list = field[:-1]
+                attr_leaf = attr_list[-1]
+                fr = profile.get_range(attr_leaf)
+                data_val = fr.sample()
+                obj = reduce(getattr, attr_list[:-1], msg)
+                setattr(obj, attr_leaf, data_val)
 
         self.is_new_cycle = False
 
@@ -908,7 +916,15 @@ class Scheduler:
                         recent_feedback = fbk.name
                         break
 
-        strategy = profile.select_strategy(recent_feedback)
+        # Stagnation detection: force RANDOM when stuck
+        if not hasattr(self, '_no_interesting_rounds'):
+            self._no_interesting_rounds = 0
+        self._no_interesting_rounds += 1
+
+        if self._no_interesting_rounds >= 10:
+            strategy = STRATEGY_RANDOM
+        else:
+            strategy = profile.select_strategy(recent_feedback)
 
         min_block, max_block = profile.block_len_range
         max_block = min(max_block, self.num_msgs // 3)
@@ -921,6 +937,8 @@ class Scheduler:
             self._ros_multi_axis(profile, start_idx, block_len)
         elif strategy == STRATEGY_FLIP:
             self._ros_direction_flip(profile, start_idx, block_len)
+        elif strategy == STRATEGY_RANDOM:
+            self._ros_random_fresh(profile, start_idx, block_len)
         else:
             self._ros_single_block(profile, start_idx, block_len)
 
@@ -994,6 +1012,20 @@ class Scheduler:
             msg_mutated = deepcopy(self.msg_list[idx])
             obj = reduce(getattr, attr_list[:-1], msg_mutated)
             setattr(obj, attr_leaf, data_val)
+            self.msg_list[idx] = msg_mutated
+
+    def _ros_random_fresh(self, profile, start_idx, block_len):
+        """Generate completely fresh random values for all fields in the block."""
+        print(f"[ros] random msgs[{start_idx}:{start_idx+block_len}]")
+        for idx in range(start_idx, start_idx + block_len):
+            msg_mutated = deepcopy(self.msg_list[idx])
+            for field in self.msg_field_list:
+                attr_list = field[:-1]
+                attr_leaf = attr_list[-1]
+                fr = profile.get_range(attr_leaf)
+                data_val = fr.sample()
+                obj = reduce(getattr, attr_list[:-1], msg_mutated)
+                setattr(obj, attr_leaf, data_val)
             self.msg_list[idx] = msg_mutated
 
     def mutate_sequence(self, config):
