@@ -295,6 +295,7 @@ def check(config, msg_list, state_dict, feedback_list):
     # Section 6: Angular Rate Limits
     # =================================================================
     max_angular_rate_val = 0.0
+    max_rollpitch_rate_val = 0.0  # roll/pitch only (excludes commanded yaw)
     for (ts, ang) in vehicle_angular_velocity_list:
         if _is_on_ground(ts, filter_ts_list):
             continue
@@ -306,6 +307,8 @@ def check(config, msg_list, state_dict, feedback_list):
         yaw_rate_dps = abs(ang.xyz[2]) * 180.0 / math.pi
         max_rate = max(roll_rate_dps, pitch_rate_dps, yaw_rate_dps)
         max_angular_rate_val = max(max_angular_rate_val, max_rate)
+        max_rollpitch_rate_val = max(max_rollpitch_rate_val,
+                                     roll_rate_dps, pitch_rate_dps)
 
         # Roll rate
         roll_limit = thr["MC_ROLLRATE_MAX"] + TOL_RATE
@@ -320,15 +323,23 @@ def check(config, msg_list, state_dict, feedback_list):
         # Yaw rate (mode-dependent)
         if config.flight_mode in ("MANUAL", "ALTCTL", "POSCTL"):
             yaw_limit = thr["MPC_MAN_Y_MAX"] + TOL_RATE
+        elif config.flight_mode == "OFFBOARD":
+            # OFFBOARD: pilot/companion commands yawspeed directly.
+            # PX4 only clips at MC_YAWRATE_MAX (rate controller limit).
+            # MPC_YAWRAUTO_MAX is irrelevant here — it's for AUTO mission
+            # trajectory planning, not for commanded yawspeed.
+            yaw_limit = thr["MC_YAWRATE_MAX"] + TOL_RATE
         else:
+            # AUTO/LOITER: autonomous yaw rate limited by MPC_YAWRAUTO_MAX
             yaw_limit = thr["MPC_YAWRAUTO_MAX"] + TOL_RATE
         if yaw_rate_dps > yaw_limit:
             errs.append(f"{ts} Yaw rate violated: {yaw_rate_dps:.1f} > {yaw_limit:.1f} deg/s")
 
-        # Overall yaw rate hardware limit
-        yaw_hw_limit = thr["MC_YAWRATE_MAX"] + TOL_RATE
-        if yaw_rate_dps > yaw_hw_limit:
-            errs.append(f"{ts} MC_YAWRATE_MAX violated: {yaw_rate_dps:.1f} > {yaw_hw_limit:.1f} deg/s")
+        # Overall yaw rate hardware limit (skip in OFFBOARD — already checked above)
+        if config.flight_mode != "OFFBOARD":
+            yaw_hw_limit = thr["MC_YAWRATE_MAX"] + TOL_RATE
+            if yaw_rate_dps > yaw_hw_limit:
+                errs.append(f"{ts} MC_YAWRATE_MAX violated: {yaw_rate_dps:.1f} > {yaw_hw_limit:.1f} deg/s")
 
     # =================================================================
     # Section 7: Jerk Limit (derivative of acceleration)
@@ -498,9 +509,11 @@ def check(config, msg_list, state_dict, feedback_list):
     # WV_YRATE_MAX only constrains the Weathervane module's yaw output.
     # In POSCTL/MANUAL/ALTCTL, yaw is controlled by MPC_MAN_Y_MAX
     # (already checked in Section 6). Only check WV_YRATE_MAX in
-    # AUTO/OFFBOARD modes where Weathervane is active.
+    # AUTO/LOITER modes where Weathervane is active and not overridden.
+    # In OFFBOARD mode, explicit yawspeed commands override Weathervane,
+    # so this check is not applicable.
     # =================================================================
-    if config.flight_mode in ("AUTO", "OFFBOARD", "LOITER"):
+    if config.flight_mode in ("AUTO", "LOITER"):
         for (ts, ang) in vehicle_angular_velocity_list:
             if _is_on_ground(ts, filter_ts_list):
                 continue
@@ -597,12 +610,22 @@ def check(config, msg_list, state_dict, feedback_list):
     # If ALL motors are at max (or min) for >200ms, the drone has lost
     # control authority. This is a real safety issue — not a parameter
     # threshold, but a physical inability to control the vehicle.
+    #
+    # Important distinction:
+    # - In-flight saturation (MAX): genuine loss of control authority
+    # - Post-crash saturation (MIN): motors off after crash, expected
+    # We track both for feedback but only report in-flight saturation
+    # as errors. Post-crash MIN saturation is filtered using a duration
+    # cap: if MIN saturation exceeds CRASH_DURATION_CAP, it's a crashed
+    # drone on the ground, not a control failure in flight.
     # =================================================================
     max_saturation_duration = 0.0
+    max_inflight_saturation = 0.0  # only in-flight events
     saturation_start_ts = None
     MOTOR_MAX = 1900  # PWM max (PX4 default: 1000-2000, saturated at ~1900+)
     MOTOR_MIN = 1100  # PWM min (idle ~1100)
     SATURATION_DURATION_LIMIT = 0.2  # seconds
+    CRASH_DURATION_CAP = 5.0  # seconds — MIN saturation beyond this = on ground
 
     for (ts, act) in actuator_outputs_list:
         if not hasattr(act, 'output'):
@@ -618,17 +641,31 @@ def check(config, msg_list, state_dict, feedback_list):
         if all_max or all_min:
             if saturation_start_ts is None:
                 saturation_start_ts = ts
+                saturation_type = "MAX" if all_max else "MIN"
             else:
                 duration = (ts - saturation_start_ts) / 1e9
                 max_saturation_duration = max(max_saturation_duration, duration)
-                if duration >= SATURATION_DURATION_LIMIT:
-                    sat_type = "MAX" if all_max else "MIN"
-                    errs.append(
-                        f"{ts} Actuator saturation ({sat_type}): "
-                        f"all motors saturated for {duration:.3f}s"
-                    )
+
+                if saturation_type == "MAX":
+                    # In-flight: all motors at max = genuine control loss
+                    max_inflight_saturation = max(max_inflight_saturation, duration)
+                    if duration >= SATURATION_DURATION_LIMIT:
+                        errs.append(
+                            f"{ts} Actuator saturation ({saturation_type}): "
+                            f"all motors saturated for {duration:.3f}s"
+                        )
+                elif saturation_type == "MIN" and duration <= CRASH_DURATION_CAP:
+                    # Short MIN saturation: could be brief control loss in flight
+                    max_inflight_saturation = max(max_inflight_saturation, duration)
+                    if duration >= SATURATION_DURATION_LIMIT:
+                        errs.append(
+                            f"{ts} Actuator saturation ({saturation_type}): "
+                            f"all motors saturated for {duration:.3f}s"
+                        )
+                # else: MIN saturation > CRASH_DURATION_CAP = on ground, skip error
         else:
             saturation_start_ts = None
+            saturation_type = None
 
     # =================================================================
     # Section 15: Odometry Cross-Validation
@@ -702,7 +739,13 @@ def check(config, msg_list, state_dict, feedback_list):
         elif feedback.name == "max_xy_velocity":
             feedback.update_value(max_xy_vel_val)
         elif feedback.name == "max_angular_rate":
-            feedback.update_value(max_angular_rate_val)
+            # In OFFBOARD mode, yaw rate is directly commanded and dominates
+            # the feedback signal. Use roll/pitch only to guide exploration
+            # toward genuine control failures rather than commanded yaw.
+            if config.flight_mode == "OFFBOARD":
+                feedback.update_value(max_rollpitch_rate_val)
+            else:
+                feedback.update_value(max_angular_rate_val)
         elif feedback.name == "max_jerk":
             feedback.update_value(max_jerk_val)
         elif feedback.name == "vel_pos_inconsistency":
@@ -715,7 +758,8 @@ def check(config, msg_list, state_dict, feedback_list):
             combined = max_tilt_val * max_xy_vel_val
             feedback.update_value(combined)
         elif feedback.name == "actuator_saturation":
-            feedback.update_value(max_saturation_duration)
+            # Use in-flight saturation only (excludes post-crash ground time)
+            feedback.update_value(max_inflight_saturation)
         elif feedback.name == "odom_pos_divergence":
             feedback.update_value(max_odom_pos_err)
         elif feedback.name == "control_loop_gap":

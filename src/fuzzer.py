@@ -114,6 +114,30 @@ class SeedQueue:
                 self._select_count[idx] = 0
         return self._items[idx]
 
+    def purge_crashed(self):
+        """Remove most-selected seeds on crash detection.
+
+        When a crash is detected, the seeds that have been selected most
+        often are likely the ones producing crashes. Remove them to allow
+        the queue to recover with fresh seeds. Always keeps at least 2
+        seeds to avoid empty queue.
+        """
+        if len(self._items) <= 2:
+            return
+        max_sc = max(self._select_count)
+        if max_sc < 2:
+            return
+        to_remove = []
+        for i in range(len(self._items) - 1, -1, -1):
+            if (self._select_count[i] >= max_sc
+                    and len(self._items) - len(to_remove) > 2):
+                to_remove.append(i)
+        for i in to_remove:
+            self._items.pop(i)
+            self._select_count.pop(i)
+        if to_remove:
+            print(f"[SeedQueue] purged {len(to_remove)} stale crash seeds")
+
     def _is_duplicate(self, seed):
         for existing in self._items:
             if self._seeds_similar(seed, existing):
@@ -1414,6 +1438,26 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 is_interesting = is_interesting or cur_interesting
 
             if is_interesting:
+                # Flight quality gate: reject seeds where drone never flew.
+                # This prevents crash-inducing inputs from polluting the queue.
+                # Only applies to PX4 targets; other targets skip this check.
+                flight_quality_ok = True
+                if fuzzer.config.px4_sitl:
+                    for fbk in fbk_list:
+                        if fbk.name == "max_tilt_angle":
+                            if fbk.value is None or fbk.value < 2.0:
+                                flight_quality_ok = False
+                                break
+                        if fbk.name == "max_xy_velocity":
+                            if fbk.value is None or fbk.value < 0.3:
+                                flight_quality_ok = False
+                                break
+
+                if not flight_quality_ok:
+                    print("[feedback] REJECTED — drone did not fly (quality gate)")
+                    is_interesting = False
+
+            if is_interesting:
                 print("[feedback] INTERESTING!")
                 msg_to_queue = msg_list[0]
 
@@ -1437,6 +1481,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # Reset stagnation counter
                 if hasattr(scheduler, '_no_interesting_rounds'):
                     scheduler._no_interesting_rounds = 0
+                if hasattr(scheduler, '_cycles_without_new_cov'):
+                    scheduler._cycles_without_new_cov = 0
 
                 with open(
                     os.path.join(fuzzer.config.cov_dir, frame),
@@ -1460,15 +1506,33 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 is_crash = any("Attitude" in e and
                     float(e.split()[-2]) > 170
                     for e in errs if "Attitude" in e)
-                if is_crash:
+                # Detect ground crash: all motors at MIN for >5s = drone on ground
+                is_ground_crash = False
+                for e in errs:
+                    if "Actuator saturation" in e and "MIN" in e:
+                        try:
+                            dur = float(e.split("for ")[1].split("s")[0])
+                            if dur > 5.0:
+                                is_ground_crash = True
+                                break
+                        except (IndexError, ValueError):
+                            pass
+                if is_crash or is_ground_crash:
                     crash_metrics = {"max_angular_rate", "max_jerk",
                                      "vel_pos_inconsistency",
                                      "max_xy_velocity", "max_tilt_angle",
-                                     "combined_tilt_velocity"}
+                                     "combined_tilt_velocity",
+                                     "actuator_saturation"}
                     for fbk in fbk_list:
                         if fbk.name in crash_metrics:
                             fbk.reset()
-                    print("[feedback] crash detected, reset polluted metrics")
+                    if is_ground_crash:
+                        print("[feedback] ground crash detected (motors off >5s), reset polluted metrics")
+                    else:
+                        print("[feedback] crash detected, reset polluted metrics")
+                    # Purge stale crash seeds from queue
+                    if isinstance(fuzzer.queue, SeedQueue):
+                        fuzzer.queue.purge_crashed()
 
             if fuzzer.config.px4_sitl:
 
@@ -1499,6 +1563,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         scheduler.is_new_cycle = True
                         scheduler._seed_interesting_count = 0
                         print("--- cycle finished ---")
+
+                        # Stagnation detection: if no new coverage for many
+                        # cycles, reset feedback and re-seed the queue.
+                        # This prevents the fuzzer from endlessly replaying
+                        # crash inputs that produce no new exploration.
+                        if not hasattr(scheduler, '_cycles_without_new_cov'):
+                            scheduler._cycles_without_new_cov = 0
+                        scheduler._cycles_without_new_cov += 1
+                        if scheduler._cycles_without_new_cov >= 20:
+                            print("[!] STAGNATION: 20 cycles without new "
+                                  "coverage, resetting exploration")
+                            for fbk in fbk_list:
+                                fbk.reset()
+                            scheduler._cycles_without_new_cov = 0
+                            # Re-initialize queue with fresh boundary seeds
+                            fuzzer.init_queue()
 
             elif fuzzer.config.test_moveit:
                 if scheduler.round_cnt == 100:
