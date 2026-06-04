@@ -1910,8 +1910,8 @@ if __name__ == "__main__":
     except FileExistsError:
         pass
     latest_link = os.path.join(args.logdir, "latest")
-    if os.path.exists(latest_link):
-        os.unlink(os.path.join(args.logdir, "latest"))
+    if os.path.islink(latest_link) or os.path.exists(latest_link):
+        os.unlink(latest_link)
     os.symlink(now_str, latest_link, target_is_directory=True)
 
     queue_dir = os.path.join(log_dir, "queue")
