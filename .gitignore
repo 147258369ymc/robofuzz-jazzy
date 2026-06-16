@@ -24,3 +24,4 @@ system_doc/turtlebot3_clean
 rofer-2023/
 src_nav2
 system_doc/moveit2_panda
+logs_moveit/

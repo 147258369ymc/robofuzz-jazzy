@@ -12,9 +12,14 @@ import mutator
 import harness
 import ros_utils
 from ros2_fuzzer import ros_commons
-import px4_utils
-from px4_prep.blacklist import blacklist as param_blacklist
-from px4_prep.blacklist import tested as param_tested
+try:
+    import px4_utils
+    from px4_prep.blacklist import blacklist as param_blacklist
+    from px4_prep.blacklist import tested as param_tested
+except ImportError:
+    px4_utils = None
+    param_blacklist = set()
+    param_tested = set()
 from mutation_profile import (
     MutationProfile, STRATEGY_MULTI_AXIS, STRATEGY_FLIP, STRATEGY_SINGLE_BLOCK,
     STRATEGY_RANDOM
