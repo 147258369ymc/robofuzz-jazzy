@@ -170,7 +170,12 @@ def run_agent_batch(
             f"5. 校验通过后用 save_spec 保存"
         )
 
-        result = run_agent_task(task_prompt, config, tool_executor, system_prompt)
+        try:
+            result = run_agent_task(task_prompt, config, tool_executor, system_prompt)
+        except Exception as e:
+            logger.error(f"  任务异常: {e}")
+            result = {"success": False, "message": f"异常: {e}", "turns": 0}
+
         results["details"].append({"block_id": block_id, **result})
 
         if result["success"]:

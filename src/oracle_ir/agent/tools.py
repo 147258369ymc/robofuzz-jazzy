@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -214,6 +215,9 @@ class ToolExecutor:
 
     def _handle_validate_yaml(self, inp: dict) -> Any:
         yaml_content = inp["yaml_content"]
+        # 剥离 LLM 可能添加的 markdown 代码围栏
+        yaml_content = re.sub(r'^```(?:yaml|yml)?\s*\n', '', yaml_content.strip())
+        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
         try:
             data = yaml_lib.safe_load(yaml_content)
         except yaml_lib.YAMLError as e:
@@ -234,6 +238,10 @@ class ToolExecutor:
     def _handle_save_spec(self, inp: dict) -> Any:
         filename = inp["filename"]
         yaml_content = inp["yaml_content"]
+
+        # 剥离可能的 markdown 围栏
+        yaml_content = re.sub(r'^```(?:yaml|yml)?\s*\n', '', yaml_content.strip())
+        yaml_content = re.sub(r'\n```\s*$', '', yaml_content)
 
         # 安全检查：文件名不能包含路径分隔符
         if "/" in filename or "\\" in filename:

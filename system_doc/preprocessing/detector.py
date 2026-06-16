@@ -58,7 +58,7 @@ class DocTypeDetector:
         if suffix in (".msg", ".srv", ".action"):
             return DocType.ROS_INTERFACE
 
-        if suffix in (".sdf", ".urdf", ".xacro"):
+        if suffix in (".sdf", ".urdf", ".xacro", ".srdf"):
             return DocType.ROBOT_MODEL
 
         if suffix in (".cpp", ".hpp", ".c", ".h", ".py"):

@@ -17,6 +17,7 @@ OracleIR 生成 Agent 调用器
 """
 
 import json
+import re
 import argparse
 import logging
 from pathlib import Path
@@ -63,6 +64,8 @@ class AgentContextBuilder:
         self.blocks = blocks
         self.index = index
         self.specs_dir = specs_dir
+        # 所有已有 spec 目录（用于回退查找范例）
+        self._all_spec_dirs = [d for d in specs_dir.parent.iterdir() if d.is_dir()]
 
     def build(self, target_block_id: str) -> dict:
         """
@@ -124,27 +127,33 @@ class AgentContextBuilder:
         找一个已有的、类型相似的 OracleIR YAML 作为范例。
 
         为什么？LLM 看一个具体例子比看 10 页规则文档更有效。
+        如果当前目标的 specs 目录为空，会回退到其他目标的 specs 中查找。
         """
         tags = target.get("tags", [])
 
-        # 从 specs 目录中找已有的 YAML，按文件名排序取第一个匹配的
-        if not self.specs_dir.exists():
-            return None
+        # 收集候选目录：当前目标优先，然后回退到其他目标
+        candidate_dirs = [self.specs_dir] + [
+            d for d in self._all_spec_dirs if d != self.specs_dir
+        ]
 
-        all_specs = sorted(self.specs_dir.glob("*.yaml"))
-        if not all_specs:
-            return None
+        for spec_dir in candidate_dirs:
+            if not spec_dir.exists():
+                continue
+            all_specs = sorted(spec_dir.glob("*.yaml"))
+            if not all_specs:
+                continue
 
-        # 尝试按 tag 关键词匹配文件名
-        for tag in tags:
-            # 从 tag 提取关键词（如 velocity_constraint → velocity）
-            keyword = tag.replace("_constraint", "").replace("_", "")
-            for spec_path in all_specs:
-                if keyword in spec_path.stem.lower():
-                    return spec_path.read_text(encoding="utf-8")
+            # 尝试按 tag 关键词匹配文件名
+            for tag in tags:
+                keyword = tag.replace("_constraint", "").replace("_", "")
+                for spec_path in all_specs:
+                    if keyword in spec_path.stem.lower():
+                        return spec_path.read_text(encoding="utf-8")
 
-        # 兜底：用目录中第一个 spec 作为范例
-        return all_specs[0].read_text(encoding="utf-8")
+            # 兜底：用目录中第一个 spec 作为范例
+            return all_specs[0].read_text(encoding="utf-8")
+
+        return None
 
     def _find_related_params(self, target: dict) -> list[dict]:
         """找同组的其他参数（可能在同一个 oracle 中被引用）"""
@@ -238,6 +247,10 @@ def build_prompt(context: dict) -> str:
     parts.append("## 请生成\n")
     parts.append(f"为参数 `{target['name']}` 生成一个 OracleIR YAML。")
     parts.append("直接输出 YAML 内容，不要包含 ```yaml 标记。")
+    parts.append("")
+    parts.append("## 必需的顶层字段\n")
+    parts.append("id, type, system, observations, assertions, provenance")
+    parts.append("其中 id 和 type 是必填项，缺一不可。")
 
     return "\n".join(parts)
 
@@ -271,6 +284,15 @@ def call_agent(system_prompt: str, user_prompt: str, dry_run: bool = False) -> s
 # 第五步：校验 Agent 的输出
 # ============================================================
 
+def strip_yaml_fences(text: str) -> str:
+    """剥离 LLM 输出中常见的 markdown 代码围栏"""
+    text = text.strip()
+    m = re.match(r'^```(?:yaml|yml)?\s*\n(.*?)```\s*$', text, re.DOTALL)
+    if m:
+        return m.group(1)
+    return text
+
+
 def validate_output(yaml_text: str) -> tuple[bool, list[str]]:
     """
     用已有的 Validator 检查 Agent 生成的 YAML 是否合法。
@@ -279,6 +301,8 @@ def validate_output(yaml_text: str) -> tuple[bool, list[str]]:
     import yaml as yaml_lib
     from src.oracle_ir.transform.parser import load_oracle_ir
     from src.oracle_ir.transform.validator import validate_oracle_ir
+
+    yaml_text = strip_yaml_fences(yaml_text)
 
     # 先检查 YAML 语法
     try:
@@ -361,7 +385,8 @@ def generate_oracle(
             logger.error(f"校验失败，已达最大重试次数。错误: {errors}")
             return None
 
-    # 5. 保存结果
+    # 5. 保存结果（确保去除围栏）
+    yaml_text = strip_yaml_fences(yaml_text)
     output_dir.mkdir(parents=True, exist_ok=True)
     # 文件名从 block_id 生成
     safe_name = block_id.replace(".", "_").replace("/", "_")
@@ -380,6 +405,7 @@ def main():
     parser.add_argument("--target", required=True, help="目标系统名 (px4, turtlebot3, ...)")
     parser.add_argument("--block-id", help="指定单个 block_id")
     parser.add_argument("--tag", help="按语义标签批量生成 (如 velocity_constraint)")
+    parser.add_argument("--all", action="store_true", help="提取所有参数类型的 block")
     parser.add_argument("--mode", choices=["simple", "agent"], default="agent",
                         help="生成模式: simple=单次调用, agent=tool_use自主循环 (默认 agent)")
     parser.add_argument("--dry-run", action="store_true", help="只打印 prompt，不调 API")
@@ -431,8 +457,12 @@ def main():
         target_ids = [bid for bid in all_ids
                       if blocks.get(bid, {}).get("block_type") == "parameter"]
         print(f"标签 '{args.tag}' 下有 {len(target_ids)} 个参数待生成")
+    elif getattr(args, 'all'):
+        target_ids = [bid for bid, b in blocks.items()
+                      if b.get("block_type") == "parameter"]
+        print(f"全部参数: {len(target_ids)} 个待生成")
     else:
-        print("请指定 --block-id 或 --tag")
+        print("请指定 --block-id、--tag 或 --all")
         return
 
     # ─── Agent 模式 ───

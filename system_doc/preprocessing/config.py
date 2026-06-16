@@ -79,11 +79,27 @@ TURTLEBOT3_CONFIG = TargetConfig(
 )
 
 
+# MoveIt2 + Franka Emika Panda 配置
+MOVEIT2_PANDA_CONFIG = TargetConfig(
+    name="moveit2_panda",
+    version="moveit2-2.2.3_panda-2.0.3",
+    doc_root="system_doc/moveit2_panda",
+    # 不指定 file_configs → 自动递归发现所有文件并按扩展名分派分块器
+    # 目录结构:
+    #   config/         — URDF, SRDF, YAML 配置（robot_model + yaml_params 分块器）
+    #   msg_definitions/ — MoveIt2 msg/srv/action（ros_interface 分块器）
+    #   ros2_interfaces/ — 标准 ROS2 消息定义（ros_interface 分块器）
+    #   source_constraints/ — 测试目标 C++ 源码（source_code 分块器）
+    #   official_specs/  — 整理的硬件/安全规范 Markdown（tabular_markdown / heading_md 分块器）
+)
+
+
 def get_config(target_name: str) -> TargetConfig:
     """获取目标系统配置"""
     configs = {
         "px4": PX4_CONFIG,
         "turtlebot3": TURTLEBOT3_CONFIG,
+        "moveit2_panda": MOVEIT2_PANDA_CONFIG,
     }
     if target_name not in configs:
         raise ValueError(

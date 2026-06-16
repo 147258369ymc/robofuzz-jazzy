@@ -1,4 +1,4 @@
-"""机器人模型分块器 — 处理 SDF/URDF 文件，提取传感器参数和物理约束"""
+"""机器人模型分块器 — 处理 SDF/URDF/SRDF 文件，提取传感器参数和物理约束"""
 
 from __future__ import annotations
 import re
@@ -10,13 +10,14 @@ from .base import BaseChunker, RawChunk
 
 class RobotModelChunker(BaseChunker):
     """
-    处理 .sdf/.urdf 机器人模型文件。
+    处理 .sdf/.urdf/.srdf/.xacro 机器人模型文件。
 
     提取目标:
     - sensor 定义（IMU、LiDAR、Camera 的参数：噪声、范围、频率）
     - joint 限制（effort、velocity、lower/upper）
     - plugin 配置（diff_drive 的 max_torque、wheel_separation 等）
     - link 物理属性（mass、inertia）
+    - SRDF 语义信息（规划组、碰撞对、预定义姿态、末端执行器）
     """
 
     @property
@@ -36,10 +37,21 @@ class RobotModelChunker(BaseChunker):
                 return []
 
         chunks = []
+
+        # 统一运行所有提取器 — 每个提取器内部自行判断是否有匹配元素
+        # URDF/SDF 提取器
         self._extract_sensors(root, chunks, file_path)
         self._extract_joints(root, chunks, file_path)
         self._extract_links(root, chunks, file_path)
         self._extract_plugins(root, chunks, file_path)
+        # SRDF 提取器
+        self._extract_groups(root, chunks, file_path)
+        self._extract_group_states(root, chunks, file_path)
+        self._extract_end_effectors(root, chunks, file_path)
+        self._extract_virtual_joints(root, chunks, file_path)
+        self._extract_collision_matrix(root, chunks, file_path)
+        self._extract_passive_joints(root, chunks, file_path)
+
         return chunks
 
     def _extract_sensors(self, root: ET.Element, chunks: list, file_path: Path):
@@ -216,3 +228,189 @@ class RobotModelChunker(BaseChunker):
             return int(s)
         except (ValueError, TypeError):
             return s
+
+    # =================================================================
+    # SRDF 提取方法
+    # =================================================================
+
+    def _extract_groups(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取规划组定义（chain、joints、links、subgroups）"""
+        for group in root.iter("group"):
+            group_name = group.get("name", "unknown_group")
+            extra = {"name": group_name}
+
+            # chain 定义
+            chain = group.find("chain")
+            if chain is not None:
+                extra["base_link"] = chain.get("base_link", "")
+                extra["tip_link"] = chain.get("tip_link", "")
+
+            # 显式 joint 列表
+            joints = [j.get("name", "") for j in group.findall("joint")]
+            if joints:
+                extra["joints"] = joints
+
+            # 显式 link 列表
+            links = [l.get("name", "") for l in group.findall("link")]
+            if links:
+                extra["links"] = links
+
+            # 被动关节
+            passive = [p.get("name", "") for p in group.findall("passive_joint")]
+            if passive:
+                extra["passive_joints"] = passive
+
+            chunks.append(RawChunk(
+                content=ET.tostring(group, encoding="unicode")[:1500],
+                name=group_name,
+                chunk_type="planning_group",
+                index=len(chunks),
+                parent_heading="groups",
+                location=f"//group[@name='{group_name}']",
+                extra=extra,
+            ))
+
+    def _extract_group_states(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取预定义姿态（named states，如 'ready', 'home', 'extended'）"""
+        for state in root.iter("group_state"):
+            state_name = state.get("name", "unknown_state")
+            group_name = state.get("group", "")
+            joint_values = {}
+            for jv in state.findall("joint"):
+                jname = jv.get("name", "")
+                jval = jv.get("value", "")
+                if jname and jval:
+                    joint_values[jname] = self._try_float(jval)
+
+            extra = {
+                "name": state_name,
+                "group": group_name,
+                "joint_values": joint_values,
+            }
+
+            chunks.append(RawChunk(
+                content=ET.tostring(state, encoding="unicode")[:1000],
+                name=f"{group_name}.{state_name}",
+                chunk_type="predefined_pose",
+                index=len(chunks),
+                parent_heading="group_states",
+                location=f"//group_state[@name='{state_name}']",
+                extra=extra,
+            ))
+
+    def _extract_end_effectors(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取末端执行器定义"""
+        for ee in root.iter("end_effector"):
+            ee_name = ee.get("name", "unknown_ee")
+            extra = {
+                "name": ee_name,
+                "group": ee.get("group", ""),
+                "parent_link": ee.get("parent_link", ""),
+                "parent_group": ee.get("parent_group", ""),
+            }
+            chunks.append(RawChunk(
+                content=ET.tostring(ee, encoding="unicode"),
+                name=ee_name,
+                chunk_type="end_effector",
+                index=len(chunks),
+                parent_heading="end_effectors",
+                location=f"//end_effector[@name='{ee_name}']",
+                extra=extra,
+            ))
+
+    def _extract_virtual_joints(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取虚拟关节（机器人与世界坐标系的连接方式）"""
+        for vj in root.iter("virtual_joint"):
+            vj_name = vj.get("name", "unknown_vj")
+            extra = {
+                "name": vj_name,
+                "type": vj.get("type", ""),
+                "parent_frame": vj.get("parent_frame", ""),
+                "child_link": vj.get("child_link", ""),
+            }
+            chunks.append(RawChunk(
+                content=ET.tostring(vj, encoding="unicode"),
+                name=vj_name,
+                chunk_type="virtual_joint",
+                index=len(chunks),
+                parent_heading="virtual_joints",
+                location=f"//virtual_joint[@name='{vj_name}']",
+                extra=extra,
+            ))
+
+    def _extract_collision_matrix(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取碰撞对禁用矩阵（ACM - Allowed Collision Matrix）
+
+        将所有 disable_collisions 汇总为一个 block，而不是每对一个 block，
+        因为碰撞矩阵的语义是整体的。
+        """
+        pairs = []
+        for dc in root.iter("disable_collisions"):
+            link1 = dc.get("link1", "")
+            link2 = dc.get("link2", "")
+            reason = dc.get("reason", "")
+            pairs.append({"link1": link1, "link2": link2, "reason": reason})
+
+        if not pairs:
+            return
+
+        # 按 reason 分组汇总
+        adjacent_pairs = [p for p in pairs if p["reason"] == "Adjacent"]
+        never_pairs = [p for p in pairs if p["reason"] == "Never"]
+        default_pairs = [p for p in pairs if p["reason"] == "Default"]
+        other_pairs = [p for p in pairs
+                       if p["reason"] not in ("Adjacent", "Never", "Default")]
+
+        extra = {
+            "name": "allowed_collision_matrix",
+            "total_pairs": len(pairs),
+            "adjacent_pairs": len(adjacent_pairs),
+            "never_pairs": len(never_pairs),
+            "default_pairs": len(default_pairs),
+            "other_pairs": len(other_pairs),
+            "pairs": pairs,
+        }
+
+        # 生成可读内容
+        content_lines = ["# Allowed Collision Matrix (disable_collisions)"]
+        content_lines.append(f"Total disabled pairs: {len(pairs)}")
+        content_lines.append(f"Adjacent: {len(adjacent_pairs)}, "
+                             f"Never: {len(never_pairs)}, "
+                             f"Default: {len(default_pairs)}")
+        content_lines.append("")
+        for p in pairs[:30]:  # 最多展示 30 对
+            content_lines.append(
+                f"  {p['link1']} <-> {p['link2']} ({p['reason']})")
+        if len(pairs) > 30:
+            content_lines.append(f"  ... and {len(pairs) - 30} more pairs")
+
+        chunks.append(RawChunk(
+            content="\n".join(content_lines),
+            name="allowed_collision_matrix",
+            chunk_type="collision_matrix",
+            index=len(chunks),
+            parent_heading="collision_pairs",
+            location="//disable_collisions",
+            extra=extra,
+        ))
+
+    def _extract_passive_joints(self, root: ET.Element, chunks: list, file_path: Path):
+        """提取顶层被动关节声明（不参与规划的关节）"""
+        passive_joints = []
+        for pj in root.findall("passive_joint"):
+            name = pj.get("name", "")
+            if name:
+                passive_joints.append(name)
+
+        if not passive_joints:
+            return
+
+        chunks.append(RawChunk(
+            content=f"Passive joints (excluded from planning): {passive_joints}",
+            name="passive_joints",
+            chunk_type="config",
+            index=len(chunks),
+            parent_heading="passive_joints",
+            location="//passive_joint",
+            extra={"name": "passive_joints", "joints": passive_joints},
+        ))
