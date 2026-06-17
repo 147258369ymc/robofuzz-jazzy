@@ -39,6 +39,30 @@ MARGIN_RAD = math.radians(MARGIN)
 PANDA_URDF = "/opt/ros/foxy/share/moveit_resources_panda_description/urdf/panda.urdf"
 READY_POS = (0.306890566, 0.0, 0.590282052)
 
+# =========================================================================
+# New Oracle Constants (Section 7-13)
+# =========================================================================
+
+TOL_TRACKING = 0.1        # rad, trajectory tracking tolerance per joint per sample
+TOL_ABORT_DRIFT = 0.01    # rad, max joint drift from home after abort
+WORKSPACE_RADIUS = 0.855  # m, Panda approximate workspace sphere radius
+MAX_PLANNING_TIME = 10.0  # s, planning timeout threshold
+MIN_EXEC_SAMPLES = 5      # minimum controller state messages for valid execution
+
+# Ready/home position from initial_positions.yaml (NOT all zeros)
+PANDA_HOME = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785]
+
+# Jerk limits (rad/s^3) from Franka Emika datasheet
+PANDA_JERK_LIMITS = {
+    "panda_joint1": 7500.0,
+    "panda_joint2": 3750.0,
+    "panda_joint3": 5000.0,
+    "panda_joint4": 6250.0,
+    "panda_joint5": 7500.0,
+    "panda_joint6": 10000.0,
+    "panda_joint7": 10000.0,
+}
+
 
 # =========================================================================
 # Helper Functions
@@ -118,7 +142,17 @@ def check(config, msg_list, state_dict, feedback_list):
     error_pos_values = list()
     error_vel_values = list()
     prev_velocities = {}  # joint_name -> (ts, vel)
+    prev_accelerations = {}  # joint_name -> (ts, acc)
     min_vel_margin = float("inf")
+    max_jerk_value = 0.0
+    jerk_violation_errs = []
+
+    # Track per-joint position range for joint_motion_range feedback
+    joint_pos_min = {}  # joint_name -> min_pos
+    joint_pos_max = {}  # joint_name -> max_pos
+
+    # Track per-joint velocity for velocity_roughness feedback
+    joint_vel_series = {}  # joint_name -> list of velocities
 
     for (ts, cont_state) in controller_states_list:
         num_joints = len(cont_state.joint_names)
@@ -160,6 +194,16 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"within {min_deg:.1f} ~ {max_deg:.1f}"
                     )
 
+            # Track position range per joint
+            if joint_name not in joint_pos_min:
+                joint_pos_min[joint_name] = pos
+                joint_pos_max[joint_name] = pos
+            else:
+                if pos < joint_pos_min[joint_name]:
+                    joint_pos_min[joint_name] = pos
+                if pos > joint_pos_max[joint_name]:
+                    joint_pos_max[joint_name] = pos
+
         # --- Velocity checks (from OracleIR specs: joint_limits.yaml values) ---
         for vi, vel in enumerate(actual_vel_list):
             joint_name = cont_state.joint_names[vi]
@@ -186,6 +230,11 @@ def check(config, msg_list, state_dict, feedback_list):
                 if margin < min_vel_margin:
                     min_vel_margin = margin
 
+                # Track velocity series for roughness
+                if joint_name not in joint_vel_series:
+                    joint_vel_series[joint_name] = []
+                joint_vel_series[joint_name].append(vel)
+
                 # --- Acceleration check (time derivative of velocity) ---
                 if joint_name in prev_velocities:
                     prev_ts, prev_vel = prev_velocities[joint_name]
@@ -198,37 +247,79 @@ def check(config, msg_list, state_dict, feedback_list):
                                 f"{acc:.4f} rad/s^2 exceeds limit {max_acc} rad/s^2"
                             )
 
+                        # --- Jerk check (time derivative of acceleration) ---
+                        if joint_name in prev_accelerations:
+                            prev_acc_ts, prev_acc = prev_accelerations[joint_name]
+                            dt_acc = (ts - prev_acc_ts) / 1e9
+                            if MIN_DT < dt_acc < MAX_DT:
+                                jerk = (acc - prev_acc) / dt_acc
+                                abs_jerk = abs(jerk)
+                                if abs_jerk > max_jerk_value:
+                                    max_jerk_value = abs_jerk
+                                jerk_limit = PANDA_JERK_LIMITS.get(joint_name)
+                                if jerk_limit and abs_jerk > jerk_limit:
+                                    jerk_violation_errs.append(
+                                        f"{ts} {joint_name}'s jerk "
+                                        f"{jerk:.2f} rad/s^3 exceeds limit "
+                                        f"{jerk_limit} rad/s^3"
+                                    )
+
+                        prev_accelerations[joint_name] = (ts, acc)
+
                 prev_velocities[joint_name] = (ts, vel)
 
     # =================================================================
     # Section 3: Action Status Validation
     # =================================================================
 
-    action_status = list()
-    for (ts, action) in move_action_status_list:
-        if action.status_list:
-            action_status.append(action.status_list[0].status)
+    # ROS2 action status: each GoalStatusArray message contains status_list
+    # with the current status of ALL submitted goals. We need to:
+    # 1. Determine how many goals were submitted (from motion_plan_request_list)
+    # 2. Track each goal's terminal status from the final status message
+    #
+    # Status codes: 1=ACCEPTED, 2=EXECUTING, 4=SUCCEEDED, 5=CANCELING, 6=ABORTED
+    #
+    # For multi-goal sequences, the LAST status message contains the final
+    # status of all goals. We extract terminal statuses from there.
 
-    print(action_status)
-    if len(action_status) == 2:
-        if action_status[0] != 2:
-            errs.append(f"action doesn't start with 2: {action_status[0]}")
+    num_goals_detected = 0
+    last_action_terminal = None
+    goal_terminal_statuses = []  # terminal status per goal
 
-        if action_status[-1] != 4 and action_status[-1] != 6:
-            errs.append(f"action doesn't end with 4 or 6: {action_status[-1]}")
+    if move_action_status_list:
+        # Take the last status message — it has all goals' final statuses
+        (_, last_action_msg) = move_action_status_list[-1]
+        if last_action_msg.status_list:
+            goal_terminal_statuses = [
+                gs.status for gs in last_action_msg.status_list
+            ]
+            num_goals_detected = len(goal_terminal_statuses)
+            last_action_terminal = goal_terminal_statuses[-1]
+
+            # Validate: each goal should end in 4 (SUCCESS) or 6 (ABORTED)
+            for gi, gstatus in enumerate(goal_terminal_statuses):
+                if gstatus not in (4, 6):
+                    errs.append(
+                        f"goal {gi}: unexpected terminal status {gstatus} "
+                        f"(expected 4=SUCCESS or 6=ABORTED)"
+                    )
+
+            print(f"[oracle] {num_goals_detected} goals detected, "
+                  f"terminal statuses: {goal_terminal_statuses}")
     else:
-        errs.append(f"invalid goal action status: {str(action_status)}")
+        errs.append("no action status received")
 
     # =================================================================
     # Section 4: Motion Plan Request Count
     # =================================================================
 
     num_motion_plan_request = len(motion_plan_request_list)
-    if num_motion_plan_request != 1:
-        errs.append(f"# Motion plan request != 1: ({num_motion_plan_request})")
+    if num_motion_plan_request < 1:
+        errs.append(f"# Motion plan request < 1: ({num_motion_plan_request})")
     else:
-        # retrieve the requested goal
-        (ts, mpr) = motion_plan_request_list[0]
+        # Multi-goal: use the LAST motion plan request for endpoint verification
+        # (the final goal determines where the robot should end up)
+        (ts, mpr) = motion_plan_request_list[-1]
         goal_constraints = mpr.goal_constraints[0]
         goal_position = goal_constraints.position_constraints[0] \
             .constraint_region.primitive_poses[0].position
@@ -262,15 +353,15 @@ def check(config, msg_list, state_dict, feedback_list):
             final_pos_y = final_end_effector_pos[1]
             final_pos_z = final_end_effector_pos[2]
 
-            if len(action_status) == 2 and action_status[-1] == 4:
-                # Action succeeded — endpoint should be at the goal
+            if last_action_terminal == 4:
+                # Last goal succeeded — endpoint should be at the last goal
                 dist_goal_to_final_pos = math.sqrt(
                     pow(goal_x - final_pos_x, 2)
                     + pow(goal_y - final_pos_y, 2)
                     + pow(goal_z - final_pos_z, 2)
                 )
 
-                # === Section 6: Feedback Updates ===
+                # === Section 6: Feedback Updates (success path) ===
                 for feedback in feedback_list:
                     if feedback.name == "end_point_deviation":
                         feedback.update_value(dist_goal_to_final_pos)
@@ -289,6 +380,38 @@ def check(config, msg_list, state_dict, feedback_list):
                     elif feedback.name == "max_velocity_margin":
                         if min_vel_margin < float("inf"):
                             feedback.update_value(min_vel_margin)
+                    elif feedback.name == "trajectory_tracking_rms":
+                        if error_pos_values:
+                            rms = math.sqrt(
+                                sum(v * v for v in error_pos_values)
+                                / len(error_pos_values)
+                            )
+                            feedback.update_value(rms)
+                    elif feedback.name == "max_joint_jerk":
+                        if max_jerk_value > 0.0:
+                            feedback.update_value(max_jerk_value)
+                    elif feedback.name == "velocity_roughness":
+                        max_cv = 0.0
+                        for jname, vels in joint_vel_series.items():
+                            if len(vels) < 2:
+                                continue
+                            mean_v = statistics.mean(vels)
+                            if abs(mean_v) < 0.001:
+                                continue
+                            std_v = statistics.stdev(vels)
+                            cv = std_v / abs(mean_v)
+                            if cv > max_cv:
+                                max_cv = cv
+                        if max_cv > 0.0:
+                            feedback.update_value(max_cv)
+                    elif feedback.name == "joint_motion_range":
+                        max_range = 0.0
+                        for jname in joint_pos_min:
+                            r = joint_pos_max[jname] - joint_pos_min[jname]
+                            if r > max_range:
+                                max_range = r
+                        if max_range > 0.0:
+                            feedback.update_value(max_range)
 
                 print(f"D: {dist_goal_to_final_pos:.6f}")
                 if dist_goal_to_final_pos > TOL_ENDPOINT:
@@ -297,23 +420,95 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"{dist_goal_to_final_pos}"
                     )
 
-            elif len(action_status) == 2 and action_status[-1] == 6:
-                # Action aborted — endpoint should remain at ready position
-                ready_pos_x, ready_pos_y, ready_pos_z = READY_POS
+                # === Section 7: Trajectory Tracking Quality ===
+                for (cs_ts, cs) in controller_states_list:
+                    for ei, epos in enumerate(cs.error.positions):
+                        if abs(epos) > TOL_TRACKING:
+                            jn = cs.joint_names[ei] if ei < len(cs.joint_names) else f"joint{ei}"
+                            errs.append(
+                                f"{cs_ts} {jn}'s tracking error "
+                                f"{epos:.4f} rad exceeds tolerance "
+                                f"{TOL_TRACKING} rad"
+                            )
 
-                dist_ready_to_final_pos = math.sqrt(
-                    pow(ready_pos_x - final_pos_x, 2)
-                    + pow(ready_pos_y - final_pos_y, 2)
-                    + pow(ready_pos_z - final_pos_z, 2)
+                # === Section 11: Joint Jerk Violations ===
+                errs.extend(jerk_violation_errs)
+
+            elif last_action_terminal == 6:
+                # Last goal aborted
+                # Only check ready position if ALL goals aborted (single goal or
+                # first goal failed). For multi-goal where some succeeded first,
+                # the robot will be at the last successful goal, not ready pos.
+                all_aborted = all(
+                    s == 6 for s in goal_terminal_statuses
                 )
 
-                print(f"D: {dist_ready_to_final_pos:.6f}")
-                if dist_ready_to_final_pos > TOL_ENDPOINT:
-                    errs.append(
-                        f"robot shouldn't have moved: {dist_ready_to_final_pos}"
+                if all_aborted:
+                    ready_pos_x, ready_pos_y, ready_pos_z = READY_POS
+
+                    dist_ready_to_final_pos = math.sqrt(
+                        pow(ready_pos_x - final_pos_x, 2)
+                        + pow(ready_pos_y - final_pos_y, 2)
+                        + pow(ready_pos_z - final_pos_z, 2)
                     )
 
-                # IK reachability check
+                    print(f"D: {dist_ready_to_final_pos:.6f}")
+                    if dist_ready_to_final_pos > TOL_ENDPOINT:
+                        errs.append(
+                            f"robot shouldn't have moved: {dist_ready_to_final_pos}"
+                        )
+
+                    # === Section 8: Initial Position Consistency (abort only) ===
+                    if final_joint_state is not None:
+                        arm_joint_names = [f"panda_joint{i}" for i in range(1, 8)]
+                        max_drift = 0.0
+                        for i, jname in enumerate(final_joint_state.name):
+                            if jname in arm_joint_names:
+                                idx = arm_joint_names.index(jname)
+                                drift = abs(final_joint_state.position[i] - PANDA_HOME[idx])
+                                if drift > max_drift:
+                                    max_drift = drift
+                                if drift > TOL_ABORT_DRIFT:
+                                    errs.append(
+                                        f"{jname} drifted {drift:.4f} rad from home "
+                                        f"after abort (tolerance: {TOL_ABORT_DRIFT} rad)"
+                                    )
+                        # Update abort_joint_drift feedback
+                        for feedback in feedback_list:
+                            if feedback.name == "abort_joint_drift":
+                                if max_drift > 0.0:
+                                    feedback.update_value(max_drift)
+                                break
+
+                # Update path-independent feedbacks for abort case too
+                for feedback in feedback_list:
+                    if feedback.name == "max_joint_jerk":
+                        if max_jerk_value > 0.0:
+                            feedback.update_value(max_jerk_value)
+                    elif feedback.name == "velocity_roughness":
+                        max_cv = 0.0
+                        for jname, vels in joint_vel_series.items():
+                            if len(vels) < 2:
+                                continue
+                            mean_v = statistics.mean(vels)
+                            if abs(mean_v) < 0.001:
+                                continue
+                            std_v = statistics.stdev(vels)
+                            cv = std_v / abs(mean_v)
+                            if cv > max_cv:
+                                max_cv = cv
+                        if max_cv > 0.0:
+                            feedback.update_value(max_cv)
+                    elif feedback.name == "joint_motion_range":
+                        max_range = 0.0
+                        for jname in joint_pos_min:
+                            r = joint_pos_max[jname] - joint_pos_min[jname]
+                            if r > max_range:
+                                max_range = r
+                        if max_range > 0.0:
+                            feedback.update_value(max_range)
+
+                # IK reachability check on the last goal
                 tf_goal = kinpy.Transform()
                 tf_goal.rot[0] = 0.0
                 tf_goal.rot[1] = 0.0
@@ -347,5 +542,71 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"controller failed to find inverse kinematics "
                         f"solution: {ik}"
                     )
+
+    # =================================================================
+    # Section 9: Workspace Boundary Distance (unconditional)
+    # =================================================================
+
+    if motion_plan_request_list:
+        # Multi-goal: compute max boundary proximity across all goals
+        max_boundary_proximity = 0.0
+        for (_, mpr_msg) in motion_plan_request_list:
+            try:
+                gp = mpr_msg.goal_constraints[0].position_constraints[0] \
+                    .constraint_region.primitive_poses[0].position
+                dist_from_origin = math.sqrt(gp.x ** 2 + gp.y ** 2 + gp.z ** 2)
+                proximity = 1.0 / max(0.01, abs(dist_from_origin - WORKSPACE_RADIUS))
+                if proximity > max_boundary_proximity:
+                    max_boundary_proximity = proximity
+            except (IndexError, AttributeError):
+                continue
+        if max_boundary_proximity > 0.0:
+            for feedback in feedback_list:
+                if feedback.name == "workspace_boundary_distance":
+                    feedback.update_value(max_boundary_proximity)
+                    break
+
+    # =================================================================
+    # Section 10: Planning Duration Anomaly (unconditional)
+    # =================================================================
+
+    if move_action_status_list and controller_states_list:
+        action_first_ts = move_action_status_list[0][0]
+        controller_first_ts = controller_states_list[0][0]
+        planning_dur = (controller_first_ts - action_first_ts) / 1e9  # ns to s
+        if planning_dur > 0:
+            for feedback in feedback_list:
+                if feedback.name == "planning_duration":
+                    feedback.update_value(planning_dur)
+                    break
+            if planning_dur > MAX_PLANNING_TIME:
+                errs.append(
+                    f"planning duration {planning_dur:.2f}s exceeds "
+                    f"threshold {MAX_PLANNING_TIME}s"
+                )
+
+    # =================================================================
+    # Section 12: Goal Success Ratio (unconditional)
+    # =================================================================
+
+    if goal_terminal_statuses:
+        n_success = sum(1 for s in goal_terminal_statuses if s == 4)
+        n_total = len(goal_terminal_statuses)
+        # ratio of failed goals: 1.0 = all failed, 0.0 = all succeeded
+        # DEC type: lower value = more interesting (closer to all-succeed)
+        fail_ratio = 1.0 - (n_success / n_total)
+        for feedback in feedback_list:
+            if feedback.name == "goal_success_ratio":
+                feedback.update_value(fail_ratio)
+                break
+
+    num_controller_samples = len(controller_states_list)
+
+    if last_action_terminal == 4:
+        if num_controller_samples < MIN_EXEC_SAMPLES:
+            errs.append(
+                f"execution too short: only {num_controller_samples} controller "
+                f"samples (minimum: {MIN_EXEC_SAMPLES})"
+            )
 
     return errs

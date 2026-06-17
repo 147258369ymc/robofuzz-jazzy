@@ -69,6 +69,9 @@ class Feedback:
                 return False
 
         elif self.feed_type == FeedbackType.DEC:
+            if self.min_threshold is not None:
+                if (self.interesting_value - self.value) < self.min_threshold:
+                    return False
             if self.interesting_value > self.value:
                 self.update_interesting()
                 return True

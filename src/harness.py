@@ -258,22 +258,27 @@ def moveit_send_command(msg):
     z = str(msg.position.z)
     w = str(msg.orientation.w)
 
-    cmd = "ros2 launch moveit2_tutorials move_group_interface_tutorial.launch.py"
-
-    sp.call(
-        [
-            "ros2",
-            "launch",
-            "moveit2_tutorials",
-            "move_group_interface_tutorial.launch.py",
-            f"x:={x}",
-            f"y:={y}",
-            f"z:={z}",
-            f"w:={w}",
-        ],
-        stdout=sp.DEVNULL,
-        stderr=sp.DEVNULL,
-    )
+    try:
+        sp.run(
+            [
+                "ros2",
+                "launch",
+                "moveit2_tutorials",
+                "move_group_interface_tutorial.launch.py",
+                f"x:={x}",
+                f"y:={y}",
+                f"z:={z}",
+                f"w:={w}",
+            ],
+            stdout=sp.DEVNULL,
+            stderr=sp.DEVNULL,
+            timeout=30,
+        )
+    except sp.TimeoutExpired:
+        print("                 + timeout (30s), killing planner")
+        # Kill any lingering move_group_interface_tutorial processes
+        sp.run(["pkill", "-f", "move_group_interface_tutorial"],
+               stdout=sp.DEVNULL, stderr=sp.DEVNULL)
     print("                 + sent")
 
 

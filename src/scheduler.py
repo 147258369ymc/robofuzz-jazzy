@@ -22,7 +22,8 @@ except ImportError:
     param_tested = set()
 from mutation_profile import (
     MutationProfile, STRATEGY_MULTI_AXIS, STRATEGY_FLIP, STRATEGY_SINGLE_BLOCK,
-    STRATEGY_RANDOM
+    STRATEGY_RANDOM, STRATEGY_BOUNDARY_PUSH, STRATEGY_REVERSAL,
+    STRATEGY_TRAJECTORY_ARC, STRATEGY_SINGLE_EXTREME
 )
 
 
@@ -275,6 +276,320 @@ class Scheduler:
         # print(self.msg)
         self.last_msg = deepcopy(self.msg)
         return (self.msg, frame)
+
+    # ===================================================================
+    # MoveIt2 Sequence Mutation (multi-goal, dual-phase, feedback-adaptive)
+    # ===================================================================
+
+    # Cycle length & phase constants
+    CYCLE_MIN = 20
+    CYCLE_MAX = 30
+    EXPLOIT_PHASE_END = 12
+    EXTEND_WINDOW = 5
+
+    def mutate_sequence_moveit(self, config, fbk_list=None):
+        """Multi-goal, dual-phase mutation for MoveIt2.
+
+        Phase 1 (rounds 0-12): exploitation via seed neighborhood mutation.
+        Phase 2 (rounds 13+): strategy-driven exploration using seed centroid.
+        """
+        if not hasattr(self, '_moveit_profile'):
+            self._moveit_profile = MutationProfile.moveit_panda()
+        profile = self._moveit_profile
+
+        frame = str(time.time())
+
+        meta_file = os.path.join(config.meta_dir, "meta-{}".format(frame))
+        with open(meta_file, "w") as fp:
+            fp.write(
+                self.subscriber_node + "\t"
+                + self.topic_name + "\t"
+                + str(self.msg_type_class) + "\t"
+                + str(self.cycle_cnt) + "\t"
+                + str(self.round_cnt)
+            )
+
+        print(
+            "\n\x1b[92mCYCLE:", self.cycle_cnt,
+            "ROUND:", self.round_cnt, "\x1b[0m", frame,
+        )
+        print("QUEUE LEN:", len(self.fuzzer.queue))
+
+        if self.is_new_cycle:
+            self._moveit_init_cycle(profile)
+        elif self.round_cnt <= self.EXPLOIT_PHASE_END:
+            self._moveit_exploit_round(profile)
+        else:
+            self._moveit_explore_round(profile, fbk_list)
+
+        self.round_cnt += 1
+        return (self.msg_list, frame)
+
+    def _moveit_init_cycle(self, profile):
+        """Initialize goal_list for a new MoveIt cycle, save seed_base."""
+        if len(self.fuzzer.queue) > 0:
+            try:
+                queued = self.fuzzer.queue.popleft()
+            except IndexError:
+                queued = None
+            if queued is not None:
+                if isinstance(queued, list):
+                    self.msg_list = queued
+                else:
+                    self.msg_list = [deepcopy(queued)]
+                self.from_queue = True
+                self.num_msgs = len(self.msg_list)
+                print("seed from queue")
+                self._save_seed_base()
+                self.is_new_cycle = False
+                return
+
+        # Queue empty: generate fresh random goals
+        min_goals, max_goals = profile.block_len_range
+        num_goals = random.randint(min_goals, max_goals)
+        self.msg_list = []
+        for _ in range(num_goals):
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = profile.get_range("x").sample()
+            msg.position.y = profile.get_range("y").sample()
+            msg.position.z = profile.get_range("z").sample()
+            self.msg_list.append(msg)
+        self.num_msgs = num_goals
+        self.from_queue = False
+        self._save_seed_base()
+        self.is_new_cycle = False
+        print(f"generate fresh {num_goals} goals")
+
+    def _save_seed_base(self):
+        """Save immutable seed reference and compute centroid."""
+        self._seed_base = deepcopy(self.msg_list)
+        # Compute centroid for Phase 2 exploration
+        n = len(self._seed_base)
+        cx = sum(m.position.x for m in self._seed_base) / n
+        cy = sum(m.position.y for m in self._seed_base) / n
+        cz = sum(m.position.z for m in self._seed_base) / n
+        self._seed_center = (cx, cy, cz)
+
+    def _moveit_exploit_round(self, profile):
+        """Phase 1: neighborhood mutation around seed_base."""
+        import math as _math
+        # Weighted mutation operations
+        ops = ['perturb', 'swap', 'negate', 'replace', 'resize']
+        weights = [50, 15, 15, 10, 10]
+        op = random.choices(ops, weights=weights, k=1)[0]
+
+        new_list = deepcopy(self.msg_list)
+        min_goals, max_goals = profile.block_len_range
+
+        if op == 'perturb':
+            # Perturb 1-2 goals with Gaussian noise
+            n_perturb = min(random.randint(1, 2), len(new_list))
+            idxs = random.sample(range(len(new_list)), n_perturb)
+            for idx in idxs:
+                new_list[idx].position.x += random.gauss(0, 0.05)
+                new_list[idx].position.y += random.gauss(0, 0.05)
+                new_list[idx].position.z += random.gauss(0, 0.03)
+                new_list[idx].position.x = profile.get_range("x").clamp(
+                    new_list[idx].position.x)
+                new_list[idx].position.y = profile.get_range("y").clamp(
+                    new_list[idx].position.y)
+                new_list[idx].position.z = profile.get_range("z").clamp(
+                    new_list[idx].position.z)
+        elif op == 'swap' and len(new_list) >= 2:
+            i, j = random.sample(range(len(new_list)), 2)
+            new_list[i], new_list[j] = new_list[j], new_list[i]
+        elif op == 'negate':
+            idx = random.randint(0, len(new_list) - 1)
+            axis = random.choice(['x', 'y'])
+            if axis == 'x':
+                new_list[idx].position.x = -new_list[idx].position.x
+            else:
+                new_list[idx].position.y = -new_list[idx].position.y
+        elif op == 'replace':
+            idx = random.randint(0, len(new_list) - 1)
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = profile.get_range("x").sample()
+            msg.position.y = profile.get_range("y").sample()
+            msg.position.z = profile.get_range("z").sample()
+            new_list[idx] = msg
+        elif op == 'resize':
+            if len(new_list) < max_goals and random.random() < 0.5:
+                # Insert a new goal at random position
+                msg = harness.get_init_moveit_pose()
+                msg.position.x = profile.get_range("x").sample()
+                msg.position.y = profile.get_range("y").sample()
+                msg.position.z = profile.get_range("z").sample()
+                pos = random.randint(0, len(new_list))
+                new_list.insert(pos, msg)
+            elif len(new_list) > min_goals:
+                idx = random.randint(0, len(new_list) - 1)
+                new_list.pop(idx)
+
+        self.msg_list = new_list
+        self.num_msgs = len(self.msg_list)
+        print(f"[moveit] phase1 exploit op={op}")
+
+    def _moveit_explore_round(self, profile, fbk_list):
+        """Phase 2: strategy-driven exploration anchored to seed centroid."""
+        center = getattr(self, '_seed_center', (0.3, 0.0, 0.5))
+
+        recent_feedback = None
+        if fbk_list:
+            for fbk in fbk_list:
+                if fbk.value is not None and fbk.interesting_value is not None:
+                    if fbk.value >= fbk.interesting_value:
+                        recent_feedback = fbk.name
+                        break
+
+        # Stagnation detection
+        if not hasattr(self, '_no_interesting_rounds'):
+            self._no_interesting_rounds = 0
+        self._no_interesting_rounds += 1
+
+        if self._no_interesting_rounds >= 10:
+            strategy = STRATEGY_RANDOM
+        else:
+            strategy = profile.select_strategy(recent_feedback)
+
+        min_goals, max_goals = profile.block_len_range
+        num_goals = random.randint(min_goals, max_goals)
+
+        print(f"[moveit] phase2 explore strategy={strategy} "
+              f"center=({center[0]:.2f},{center[1]:.2f},{center[2]:.2f})")
+
+        if strategy == STRATEGY_BOUNDARY_PUSH:
+            self.msg_list = self._moveit_boundary_push(
+                profile, num_goals, center)
+        elif strategy == STRATEGY_REVERSAL:
+            self.msg_list = self._moveit_reversal(
+                profile, num_goals, center)
+        elif strategy == STRATEGY_TRAJECTORY_ARC:
+            self.msg_list = self._moveit_trajectory_arc(
+                profile, num_goals, center)
+        elif strategy == STRATEGY_SINGLE_EXTREME:
+            self.msg_list = self._moveit_single_extreme(profile, num_goals)
+        else:  # STRATEGY_RANDOM
+            self.msg_list = self._moveit_random_fresh(profile, num_goals)
+
+        self.num_msgs = len(self.msg_list)
+
+    def _moveit_boundary_push(self, profile, num_goals, center=None):
+        """Generate goals near the workspace boundary, anchored to center."""
+        import math as _math
+        cx, cy, cz = center if center else (0.0, 0.0, 0.5)
+        goals = []
+        for _ in range(num_goals):
+            # Sample in spherical coords: radius near boundary
+            r = 0.855 + random.uniform(-0.1, 0.1)
+            theta = random.uniform(0, 2 * _math.pi)  # azimuth
+            phi = random.uniform(0.2, _math.pi - 0.2)  # polar (avoid poles)
+            x = cx + r * _math.sin(phi) * _math.cos(theta)
+            y = cy + r * _math.sin(phi) * _math.sin(theta)
+            z = cz + r * _math.cos(phi) * 0.5  # dampened z offset
+            # Clamp to domain
+            x = profile.get_range("x").clamp(x)
+            y = profile.get_range("y").clamp(y)
+            z = profile.get_range("z").clamp(z)
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
+            goals.append(msg)
+        return goals
+
+    def _moveit_reversal(self, profile, num_goals, center=None):
+        """Generate goals that reverse direction mid-sequence."""
+        cx, cy, cz = center if center else (0.0, 0.0, 0.5)
+        goals = []
+        # First half: positive offset from center, second: negative
+        half = num_goals // 2
+        offset_x = random.uniform(0.2, 0.5)
+        offset_y = random.uniform(0.2, 0.5)
+        offset_z = random.uniform(0.1, 0.4)
+        for i in range(num_goals):
+            if i < half:
+                x = cx + offset_x + random.uniform(-0.05, 0.05)
+                y = cy + offset_y + random.uniform(-0.05, 0.05)
+                z = cz + offset_z + random.uniform(-0.05, 0.05)
+            else:
+                x = cx - offset_x + random.uniform(-0.05, 0.05)
+                y = cy - offset_y + random.uniform(-0.05, 0.05)
+                z = cz - offset_z + random.uniform(-0.05, 0.05)
+            x = profile.get_range("x").clamp(x)
+            y = profile.get_range("y").clamp(y)
+            z = profile.get_range("z").clamp(z)
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
+            goals.append(msg)
+        return goals
+
+    def _moveit_trajectory_arc(self, profile, num_goals, center=None):
+        """Generate goals along an arc anchored to seed centroid."""
+        import math as _math
+        cx, cy, cz = center if center else (0.0, 0.0, 0.5)
+        goals = []
+        r = random.uniform(0.3, 0.6)
+        theta_start = random.uniform(0, 2 * _math.pi)
+        arc_span = random.uniform(_math.pi * 0.5, _math.pi * 1.5)
+        for i in range(num_goals):
+            t = theta_start + arc_span * (i / max(1, num_goals - 1))
+            x = cx + r * _math.cos(t)
+            y = cy + r * _math.sin(t)
+            z = cz + 0.1 * _math.sin(t * 2)
+            x = profile.get_range("x").clamp(x)
+            y = profile.get_range("y").clamp(y)
+            z = profile.get_range("z").clamp(z)
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
+            goals.append(msg)
+        return goals
+
+    def _moveit_single_extreme(self, profile, num_goals):
+        """Sweep one axis from min to max while holding others constant."""
+        goals = []
+        # Pick the axis to sweep
+        axis = random.choice(["x", "y", "z"])
+        fr = profile.get_range(axis)
+        # Fixed values for other axes
+        fixed = {}
+        for a in ["x", "y", "z"]:
+            if a != axis:
+                fixed[a] = profile.get_range(a).sample()
+
+        for i in range(num_goals):
+            t = i / max(1, num_goals - 1)
+            sweep_val = fr.low + t * (fr.high - fr.low)
+            msg = harness.get_init_moveit_pose()
+            msg.position.x = sweep_val if axis == "x" else fixed["x"]
+            msg.position.y = sweep_val if axis == "y" else fixed["y"]
+            msg.position.z = sweep_val if axis == "z" else fixed["z"]
+            goals.append(msg)
+        return goals
+
+    def _moveit_random_fresh(self, profile, num_goals):
+        """Generate completely random goals. Anti-stagnation fallback."""
+        goals = []
+        prob_special = 5
+        for _ in range(num_goals):
+            msg = harness.get_init_moveit_pose()
+            if np.random.randint(0, 100) < prob_special:
+                msg.position.x = mutator.gen_special_floats() / 1000.0
+            else:
+                msg.position.x = profile.get_range("x").sample()
+            if np.random.randint(0, 100) < prob_special:
+                msg.position.y = mutator.gen_special_floats() / 1000.0
+            else:
+                msg.position.y = profile.get_range("y").sample()
+            if np.random.randint(0, 100) < prob_special:
+                msg.position.z = mutator.gen_special_floats() / 1000.0
+            else:
+                msg.position.z = profile.get_range("z").sample()
+            goals.append(msg)
+        return goals
 
     def mutate_px4_param(self, config):
         frame = str(time.time())

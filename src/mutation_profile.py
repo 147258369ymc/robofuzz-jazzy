@@ -60,6 +60,12 @@ STRATEGY_FLIP = "flip"
 STRATEGY_SINGLE_BLOCK = "single_block"
 STRATEGY_RANDOM = "random"
 
+# MoveIt-specific strategies
+STRATEGY_BOUNDARY_PUSH = "boundary_push"
+STRATEGY_REVERSAL = "reversal"
+STRATEGY_TRAJECTORY_ARC = "trajectory_arc"
+STRATEGY_SINGLE_EXTREME = "single_extreme"
+
 # Default feedback-to-strategy mappings for PX4
 _PX4_FEEDBACK_STRATEGY_MAP = {
     "max_jerk": STRATEGY_FLIP,
@@ -70,6 +76,24 @@ _PX4_FEEDBACK_STRATEGY_MAP = {
     "actuator_saturation": STRATEGY_SINGLE_BLOCK,
     "vel_pos_inconsistency": STRATEGY_FLIP,
     "max_altitude": STRATEGY_SINGLE_BLOCK,
+}
+
+# MoveIt feedback-to-strategy mappings
+_MOVEIT_FEEDBACK_STRATEGY_MAP = {
+    "workspace_boundary_distance": STRATEGY_BOUNDARY_PUSH,
+    "trajectory_tracking_rms": STRATEGY_REVERSAL,
+    "max_joint_jerk": STRATEGY_REVERSAL,
+    "planning_duration": STRATEGY_RANDOM,
+    "abort_joint_drift": STRATEGY_SINGLE_EXTREME,
+    "velocity_roughness": STRATEGY_TRAJECTORY_ARC,
+    "joint_motion_range": STRATEGY_BOUNDARY_PUSH,
+    "end_point_deviation": STRATEGY_TRAJECTORY_ARC,
+    "max_velocity_margin": STRATEGY_BOUNDARY_PUSH,
+    "execution_sample_count": STRATEGY_TRAJECTORY_ARC,
+    "max_joint_pos_error": STRATEGY_REVERSAL,
+    "max_joint_vel_error": STRATEGY_REVERSAL,
+    "mean_joint_pos_error": STRATEGY_SINGLE_EXTREME,
+    "mean_joint_vel_error": STRATEGY_SINGLE_EXTREME,
 }
 
 
@@ -159,4 +183,29 @@ class MutationProfile:
             },
             block_len_range=(5, 30),
             feedback_strategy_map=_PX4_FEEDBACK_STRATEGY_MAP,
+        )
+
+    @classmethod
+    def moveit_panda(cls) -> "MutationProfile":
+        """Profile for MoveIt2 Panda arm goal-position fuzzing.
+
+        Workspace: sphere of ~0.855m radius centered at base.
+        x/y symmetric, z asymmetric (table below, arm above).
+        Strategies are geometry-aware for the 3D workspace.
+        """
+        return cls(
+            field_ranges={
+                "x": FieldRange("x", -0.9, 0.9),
+                "y": FieldRange("y", -0.9, 0.9),
+                "z": FieldRange("z", -0.4, 1.3),
+            },
+            strategy_weights={
+                STRATEGY_BOUNDARY_PUSH: 0.30,
+                STRATEGY_REVERSAL: 0.15,
+                STRATEGY_TRAJECTORY_ARC: 0.25,
+                STRATEGY_SINGLE_EXTREME: 0.15,
+                STRATEGY_RANDOM: 0.15,
+            },
+            block_len_range=(3, 8),
+            feedback_strategy_map=_MOVEIT_FEEDBACK_STRATEGY_MAP,
         )

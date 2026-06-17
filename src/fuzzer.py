@@ -159,6 +159,12 @@ class SeedQueue:
 
     @staticmethod
     def _msg_similar(a, b, threshold):
+        if hasattr(a, 'position') and hasattr(a.position, 'x'):
+            # geometry_msgs/Pose
+            dx = abs(a.position.x - b.position.x)
+            dy = abs(a.position.y - b.position.y)
+            dz = abs(a.position.z - b.position.z)
+            return (dx + dy + dz) < threshold
         for attr in ('vx', 'vy', 'vz', 'yawspeed', 'x', 'y', 'z', 'r'):
             va = getattr(a, attr, None)
             vb = getattr(b, attr, None)
@@ -252,8 +258,8 @@ class Fuzzer:
     def init_queue(self):
         print("[*] Initializing test case queue")
 
-        # PX4 uses quality-aware SeedQueue; others keep FIFO deque
-        if self.config.px4_sitl:
+        # PX4 and MoveIt use quality-aware SeedQueue; others keep FIFO deque
+        if self.config.px4_sitl or self.config.test_moveit:
             self.queue = SeedQueue()
         else:
             self.queue = deque()
@@ -380,23 +386,61 @@ class Fuzzer:
                         self.queue.append(seq)
 
         elif self.config.test_moveit:
-            # when using joint constraints
-            # msg = harness.get_init_moveit_msg()
-            # joint_constraints = msg.goal_constraints[0].joint_constraints
-            # self.queue.append(joint_constraints)
+            # Multi-goal sequence mode with semantic seed injection
+            from geometry_msgs.msg import Pose
 
-            msg = harness.get_init_moveit_pose()
-
-            # override the default msg with the given seed
+            # If user provided a seed file, use it as first seed
             if self.config.fuzz_seed:
+                msg = harness.get_init_moveit_pose()
                 f = open(self.config.fuzz_seed, "rb")
                 msg_dict = pickle.load(f)
                 msg.position.x = msg_dict["position"]["x"]
                 msg.position.y = msg_dict["position"]["y"]
                 msg.position.z = msg_dict["position"]["z"]
                 msg.orientation.w = msg_dict["orientation"]["w"]
+                f.close()
+                self.queue.append([msg])
 
-            self.queue.append(msg)
+            # --- Semantic seed injection (3 categories, 8 seeds) ---
+            def _make_seed(coords):
+                seq = []
+                for (x, y, z) in coords:
+                    msg = harness.get_init_moveit_pose()
+                    msg.position.x = x
+                    msg.position.y = y
+                    msg.position.z = z
+                    seq.append(msg)
+                return seq
+
+            # Category 1: Reachable seeds (establish feedback baseline)
+            self.queue.append(_make_seed([
+                (0.4, 0.0, 0.5), (0.0, 0.4, 0.6), (-0.3, 0.2, 0.4)]))
+            self.queue.append(_make_seed([
+                (0.3, 0.3, 0.3), (0.3, 0.3, 0.7),
+                (0.3, 0.3, 1.0), (0.3, 0.3, 0.5)]))
+            self.queue.append(_make_seed([
+                (0.5, 0.0, 0.5), (0.35, 0.35, 0.5),
+                (0.0, 0.5, 0.5), (-0.35, 0.35, 0.5)]))
+
+            # Category 2: Boundary exploration seeds
+            self.queue.append(_make_seed([
+                (0.4, 0.0, 0.5), (0.6, 0.0, 0.5),
+                (0.75, 0.0, 0.5), (0.85, 0.0, 0.5)]))
+            self.queue.append(_make_seed([
+                (0.3, 0.0, 0.2), (0.3, 0.0, 1.0),
+                (0.3, 0.0, -0.1), (0.3, 0.0, 0.6)]))
+            self.queue.append(_make_seed([
+                (0.5, 0.5, 0.8), (-0.5, -0.5, 0.3),
+                (0.5, -0.5, 0.9), (-0.5, 0.5, 0.2)]))
+
+            # Category 3: Semantic scenario seeds
+            self.queue.append(_make_seed([
+                (0.5, 0.2, 0.4), (0.5, 0.2, 0.8),
+                (-0.3, 0.4, 0.4), (-0.3, 0.4, 0.8),
+                (0.5, 0.2, 0.4)]))
+            self.queue.append(_make_seed([
+                (0.6, 0.0, 0.5), (-0.6, 0.0, 0.5),
+                (0.0, 0.6, 0.5), (0.0, -0.6, 0.5)]))
 
     # def start_virtual_display(self):
     # self.display = Display(visible=1, size=(1280, 720))
@@ -980,23 +1024,59 @@ def fuzz_msg(fuzzer, fuzz_targets):
             ]
 
             fbk = Feedback("end_point_deviation", FeedbackType.INC,
-                           default_value=0.0)
+                           default_value=0.0, min_threshold=0.005)
             fbk_list.append(fbk)
 
             fbk = Feedback("mean_joint_pos_error", FeedbackType.INC,
-                           default_value=0.0)
+                           default_value=0.0, min_threshold=0.02)
             fbk_list.append(fbk)
 
             fbk = Feedback("max_joint_pos_error", FeedbackType.INC,
-                           default_value=0.0)
+                           default_value=0.0, min_threshold=0.05)
             fbk_list.append(fbk)
 
             fbk = Feedback("mean_joint_vel_error", FeedbackType.INC,
-                           default_value=0.0)
+                           default_value=0.0, min_threshold=0.05)
             fbk_list.append(fbk)
 
             fbk = Feedback("max_joint_vel_error", FeedbackType.INC,
-                           default_value=0.0)
+                           default_value=0.0, min_threshold=0.1)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("max_velocity_margin", FeedbackType.DEC,
+                           default_value=10.0, min_threshold=0.5)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("trajectory_tracking_rms", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.03)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("abort_joint_drift", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.005)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("workspace_boundary_distance", FeedbackType.INC,
+                           default_value=0.0, min_threshold=5.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("planning_duration", FeedbackType.INC,
+                           default_value=0.0, min_threshold=2.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("max_joint_jerk", FeedbackType.INC,
+                           default_value=0.0, min_threshold=100.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("goal_success_ratio", FeedbackType.DEC,
+                           default_value=1.0, min_threshold=0.1)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("velocity_roughness", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.5)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("joint_motion_range", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.5)
             fbk_list.append(fbk)
 
         scheduler.filter_field_list(field_whitelist, field_blacklist)
@@ -1017,6 +1097,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
         if scheduler.campaign == Campaign.RND_SINGLE:
             # mutate and publish one message
             mode = ExecMode.SINGLE
+            # MoveIt uses multi-goal sequences even in RND_SINGLE campaign
+            if fuzzer.config.test_moveit:
+                mode = ExecMode.SEQUENCE
         elif scheduler.campaign == Campaign.RND_SEQUENCE:
             # mutate one from a sequence of messages, publish the sequence
             length = fuzzer.config.seqlen  # todo: apply in scheduler
@@ -1041,10 +1124,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
             if scheduler.campaign == Campaign.RND_SINGLE:
                 if fuzzer.config.test_moveit:
-                    # only for jointconstraint fuzzing
-                    # (mut_msg, frame) = scheduler.mutate_moveit_joint(config)
-                    # (mut_msg, frame) = scheduler.mutate_generic(config)
-                    (mut_msg, frame) = scheduler.mutate_moveit_goal(config)
+                    # Multi-goal sequence mutation (feedback-adaptive)
+                    (msg_list, frame) = scheduler.mutate_sequence_moveit(
+                        config, fbk_list)
                 elif fuzzer.config.exp_pgfuzz:
                     # param value mutation like what pgfuzz does
                     (mut_msg, frame) = scheduler.mutate_px4_param(config)
@@ -1052,10 +1134,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 else:
                     (mut_msg, frame) = scheduler.mutate_generic(config)
 
-                if mut_msg is None:
-                    continue
+                if not fuzzer.config.test_moveit:
+                    if mut_msg is None:
+                        continue
 
-                msg_list = [mut_msg]
+                    msg_list = [mut_msg]
 
             elif scheduler.campaign == Campaign.RND_SEQUENCE:
                 if fuzzer.config.use_mavlink:
@@ -1453,6 +1536,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
                                 flight_quality_ok = False
                                 break
 
+                # MoveIt quality gate: require at least 1 successful goal
+                if fuzzer.config.test_moveit:
+                    goal_ratio_fbk = None
+                    for fbk in fbk_list:
+                        if fbk.name == "goal_success_ratio":
+                            goal_ratio_fbk = fbk
+                            break
+                    if goal_ratio_fbk and goal_ratio_fbk.value is not None:
+                        if goal_ratio_fbk.value >= 1.0:
+                            # ratio=1.0 means 0% success (DEC default=1.0)
+                            flight_quality_ok = False
+                            print("[feedback] REJECTED — no goal succeeded "
+                                  "(quality gate)")
+                    else:
+                        flight_quality_ok = False
+
                 if not flight_quality_ok:
                     print("[feedback] REJECTED — drone did not fly (quality gate)")
                     is_interesting = False
@@ -1463,6 +1562,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
                 if scheduler.campaign == Campaign.RND_SEQUENCE:
                     # takes the entire list
+                    msg_to_queue = msg_list
+
+                # MoveIt multi-goal: always save the full goal sequence
+                if fuzzer.config.test_moveit and len(msg_list) > 1:
                     msg_to_queue = msg_list
 
                 # Diminishing returns: limit re-queue per cycle
@@ -1483,6 +1586,19 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     scheduler._no_interesting_rounds = 0
                 if hasattr(scheduler, '_cycles_without_new_cov'):
                     scheduler._cycles_without_new_cov = 0
+                if hasattr(scheduler, '_cycles_without_interesting'):
+                    scheduler._cycles_without_interesting = 0
+
+                # MoveIt: track recent interesting rounds + greedy update
+                if fuzzer.config.test_moveit:
+                    if not hasattr(scheduler, '_recent_interesting_rounds'):
+                        scheduler._recent_interesting_rounds = []
+                    scheduler._recent_interesting_rounds.append(
+                        scheduler.round_cnt)
+                    # Greedy: in Phase 1, replace msg_list for next round
+                    if scheduler.round_cnt <= scheduler.EXPLOIT_PHASE_END:
+                        scheduler.msg_list = deepcopy(msg_list)
+                        print("[feedback] greedy update — Phase 1 seed evolved")
 
                 with open(
                     os.path.join(fuzzer.config.cov_dir, frame),
@@ -1581,11 +1697,32 @@ def fuzz_msg(fuzzer, fuzz_targets):
                             fuzzer.init_queue()
 
             elif fuzzer.config.test_moveit:
-                if scheduler.round_cnt == 100:
-                    scheduler.round_cnt = 0
-                    scheduler.cycle_cnt += 1
-                    scheduler.is_new_cycle = True
-                    print("--- cycle finished ---")
+                # Adaptive cycle length: min 20, max 30, extend if recent interesting
+                if scheduler.round_cnt >= scheduler.CYCLE_MIN:
+                    recent = getattr(scheduler, '_recent_interesting_rounds', [])
+                    recent_in_window = [
+                        r for r in recent
+                        if r > scheduler.round_cnt - scheduler.EXTEND_WINDOW]
+                    if (len(recent_in_window) == 0
+                            or scheduler.round_cnt >= scheduler.CYCLE_MAX):
+                        scheduler.round_cnt = 0
+                        scheduler.cycle_cnt += 1
+                        scheduler.is_new_cycle = True
+                        scheduler._recent_interesting_rounds = []
+                        scheduler._seed_interesting_count = 0
+                        print("--- cycle finished ---")
+
+                        # Stagnation detection: 10 cycles without interesting
+                        if not hasattr(scheduler, '_cycles_without_interesting'):
+                            scheduler._cycles_without_interesting = 0
+                        scheduler._cycles_without_interesting += 1
+                        if scheduler._cycles_without_interesting >= 10:
+                            print("[!] STAGNATION: 10 cycles without "
+                                  "interesting, resetting exploration")
+                            for fbk in fbk_list:
+                                fbk.reset()
+                            scheduler._cycles_without_interesting = 0
+                            fuzzer.init_queue()
 
             elif fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl:
                 # For TB3 sequence mode: cycle every 10 rounds to consume
