@@ -1067,8 +1067,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
                            default_value=0.0, min_threshold=100.0)
             fbk_list.append(fbk)
 
-            fbk = Feedback("goal_success_ratio", FeedbackType.DEC,
-                           default_value=1.0, min_threshold=0.1)
+            fbk = Feedback("goal_success_ratio", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.2)
             fbk_list.append(fbk)
 
             fbk = Feedback("velocity_roughness", FeedbackType.INC,
@@ -1416,6 +1416,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # state_monitor.rosbag_proc = None
 
                 # print("run checks")
+                # Reset feedback values before oracle check to avoid
+                # stale values from previous round leaking through
+                for fbk in fbk_list:
+                    fbk.value = fbk.default_value
                 errs = checker.run_checks(fuzzer.config, msg_list,
                         state_msgs_dict, fbk_list)
                 errs = list(set(errs))
@@ -1545,7 +1549,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
                             break
                     if goal_ratio_fbk and goal_ratio_fbk.value is not None:
                         if goal_ratio_fbk.value >= 1.0:
-                            # ratio=1.0 means 0% success (DEC default=1.0)
+                            # fail_ratio=1.0 means all goals failed
                             flight_quality_ok = False
                             print("[feedback] REJECTED — no goal succeeded "
                                   "(quality gate)")
@@ -1613,7 +1617,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # Exception: reset crash-sensitive metrics when a crash is detected
             # (attitude > 170 deg), as crash data poisons the feedback ceiling.
             if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl
-                    or fuzzer.config.px4_sitl):
+                    or fuzzer.config.px4_sitl
+                    or fuzzer.config.test_moveit):
                 if errs:
                     for fbk in fbk_list:
                         fbk.reset()
@@ -1649,6 +1654,19 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     # Purge stale crash seeds from queue
                     if isinstance(fuzzer.queue, SeedQueue):
                         fuzzer.queue.purge_crashed()
+
+            # MoveIt: reset feedback when ALL goals abort (no useful data)
+            if fuzzer.config.test_moveit and errs:
+                goal_ratio_fbk = None
+                for fbk in fbk_list:
+                    if fbk.name == "goal_success_ratio":
+                        goal_ratio_fbk = fbk
+                        break
+                if goal_ratio_fbk and goal_ratio_fbk.value is not None:
+                    if goal_ratio_fbk.value >= 1.0:
+                        for fbk in fbk_list:
+                            fbk.reset()
+                        print("[feedback] all goals aborted, reset feedback")
 
             if fuzzer.config.px4_sitl:
 
