@@ -256,7 +256,10 @@ def moveit_send_command(msg):
     x = str(msg.position.x)
     y = str(msg.position.y)
     z = str(msg.position.z)
-    w = str(msg.orientation.w)
+    ox = str(msg.orientation.x)
+    oy = str(msg.orientation.y)
+    oz = str(msg.orientation.z)
+    ow = str(msg.orientation.w)
 
     try:
         sp.run(
@@ -268,7 +271,10 @@ def moveit_send_command(msg):
                 f"x:={x}",
                 f"y:={y}",
                 f"z:={z}",
-                f"w:={w}",
+                f"ox:={ox}",
+                f"oy:={oy}",
+                f"oz:={oz}",
+                f"w:={ow}",
             ],
             stdout=sp.DEVNULL,
             stderr=sp.DEVNULL,

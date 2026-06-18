@@ -374,8 +374,8 @@ class Scheduler:
         """Phase 1: neighborhood mutation around seed_base."""
         import math as _math
         # Weighted mutation operations
-        ops = ['perturb', 'swap', 'negate', 'replace', 'resize']
-        weights = [50, 15, 15, 10, 10]
+        ops = ['perturb', 'swap', 'negate', 'replace', 'resize', 'orient', 'oscillate']
+        weights = [20, 12, 12, 12, 10, 18, 16]
         op = random.choices(ops, weights=weights, k=1)[0]
 
         new_list = deepcopy(self.msg_list)
@@ -424,6 +424,32 @@ class Scheduler:
             elif len(new_list) > min_goals:
                 idx = random.randint(0, len(new_list) - 1)
                 new_list.pop(idx)
+        elif op == 'orient':
+            # Perturb orientation with small quaternion rotation
+            idx = random.randint(0, len(new_list) - 1)
+            # Generate small rotation quaternion
+            angle = random.gauss(0, 0.3)  # ~17 degrees std
+            axis = random.choice(['x', 'y', 'z'])
+            half = angle / 2.0
+            sin_h = _math.sin(half)
+            cos_h = _math.cos(half)
+            if axis == 'x':
+                new_list[idx].orientation.x = sin_h
+                new_list[idx].orientation.w = cos_h
+            elif axis == 'y':
+                new_list[idx].orientation.y = sin_h
+                new_list[idx].orientation.w = cos_h
+            else:
+                new_list[idx].orientation.z = sin_h
+                new_list[idx].orientation.w = cos_h
+        elif op == 'oscillate' and len(new_list) >= 2:
+            # Create A→B→A pattern (rapid back-and-forth)
+            idx = random.randint(0, len(new_list) - 2)
+            goal_a = deepcopy(new_list[idx])
+            goal_b = deepcopy(new_list[idx + 1])
+            # Insert A after B to create A→B→A
+            if len(new_list) < max_goals:
+                new_list.insert(idx + 2, deepcopy(goal_a))
 
         self.msg_list = new_list
         self.num_msgs = len(self.msg_list)
@@ -494,6 +520,8 @@ class Scheduler:
             msg.position.x = x
             msg.position.y = y
             msg.position.z = z
+            if random.random() < 0.2:
+                self._apply_random_orientation(msg)
             goals.append(msg)
         return goals
 
@@ -572,6 +600,7 @@ class Scheduler:
 
     def _moveit_random_fresh(self, profile, num_goals):
         """Generate completely random goals. Anti-stagnation fallback."""
+        import math as _math
         goals = []
         prob_special = 5
         for _ in range(num_goals):
@@ -588,8 +617,31 @@ class Scheduler:
                 msg.position.z = mutator.gen_special_floats() / 1000.0
             else:
                 msg.position.z = profile.get_range("z").sample()
+            # 30% chance of non-identity orientation
+            if random.random() < 0.3:
+                self._apply_random_orientation(msg)
             goals.append(msg)
         return goals
+
+    def _apply_random_orientation(self, msg):
+        """Apply a random orientation to a Pose goal."""
+        import math as _math
+        # Random rotation: angle up to 90 degrees around random axis
+        angle = random.uniform(-_math.pi / 2, _math.pi / 2)
+        # Random axis (unit vector)
+        ax = random.gauss(0, 1)
+        ay = random.gauss(0, 1)
+        az = random.gauss(0, 1)
+        norm = _math.sqrt(ax*ax + ay*ay + az*az)
+        if norm < 0.001:
+            return
+        ax, ay, az = ax/norm, ay/norm, az/norm
+        half = angle / 2.0
+        sin_h = _math.sin(half)
+        msg.orientation.x = ax * sin_h
+        msg.orientation.y = ay * sin_h
+        msg.orientation.z = az * sin_h
+        msg.orientation.w = _math.cos(half)
 
     def mutate_px4_param(self, config):
         frame = str(time.time())

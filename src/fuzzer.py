@@ -1079,6 +1079,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
                            default_value=0.0, min_threshold=0.5)
             fbk_list.append(fbk)
 
+            fbk = Feedback("goal_transition_error", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.01)
+            fbk_list.append(fbk)
+
         scheduler.filter_field_list(field_whitelist, field_blacklist)
         scheduler.init_schedule()
 
@@ -1351,7 +1355,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
             state_dict_list = []
             ulg_path = None  # track for error preservation
             # repeated campaigns result in multiple bag files
-            for exec_cnt in range(repeat):
+            # MoveIt: all goals sent in one execution, single bag file
+            parse_repeat = 1 if fuzzer.config.test_moveit else repeat
+            for exec_cnt in range(parse_repeat):
 
                 if fuzzer.config.use_ulg and fuzzer.config.px4_sitl:
                     # --- ULG path: read PX4 internal log (bypasses bridge) ---
@@ -1477,7 +1483,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         preserve_ulg_on_error(
                             ulg_path, fuzzer.config.log_dir, frame)
                 else:
-                    for exec_cnt in range(repeat):
+                    copy_repeat = 1 if fuzzer.config.test_moveit else repeat
+                    for exec_cnt in range(copy_repeat):
                         # copy rosbags to {log_dir}/rosbags/{frame}/
                         bag_dir = f"states-{exec_cnt}.bag"
                         try:
