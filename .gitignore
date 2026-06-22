@@ -17,7 +17,9 @@ logs_original/
 preprocessed/
 logs_px4/
 logs_px4_original/
-docs/
+docs/*
+!docs/superpowers/
+!docs/superpowers/**
 src/oracle_ir/specs
 system_doc/turtlebot3
 system_doc/turtlebot3_clean
@@ -25,3 +27,6 @@ rofer-2023/
 src_nav2
 system_doc/moveit2_panda
 logs_moveit/
+src_jazzy/logs/
+src_jazzy/out
+src_jazzy/err
