@@ -1,0 +1,44 @@
+id: px4.yaw_rate.weathervane_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: yaw_rate
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: WV_YRATE_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 90.0
+
+constants:
+  - name: RAD2DEG
+    value: 57.2957795
+    unit: ""
+
+derived:
+  - name: yaw_rate_dps
+    expr: "abs(yaw_rate) * RAD2DEG"
+    unit: deg/s
+
+assertions:
+  - expr: "yaw_rate_dps <= param(WV_YRATE_MAX) + tolerance"
+    tolerance: 10.0
+    severity: warning
+    message: "Weathervane yaw rate limit: {yaw_rate_dps:.1f} deg/s"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.WV_YRATE_MAX
+    evidence: "Maximum yawrate the weathervane controller is allowed to demand"

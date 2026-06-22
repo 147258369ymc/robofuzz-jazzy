@@ -1,0 +1,106 @@
+# Franka Emika Panda 机械臂目标描述符
+name: franka_arm
+display_name: "Franka Emika Panda 7-DOF"
+version: "0.10.0"
+middleware: ros2
+description: "Franka Emika Panda 7自由度协作机械臂，ROS2 + franka_ros2"
+
+topic_suffix: ""
+
+topics:
+  - name: /franka/joint_states
+    msg_type: sensor_msgs/JointState
+    fields: [position, velocity, effort]
+    field_units: {position: rad, velocity: rad/s, effort: Nm}
+    frequency_hz: 1000.0
+    description: "7个关节的状态"
+
+  - name: /franka/robot_state
+    msg_type: franka_msgs/FrankaRobotState
+    fields: [cartesian_collision, cartesian_contact, joint_collision, joint_contact, tau_ext_hat_filtered]
+    field_units: {tau_ext_hat_filtered: Nm}
+    frequency_hz: 1000.0
+
+  - name: /franka/end_effector_pose
+    msg_type: geometry_msgs/PoseStamped
+    fields: [pose.position.x, pose.position.y, pose.position.z, pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z]
+    field_units: {pose.position.x: m, pose.position.y: m, pose.position.z: m}
+    frequency_hz: 100.0
+
+  - name: /franka/gripper_state
+    msg_type: franka_msgs/GripperState
+    fields: [width, max_width, is_grasped, temperature]
+    field_units: {width: m, temperature: degC}
+    frequency_hz: 30.0
+
+operating_modes:
+  - name: idle
+    description: "空闲（关节锁定）"
+  - name: joint_impedance
+    description: "关节阻抗控制"
+  - name: cartesian_impedance
+    description: "笛卡尔阻抗控制"
+  - name: torque_control
+    description: "力矩直接控制"
+  - name: move_to_pose
+    description: "运动规划执行中"
+
+constraint_types:
+  - category: joint_position
+    description: "关节角度限制（每个关节有独立的 min/max）"
+    relevant_topics: [/franka/joint_states]
+    param_patterns: [".*joint.*limit.*", ".*q_min.*", ".*q_max.*"]
+  - category: joint_velocity
+    description: "关节角速度限制"
+    relevant_topics: [/franka/joint_states]
+    param_patterns: [".*dq_max.*", ".*joint.*vel.*"]
+  - category: joint_torque
+    description: "关节力矩限制"
+    relevant_topics: [/franka/joint_states, /franka/robot_state]
+    param_patterns: [".*tau_max.*", ".*torque.*limit.*", ".*effort.*"]
+  - category: cartesian_velocity
+    description: "末端执行器线速度/角速度限制"
+    relevant_topics: [/franka/end_effector_pose]
+    param_patterns: [".*cartesian.*vel.*", ".*ee_vel.*"]
+  - category: force
+    description: "接触力/碰撞力限制"
+    relevant_topics: [/franka/robot_state]
+    param_patterns: [".*force.*", ".*collision.*threshold.*"]
+  - category: workspace
+    description: "工作空间边界"
+    relevant_topics: [/franka/end_effector_pose]
+    param_patterns: [".*workspace.*", ".*reach.*"]
+
+safety_conditions:
+  - name: no_collision
+    description: "未检测到碰撞"
+    check_expr: "max(cartesian_collision) < 1.0"
+    required_topics: [/franka/robot_state]
+  - name: within_workspace
+    description: "末端在安全工作空间内"
+    check_expr: "sqrt(ee_x**2 + ee_y**2 + ee_z**2) < 0.855"
+    required_topics: [/franka/end_effector_pose]
+  - name: gripper_safe
+    description: "夹爪温度正常"
+    check_expr: "temperature < 60.0"
+    required_topics: [/franka/gripper_state]
+
+param_naming:
+  joint_position_constraint:
+    - ".*q[0-9]_min.*"
+    - ".*q[0-9]_max.*"
+    - ".*joint_[0-9]_limit.*"
+  joint_velocity_constraint:
+    - ".*dq_max.*"
+    - ".*joint_velocity_limit.*"
+  torque_constraint:
+    - ".*tau_J_max.*"
+    - ".*torque_limit.*"
+  force_constraint:
+    - ".*F_max.*"
+    - ".*collision_threshold.*"
+    - ".*contact_threshold.*"
+  workspace_constraint:
+    - ".*workspace_radius.*"
+    - ".*z_min.*"
+    - ".*z_max.*"

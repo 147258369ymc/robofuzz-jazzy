@@ -1,0 +1,52 @@
+id: px4.sensor.gps_discrepancy
+type: cross_sensor
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: gps_lat_raw
+    topic: /VehicleGpsPosition_PubSubTopic
+    field: lat
+    unit: deg_e7
+  - name: gps_lon_raw
+    topic: /VehicleGpsPosition_PubSubTopic
+    field: lon
+    unit: deg_e7
+  - name: gps_lat_est
+    topic: /VehicleGlobalPosition_PubSubTopic
+    field: lat
+    unit: deg
+  - name: gps_lon_est
+    topic: /VehicleGlobalPosition_PubSubTopic
+    field: lon
+    unit: deg
+
+derived:
+  - name: lat_diff
+    expr: "abs(gps_lat_raw - gps_lat_est * 10000000)"
+    unit: deg_e7
+  - name: lon_diff
+    expr: "abs(gps_lon_raw - gps_lon_est * 10000000)"
+    unit: deg_e7
+
+assertions: []
+
+window:
+  type: every_sample
+
+feedback:
+  - name: gps_lat_inconsistency
+    metric: "lat_diff"
+    direction: maximize
+  - name: gps_lon_inconsistency
+    metric: "lon_diff"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.msg.VehicleGpsPosition
+    evidence: "Raw GPS lat/lon in 1e-7 degrees"
+  - chunk_id: px4.msg.VehicleGlobalPosition
+    evidence: "Estimated global position lat/lon in degrees"

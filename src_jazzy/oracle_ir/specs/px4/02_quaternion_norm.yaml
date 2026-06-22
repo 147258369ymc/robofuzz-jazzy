@@ -1,0 +1,42 @@
+id: px4.attitude.quaternion_norm
+type: norm_constraint
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: qw
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 0
+  - name: qx
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 1
+  - name: qy
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 2
+  - name: qz
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 3
+
+derived:
+  - name: quat_norm
+    expr: "sqrt(qw*qw + qx*qx + qy*qy + qz*qz)"
+
+assertions:
+  - expr: "abs(quat_norm - 1.0) <= tolerance"
+    tolerance: 0.01
+    severity: error
+    message: "Quaternion norm ({quat_norm:.6f}) deviates from 1.0"
+
+window:
+  type: every_sample
+
+provenance:
+  - chunk_id: px4.msg.VehicleAttitude
+    evidence: "Quaternion must be unit norm"

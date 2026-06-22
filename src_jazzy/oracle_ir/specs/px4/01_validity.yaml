@@ -1,0 +1,56 @@
+id: px4.validity.nan_inf_check
+type: validity
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: acc_x
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 0
+    unit: m/s2
+  - name: acc_y
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 1
+    unit: m/s2
+  - name: acc_z
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 2
+    unit: m/s2
+  - name: ang_x
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 0
+    unit: rad/s
+  - name: ang_y
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 1
+    unit: rad/s
+  - name: ang_z
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+assertions:
+  - expr: "is_valid(acc_x) and is_valid(acc_y) and is_valid(acc_z)"
+    severity: error
+    message: "VehicleAcceleration contains NaN/INF"
+  - expr: "is_valid(ang_x) and is_valid(ang_y) and is_valid(ang_z)"
+    severity: error
+    message: "VehicleAngularVelocity contains NaN/INF"
+
+window:
+  type: every_sample
+
+provenance:
+  - chunk_id: px4.msg.VehicleAcceleration
+    evidence: "xyz array must be finite"
+  - chunk_id: px4.msg.VehicleAngularVelocity
+    evidence: "xyz array must be finite"

@@ -1,0 +1,38 @@
+id: px4.fw.climb_rate
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+
+parameters:
+  - name: FW_T_CLMB_MAX
+    source: px4.parameters
+    unit: m/s
+    default: 5.0
+
+derived:
+  - name: climb_rate
+    expr: "abs(vz)"
+    unit: m/s
+
+assertions:
+  - expr: "climb_rate <= param(FW_T_CLMB_MAX) + tolerance"
+    tolerance: 1.0
+    severity: warning
+    message: "FW climb rate {climb_rate:.2f} exceeds FW_T_CLMB_MAX"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.FW_T_CLMB_MAX
+    evidence: "Maximum climb rate for fixed-wing TECS"

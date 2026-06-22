@@ -1,0 +1,97 @@
+# TurtleBot3 移动机器人目标描述符
+name: turtlebot3
+display_name: "TurtleBot3 Burger"
+version: "humble"
+middleware: ros2
+description: "TurtleBot3 差速驱动移动机器人，ROS2 Humble"
+
+topic_suffix: ""
+
+topics:
+  - name: /odom
+    msg_type: nav_msgs/Odometry
+    fields: [pose.position.x, pose.position.y, pose.orientation.z, twist.linear.x, twist.angular.z]
+    field_units: {pose.position.x: m, pose.position.y: m, twist.linear.x: m/s, twist.angular.z: rad/s}
+    frequency_hz: 30.0
+
+  - name: /cmd_vel
+    msg_type: geometry_msgs/Twist
+    fields: [linear.x, linear.y, linear.z, angular.x, angular.y, angular.z]
+    field_units: {linear.x: m/s, angular.z: rad/s}
+    frequency_hz: 10.0
+
+  - name: /scan
+    msg_type: sensor_msgs/LaserScan
+    fields: [ranges, angle_min, angle_max, range_min, range_max]
+    field_units: {ranges: m, angle_min: rad, angle_max: rad}
+    frequency_hz: 5.0
+
+  - name: /imu
+    msg_type: sensor_msgs/Imu
+    fields: [angular_velocity.x, angular_velocity.y, angular_velocity.z, linear_acceleration.x, linear_acceleration.y, linear_acceleration.z]
+    field_units: {angular_velocity.z: rad/s, linear_acceleration.x: m/s2}
+    frequency_hz: 50.0
+
+  - name: /joint_states
+    msg_type: sensor_msgs/JointState
+    fields: [position, velocity, effort]
+    field_units: {position: rad, velocity: rad/s}
+    frequency_hz: 30.0
+
+operating_modes:
+  - name: teleoperation
+    description: "遥控操作模式"
+    active_topics: [/cmd_vel, /odom]
+  - name: navigation
+    description: "自主导航模式 (Nav2)"
+    active_topics: [/cmd_vel, /odom, /scan]
+  - name: idle
+    description: "静止待命"
+    active_topics: [/odom]
+
+constraint_types:
+  - category: velocity
+    description: "线速度和角速度限制"
+    relevant_topics: [/cmd_vel, /odom]
+    param_patterns: [".*vel.*", ".*speed.*", ".*linear.*"]
+  - category: position
+    description: "位置偏差和导航精度"
+    relevant_topics: [/odom]
+    param_patterns: [".*pos.*", ".*goal.*", ".*tolerance.*"]
+  - category: obstacle
+    description: "障碍物距离约束"
+    relevant_topics: [/scan]
+    param_patterns: [".*obstacle.*", ".*collision.*", ".*clearance.*"]
+  - category: wheel
+    description: "轮子转速和力矩约束"
+    relevant_topics: [/joint_states]
+    param_patterns: [".*wheel.*", ".*motor.*", ".*torque.*"]
+
+safety_conditions:
+  - name: is_moving
+    description: "机器人正在移动（线速度 > 0.01 m/s）"
+    check_expr: "abs(twist_linear_x) > 0.01"
+    required_topics: [/odom]
+  - name: no_collision_risk
+    description: "前方无近距离障碍物（最近障碍 > 0.2m）"
+    check_expr: "min_range > 0.2"
+    required_topics: [/scan]
+
+param_naming:
+  velocity_constraint:
+    - ".*max_vel.*"
+    - ".*max_speed.*"
+    - ".*linear_max.*"
+    - ".*angular_max.*"
+  position_constraint:
+    - ".*xy_goal_tolerance.*"
+    - ".*yaw_goal_tolerance.*"
+    - ".*position_accuracy.*"
+  obstacle_constraint:
+    - ".*inflation_radius.*"
+    - ".*robot_radius.*"
+    - ".*min_obstacle_dist.*"
+  sensor:
+    - ".*scan.*"
+    - ".*imu.*"
+    - ".*lidar.*"

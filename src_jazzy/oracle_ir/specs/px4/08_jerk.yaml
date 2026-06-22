@@ -1,0 +1,56 @@
+id: px4.jerk.horizontal_max
+type: temporal_consistency
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [OFFBOARD, AUTO_MISSION, AUTO_LOITER, AUTO_RTL]
+  require_airborne: true
+
+observations:
+  - name: ax
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 0
+    unit: m/s2
+  - name: ay
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 1
+    unit: m/s2
+
+parameters:
+  - name: MPC_JERK_MAX
+    source: px4.parameters
+    unit: m/s3
+    default: 8.0
+
+derived:
+  - name: jerk_x
+    expr: "(ax - prev_ax) / dt"
+    unit: m/s3
+  - name: jerk_y
+    expr: "(ay - prev_ay) / dt"
+    unit: m/s3
+  - name: horizontal_jerk
+    expr: "sqrt(jerk_x * jerk_x + jerk_y * jerk_y)"
+    unit: m/s3
+
+assertions:
+  - expr: "horizontal_jerk <= param(MPC_JERK_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "MPC_JERK_MAX violated: {horizontal_jerk:.1f} m/s3"
+
+window:
+  type: sequential_pairs
+  filter: airborne
+
+feedback:
+  - name: max_jerk
+    metric: "horizontal_jerk"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.param.MPC_JERK_MAX
+    evidence: "Maximum jerk in auto modes"

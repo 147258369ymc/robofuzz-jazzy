@@ -1,0 +1,43 @@
+id: px4.altitude.mc_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: z
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: z
+    unit: m
+
+parameters:
+  - name: LNDMC_ALT_MAX
+    source: px4.parameters
+    unit: m
+    default: -1.0
+
+derived:
+  - name: altitude
+    expr: "abs(z)"
+    unit: m
+
+assertions:
+  - expr: "param(LNDMC_ALT_MAX) < 0 or altitude <= param(LNDMC_ALT_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "Altitude {altitude:.1f}m exceeds LNDMC_ALT_MAX"
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: max_altitude
+    metric: "altitude"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.parameter.LNDMC_ALT_MAX
+    evidence: "Maximum altitude for multicopters, hard altitude limit"

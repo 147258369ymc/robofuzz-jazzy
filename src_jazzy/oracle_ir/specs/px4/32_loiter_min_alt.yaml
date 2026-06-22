@@ -1,0 +1,39 @@
+id: px4.altitude.loiter_min
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [AUTO_LOITER, AUTO_MISSION, AUTO_RTL]
+  require_airborne: true
+
+observations:
+  - name: z
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: z
+    unit: m
+
+parameters:
+  - name: MIS_LTRMIN_ALT
+    source: px4.parameters
+    unit: m
+    default: -1.0
+
+derived:
+  - name: altitude
+    expr: "abs(z)"
+    unit: m
+
+assertions:
+  - expr: "param(MIS_LTRMIN_ALT) < 0 or altitude >= param(MIS_LTRMIN_ALT) - tolerance"
+    tolerance: 2.0
+    severity: warning
+    message: "Loiter altitude {altitude:.1f}m below MIS_LTRMIN_ALT"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.MIS_LTRMIN_ALT
+    evidence: "Minimum Loiter altitude to stay out of ground effect"

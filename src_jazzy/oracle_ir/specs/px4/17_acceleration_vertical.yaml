@@ -1,0 +1,50 @@
+id: px4.acceleration.vertical_limits
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: az
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 2
+    unit: m/s2
+
+parameters:
+  - name: MPC_ACC_UP_MAX
+    source: px4.parameters
+    unit: m/s^2
+    default: 4.0
+  - name: MPC_ACC_DOWN_MAX
+    source: px4.parameters
+    unit: m/s^2
+    default: 3.0
+
+constants:
+  - name: GRAVITY
+    value: 9.81
+    unit: m/s2
+
+derived:
+  - name: vertical_accel
+    expr: "abs(az + GRAVITY)"
+    unit: m/s2
+
+assertions:
+  - expr: "vertical_accel <= param(MPC_ACC_UP_MAX) + tolerance"
+    tolerance: 1.0
+    severity: warning
+    message: "Vertical acceleration {vertical_accel:.2f} exceeds MPC_ACC_UP_MAX"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.MPC_ACC_UP_MAX
+    evidence: "Maximum vertical acceleration in velocity controlled modes upward"
+  - chunk_id: px4.parameter.MPC_ACC_DOWN_MAX
+    evidence: "Maximum vertical acceleration in velocity controlled modes down"

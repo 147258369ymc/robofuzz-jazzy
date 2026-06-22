@@ -1,0 +1,55 @@
+id: px4.stability.position_hold
+type: norm_constraint
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [LOITER, AUTO_LOITER]
+  require_airborne: true
+
+observations:
+  - name: x
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: x
+    unit: m
+  - name: y
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: y
+    unit: m
+  - name: z
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: z
+    unit: m
+
+constants:
+  - name: HOLD_THRESHOLD
+    value: 0.3
+    unit: m
+
+derived:
+  - name: drift_x
+    expr: "x_max - x_min"
+    unit: m
+  - name: drift_y
+    expr: "y_max - y_min"
+    unit: m
+  - name: drift_z
+    expr: "z_max - z_min"
+    unit: m
+  - name: max_drift
+    expr: "max(drift_x, drift_y, drift_z)"
+    unit: m
+
+assertions:
+  - expr: "max_drift <= HOLD_THRESHOLD"
+    tolerance: 0.0
+    severity: error
+    message: "Position hold drift: x={drift_x:.2f} y={drift_y:.2f} z={drift_z:.2f} m"
+
+window:
+  type: aggregation
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.mode.LOITER
+    evidence: "Position hold mode expects stable position"

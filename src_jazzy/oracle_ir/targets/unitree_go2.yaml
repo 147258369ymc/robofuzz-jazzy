@@ -1,0 +1,114 @@
+# Unitree Go2 四足机器狗目标描述符
+name: unitree_go2
+display_name: "Unitree Go2 Quadruped"
+version: "1.0"
+middleware: ros2
+description: "宇树 Go2 四足机器人，ROS2 + unitree_ros2"
+
+topic_suffix: ""
+
+topics:
+  - name: /body_state
+    msg_type: unitree_msgs/BodyState
+    fields: [position.x, position.y, position.z, velocity.x, velocity.y, velocity.z, rpy.roll, rpy.pitch, rpy.yaw, angular_velocity.x, angular_velocity.y, angular_velocity.z]
+    field_units: {position.x: m, velocity.x: m/s, rpy.roll: rad, angular_velocity.x: rad/s}
+    frequency_hz: 500.0
+
+  - name: /joint_states
+    msg_type: sensor_msgs/JointState
+    fields: [position, velocity, effort]
+    field_units: {position: rad, velocity: rad/s, effort: Nm}
+    frequency_hz: 500.0
+    description: "12个关节 (每条腿3个: hip, thigh, calf)"
+
+  - name: /foot_contact
+    msg_type: unitree_msgs/FootContact
+    fields: [front_left, front_right, rear_left, rear_right]
+    field_units: {}
+    frequency_hz: 500.0
+    description: "足端接触力传感器 (0=离地, >0=接触)"
+
+  - name: /imu
+    msg_type: sensor_msgs/Imu
+    fields: [angular_velocity.x, angular_velocity.y, angular_velocity.z, linear_acceleration.x, linear_acceleration.y, linear_acceleration.z, orientation.w, orientation.x, orientation.y, orientation.z]
+    field_units: {angular_velocity.x: rad/s, linear_acceleration.x: m/s2}
+    frequency_hz: 500.0
+
+  - name: /cmd_vel
+    msg_type: geometry_msgs/Twist
+    fields: [linear.x, linear.y, angular.z]
+    field_units: {linear.x: m/s, linear.y: m/s, angular.z: rad/s}
+    frequency_hz: 50.0
+
+operating_modes:
+  - name: stand
+    description: "站立静止"
+  - name: walk
+    description: "行走"
+  - name: run
+    description: "奔跑"
+  - name: climb
+    description: "爬坡/爬楼梯"
+  - name: recovery
+    description: "摔倒恢复"
+
+constraint_types:
+  - category: body_velocity
+    description: "身体线速度限制"
+    relevant_topics: [/body_state, /cmd_vel]
+    param_patterns: [".*max_vel.*", ".*speed_limit.*"]
+  - category: body_attitude
+    description: "身体姿态限制（防止翻倒）"
+    relevant_topics: [/body_state, /imu]
+    param_patterns: [".*roll_limit.*", ".*pitch_limit.*", ".*tilt.*"]
+  - category: joint_position
+    description: "关节角度限制（防止超出机械极限）"
+    relevant_topics: [/joint_states]
+    param_patterns: [".*joint.*limit.*", ".*hip_max.*", ".*knee.*"]
+  - category: joint_torque
+    description: "关节力矩限制（防止电机过载）"
+    relevant_topics: [/joint_states]
+    param_patterns: [".*torque_max.*", ".*effort_limit.*"]
+  - category: foot_force
+    description: "足端接触力约束"
+    relevant_topics: [/foot_contact]
+    param_patterns: [".*contact_force.*", ".*ground_reaction.*"]
+  - category: stability
+    description: "步态稳定性（ZMP、支撑多边形）"
+    relevant_topics: [/body_state, /foot_contact]
+    param_patterns: [".*stability.*", ".*balance.*"]
+
+safety_conditions:
+  - name: is_standing
+    description: "机器人处于站立状态（至少3足着地）"
+    check_expr: "(front_left > 0) + (front_right > 0) + (rear_left > 0) + (rear_right > 0) >= 3"
+    required_topics: [/foot_contact]
+  - name: not_fallen
+    description: "机器人未翻倒（pitch/roll < 60度）"
+    check_expr: "abs(rpy_roll) < 1.05 and abs(rpy_pitch) < 1.05"
+    required_topics: [/body_state]
+  - name: body_height_ok
+    description: "身体高度正常（未趴下）"
+    check_expr: "position_z > 0.15"
+    required_topics: [/body_state]
+
+param_naming:
+  velocity_constraint:
+    - ".*max_linear_vel.*"
+    - ".*max_angular_vel.*"
+    - ".*speed_limit.*"
+  attitude_constraint:
+    - ".*max_roll.*"
+    - ".*max_pitch.*"
+    - ".*tilt_limit.*"
+  joint_constraint:
+    - ".*hip_angle.*"
+    - ".*thigh_angle.*"
+    - ".*calf_angle.*"
+    - ".*joint_limit.*"
+  torque_constraint:
+    - ".*max_torque.*"
+    - ".*effort_limit.*"
+  stability_constraint:
+    - ".*min_contact.*"
+    - ".*com_offset.*"

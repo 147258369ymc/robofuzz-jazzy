@@ -1,0 +1,49 @@
+id: px4.velocity.xy_max
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: vx
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vx
+    unit: m/s
+  - name: vy
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vy
+    unit: m/s
+
+parameters:
+  - name: MPC_XY_VEL_MAX
+    source: px4.parameters
+    unit: m/s
+    default: 12.0
+
+derived:
+  - name: horizontal_velocity
+    expr: "sqrt(vx * vx + vy * vy)"
+    unit: m/s
+
+assertions:
+  - expr: "horizontal_velocity <= param(MPC_XY_VEL_MAX) + tolerance"
+    tolerance: 0.5
+    severity: error
+    message: "MPC_XY_VEL_MAX violated: {horizontal_velocity:.2f} m/s"
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: max_xy_velocity
+    metric: "horizontal_velocity"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.param.MPC_XY_VEL_MAX
+    evidence: "Maximum horizontal velocity for all modes"
+  - chunk_id: px4.msg.VehicleLocalPosition
+    evidence: "vx, vy in local NED frame"

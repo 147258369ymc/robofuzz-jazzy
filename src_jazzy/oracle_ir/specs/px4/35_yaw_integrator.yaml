@@ -1,0 +1,40 @@
+id: px4.rate_ctrl.yaw_integrator_limit
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: yaw_rate
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: MC_YR_INT_LIM
+    source: px4.parameters
+    unit: ""
+    default: 0.3
+
+derived:
+  - name: yaw_rate_abs
+    expr: "abs(yaw_rate)"
+    unit: rad/s
+
+assertions: []
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: yaw_rate_integrator_stress
+    metric: "yaw_rate_abs"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.parameter.MC_YR_INT_LIM
+    evidence: "Yaw rate integrator limit for disturbance rejection"

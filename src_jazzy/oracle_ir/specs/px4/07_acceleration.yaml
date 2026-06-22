@@ -1,0 +1,45 @@
+id: px4.acceleration.horizontal_limit
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [POSCTL, OFFBOARD, LOITER]
+  require_airborne: true
+
+observations:
+  - name: acc_x
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 0
+    unit: m/s2
+  - name: acc_y
+    topic: /VehicleAcceleration_PubSubTopic
+    field: xyz
+    index: 1
+    unit: m/s2
+
+parameters:
+  - name: MPC_ACC_HOR_MAX
+    source: px4.parameters
+    unit: m/s2
+    default: 5.0
+
+derived:
+  - name: hor_acc
+    expr: "sqrt(acc_x * acc_x + acc_y * acc_y)"
+    unit: m/s2
+
+assertions:
+  - expr: "hor_acc <= param(MPC_ACC_HOR_MAX) + tolerance"
+    tolerance: 1.0
+    severity: error
+    message: "MPC_ACC_HOR_MAX violated: {hor_acc:.2f} m/s2"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.param.MPC_ACC_HOR_MAX
+    evidence: "Maximum horizontal acceleration for auto mode"

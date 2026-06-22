@@ -1,0 +1,44 @@
+id: px4.velocity.z_limits
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [POSCTL, ALTCTL, OFFBOARD, LOITER]
+  require_airborne: true
+
+observations:
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+
+parameters:
+  - name: MPC_Z_VEL_MAX_UP
+    source: px4.parameters
+    unit: m/s
+    default: 3.0
+  - name: MPC_Z_VEL_MAX_DN
+    source: px4.parameters
+    unit: m/s
+    default: 1.0
+
+assertions:
+  - expr: "not (vz < 0 and abs(vz) > param(MPC_Z_VEL_MAX_UP) + tolerance)"
+    tolerance: 0.5
+    severity: error
+    message: "MPC_Z_VEL_MAX_UP violated: vz={vz:.2f}"
+  - expr: "not (vz > 0 and vz > param(MPC_Z_VEL_MAX_DN) + tolerance)"
+    tolerance: 0.5
+    severity: error
+    message: "MPC_Z_VEL_MAX_DN violated: vz={vz:.2f}"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.param.MPC_Z_VEL_MAX_UP
+    evidence: "Maximum vertical ascent speed"
+  - chunk_id: px4.param.MPC_Z_VEL_MAX_DN
+    evidence: "Maximum vertical descent speed"

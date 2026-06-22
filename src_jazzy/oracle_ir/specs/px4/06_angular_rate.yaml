@@ -1,0 +1,83 @@
+id: px4.angular_rate.limits
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: roll_rate_raw
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 0
+    unit: rad/s
+  - name: pitch_rate_raw
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 1
+    unit: rad/s
+  - name: yaw_rate_raw
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+parameters:
+  - name: MC_ROLLRATE_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 220.0
+  - name: MC_PITCHRATE_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 220.0
+  - name: MC_YAWRATE_MAX
+    source: px4.parameters
+    unit: deg/s
+    default: 200.0
+
+derived:
+  - name: roll_rate_dps
+    expr: "abs(roll_rate_raw) * 180.0 / 3.14159265"
+    unit: deg/s
+  - name: pitch_rate_dps
+    expr: "abs(pitch_rate_raw) * 180.0 / 3.14159265"
+    unit: deg/s
+  - name: yaw_rate_dps
+    expr: "abs(yaw_rate_raw) * 180.0 / 3.14159265"
+    unit: deg/s
+  - name: max_rate
+    expr: "max(roll_rate_dps, pitch_rate_dps, yaw_rate_dps)"
+    unit: deg/s
+
+assertions:
+  - expr: "roll_rate_dps <= param(MC_ROLLRATE_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "MC_ROLLRATE_MAX violated: {roll_rate_dps:.1f} deg/s"
+  - expr: "pitch_rate_dps <= param(MC_PITCHRATE_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "MC_PITCHRATE_MAX violated: {pitch_rate_dps:.1f} deg/s"
+  - expr: "yaw_rate_dps <= param(MC_YAWRATE_MAX) + tolerance"
+    tolerance: 5.0
+    severity: error
+    message: "MC_YAWRATE_MAX violated: {yaw_rate_dps:.1f} deg/s"
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: max_angular_rate
+    metric: "max_rate"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.param.MC_ROLLRATE_MAX
+    evidence: "Maximum roll rate"
+  - chunk_id: px4.param.MC_PITCHRATE_MAX
+    evidence: "Maximum pitch rate"
+  - chunk_id: px4.param.MC_YAWRATE_MAX
+    evidence: "Maximum yaw rate"

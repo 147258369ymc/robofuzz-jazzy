@@ -1,0 +1,44 @@
+id: px4.sensor.imu_inconsistency
+type: cross_sensor
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: false
+
+observations:
+  - name: accel_inconsistency
+    topic: /SensorsStatusImu_PubSubTopic
+    field: accel_inconsistency_m_s_s
+    index: 0
+    unit: m/s2
+  - name: gyro_inconsistency
+    topic: /SensorsStatusImu_PubSubTopic
+    field: gyro_inconsistency_rad_s
+    index: 0
+    unit: rad/s
+
+derived:
+  - name: accel_metric
+    expr: "accel_inconsistency"
+    unit: m/s2
+  - name: gyro_metric
+    expr: "gyro_inconsistency"
+    unit: rad/s
+
+assertions: []
+
+window:
+  type: every_sample
+
+feedback:
+  - name: imu_accel_inconsistency
+    metric: "accel_metric"
+    direction: maximize
+  - name: imu_gyro_inconsistency
+    metric: "gyro_metric"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.msg.SensorsStatusImu
+    evidence: "accel_inconsistency_m_s_s and gyro_inconsistency_rad_s"

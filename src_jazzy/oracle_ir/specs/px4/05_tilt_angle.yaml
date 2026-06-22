@@ -1,0 +1,63 @@
+id: px4.attitude.tilt_limit
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: qw
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 0
+  - name: qx
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 1
+  - name: qy
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 2
+  - name: qz
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 3
+
+parameters:
+  - name: MPC_TILTMAX_AIR
+    source: px4.parameters
+    unit: deg
+    default: 45.0
+  - name: MPC_MAN_TILT_MAX
+    source: px4.parameters
+    unit: deg
+    default: 35.0
+
+derived:
+  - name: cos_tilt
+    expr: "max(-1.0, min(1.0, 1.0 - 2.0 * (qx*qx + qy*qy)))"
+  - name: tilt_deg
+    expr: "degrees(acos(cos_tilt))"
+    unit: deg
+
+assertions:
+  - expr: "tilt_deg <= param(MPC_TILTMAX_AIR) + tolerance"
+    tolerance: 2.0
+    severity: error
+    message: "Tilt angle violated: {tilt_deg:.1f} deg"
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: max_tilt_angle
+    metric: "tilt_deg"
+    direction: maximize
+
+provenance:
+  - chunk_id: px4.param.MPC_TILTMAX_AIR
+    evidence: "Maximum tilt angle in air"
+  - chunk_id: px4.msg.VehicleAttitude
+    evidence: "Quaternion attitude representation"

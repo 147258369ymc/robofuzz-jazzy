@@ -1,0 +1,38 @@
+id: px4.altitude.follow_target_min
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: z
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: z
+    unit: m
+
+parameters:
+  - name: NAV_MIN_FT_HT
+    source: px4.parameters
+    unit: m
+    default: 8.0
+
+derived:
+  - name: altitude
+    expr: "abs(z)"
+    unit: m
+
+assertions:
+  - expr: "altitude >= param(NAV_MIN_FT_HT) - tolerance"
+    tolerance: 2.0
+    severity: warning
+    message: "Follow target altitude {altitude:.1f}m below NAV_MIN_FT_HT"
+
+window:
+  type: every_sample
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.parameter.NAV_MIN_FT_HT
+    evidence: "Minimum follow target altitude relative to home"

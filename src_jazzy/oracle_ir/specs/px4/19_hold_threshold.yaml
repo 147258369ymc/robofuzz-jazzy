@@ -1,0 +1,62 @@
+id: px4.position.hold_velocity_threshold
+type: range_bound
+system: px4
+version: a264541861
+
+scope:
+  flight_modes: [POSCTL, LOITER, AUTO_LOITER]
+  require_airborne: true
+
+observations:
+  - name: vx
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vx
+    unit: m/s
+  - name: vy
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vy
+    unit: m/s
+  - name: vz
+    topic: /VehicleLocalPosition_PubSubTopic
+    field: vz
+    unit: m/s
+
+parameters:
+  - name: MPC_HOLD_MAX_XY
+    source: px4.parameters
+    unit: m/s
+    default: 0.8
+  - name: MPC_HOLD_MAX_Z
+    source: px4.parameters
+    unit: m/s
+    default: 0.6
+
+derived:
+  - name: horizontal_velocity
+    expr: "sqrt(vx * vx + vy * vy)"
+    unit: m/s
+  - name: vertical_speed
+    expr: "abs(vz)"
+    unit: m/s
+
+assertions: []
+
+window:
+  type: every_sample
+  filter: airborne
+
+feedback:
+  - name: hold_xy_velocity
+    metric: "horizontal_velocity"
+    direction: maximize
+    min_threshold: 0.1
+  - name: hold_z_velocity
+    metric: "vertical_speed"
+    direction: maximize
+    min_threshold: 0.1
+
+provenance:
+  - chunk_id: px4.parameter.MPC_HOLD_MAX_XY
+    evidence: "Maximum horizontal velocity for which position hold is enabled"
+  - chunk_id: px4.parameter.MPC_HOLD_MAX_Z
+    evidence: "Maximum vertical velocity for which position hold is enabled"

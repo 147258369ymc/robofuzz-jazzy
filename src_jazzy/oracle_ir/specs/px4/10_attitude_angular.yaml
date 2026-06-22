@@ -1,0 +1,82 @@
+id: px4.consistency.attitude_angular_velocity
+type: cross_sensor
+system: px4
+version: a264541861
+
+scope:
+  require_airborne: true
+
+observations:
+  - name: qw
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 0
+    unit: ""
+  - name: qx
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 1
+    unit: ""
+  - name: qy
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 2
+    unit: ""
+  - name: qz
+    topic: /VehicleAttitude_PubSubTopic
+    field: q
+    index: 3
+    unit: ""
+  - name: omega_x
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 0
+    unit: rad/s
+  - name: omega_y
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 1
+    unit: rad/s
+  - name: omega_z
+    topic: /VehicleAngularVelocity_PubSubTopic
+    field: xyz
+    index: 2
+    unit: rad/s
+
+constants:
+  - name: ATT_ANG_TOL
+    value: 0.1
+    unit: rad
+
+derived:
+  - name: q_diff_w
+    expr: "max(-1.0, min(1.0, qw * prev_qw + qx * prev_qx + qy * prev_qy + qz * prev_qz))"
+    unit: ""
+  - name: actual_angle
+    expr: "2.0 * acos(abs(q_diff_w))"
+    unit: rad
+  - name: omega_mag
+    expr: "sqrt(omega_x * omega_x + omega_y * omega_y + omega_z * omega_z)"
+    unit: rad/s
+  - name: expected_angle
+    expr: "omega_mag * dt"
+    unit: rad
+  - name: consistency_err
+    expr: "abs(actual_angle - expected_angle)"
+    unit: rad
+
+assertions:
+  - expr: "consistency_err <= ATT_ANG_TOL"
+    tolerance: 0.0
+    severity: error
+    message: "Attitude-angular velocity inconsistency: {consistency_err:.4f} rad"
+
+window:
+  type: sequential_pairs
+  filter: airborne
+
+provenance:
+  - chunk_id: px4.msg.VehicleAttitude
+    evidence: "Quaternion q[4] representing vehicle orientation"
+  - chunk_id: px4.msg.VehicleAngularVelocity
+    evidence: "xyz angular velocity in body frame"
