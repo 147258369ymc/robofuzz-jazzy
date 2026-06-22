@@ -28,6 +28,13 @@ TOL_ENDPOINT = 0.001           # m (1mm, ISO 9283 repeatability)
 TOL_TRACKING = 0.1             # rad — tracking error tolerance per joint
 TOL_ABORT_DRIFT = 0.05         # rad — max joint movement after abort (500ms window)
 
+# Velocity/acceleration check tolerance. TOPP-RA's discrete time-parameterization
+# slightly overshoots the configured limit at sample points; sub-2% overshoots are
+# numerical/discretization noise, not bugs. Only flag overshoots beyond this ratio
+# so genuine large violations (e.g. 2.3+ rad/s vs 2.175 limit) stand out.
+VEL_TOL_RATIO = 1.02           # allow up to +2% over velocity limit
+ACC_TOL_RATIO = 1.02           # allow up to +2% over acceleration limit
+
 # Known spec bug suppression margin
 MARGIN = 0.01
 MARGIN_RAD = math.radians(MARGIN)
@@ -163,7 +170,7 @@ def check(config, msg_list, state_dict, feedback_list):
                 ratio = v / max_vel if max_vel > 0 else 0
                 if ratio > desired_vel_max_ratio:
                     desired_vel_max_ratio = ratio
-                if v > max_vel:
+                if v > max_vel * VEL_TOL_RATIO:
                     errs.append(
                         f"{ts} TOPP-RA planned velocity for {name}: "
                         f"{v:.4f} > limit {max_vel} rad/s"
@@ -180,7 +187,7 @@ def check(config, msg_list, state_dict, feedback_list):
                 ratio = a / max_acc if max_acc > 0 else 0
                 if ratio > desired_acc_max_ratio:
                     desired_acc_max_ratio = ratio
-                if a > max_acc:
+                if a > max_acc * ACC_TOL_RATIO:
                     errs.append(
                         f"{ts} TOPP-RA planned acceleration for {name}: "
                         f"{a:.4f} > limit {max_acc} rad/s^2"
@@ -253,49 +260,81 @@ def check(config, msg_list, state_dict, feedback_list):
             print(f"[oracle] {num_goals_detected} goals, "
                   f"statuses: {goal_terminal_statuses}")
 
-    # Find the LAST SUCCEEDED goal's index for FK comparison
+    # Find the LAST SUCCEEDED goal's index (used by tracking-error check 3.2)
     last_success_idx = None
     for i in range(len(goal_terminal_statuses) - 1, -1, -1):
         if goal_terminal_statuses[i] == 4:
             last_success_idx = i
             break
 
-    # FK endpoint computation — compare final EE pos against the actual goal sent
+    # FK endpoint computation — compare final EE pos against the goal MoveIt
+    # ACTUALLY planned for last, taken from the last /motion_plan_request.
     #
-    # CRITICAL CONSTRAINTS for valid endpoint check:
-    # 1) last_success_idx must be the FINAL goal in the sequence (nothing moved robot after)
-    # 2) len(goal_terminal_statuses) must equal len(msg_list) — otherwise indices don't
-    #    correspond because MoveIt2 skips unreachable goals (no planning request → no
-    #    action status), causing status indices to drift from msg_list indices.
+    # Why MPR instead of msg_list[idx]: MoveIt2 silently skips unreachable goals
+    # (no planning request → no action status), so action-status indices drift
+    # from msg_list indices. Comparing the final end-effector pose against the
+    # LAST MPR's goal sidesteps the drift entirely: the last MPR is, by
+    # definition, the last goal the planner committed to.
     dist_goal_to_final_pos = None
-    endpoint_check_valid = (
-        last_success_idx is not None
-        and last_success_idx == len(goal_terminal_statuses) - 1
-        and len(goal_terminal_statuses) == len(msg_list)
-    )
-    if (endpoint_check_valid
-            and msg_list
-            and last_success_idx < len(msg_list)
-            and final_joint_state is not None):
-        goal_msg = msg_list[last_success_idx]
+    last_mpr_goal = None
+    if motion_plan_request_list:
         try:
-            # Extract goal position from Pose msg (ROS object or OrderedDict)
-            if hasattr(goal_msg, 'position'):
-                goal_x = goal_msg.position.x
-                goal_y = goal_msg.position.y
-                goal_z = goal_msg.position.z
+            (_, last_mpr) = motion_plan_request_list[-1]
+            gc = last_mpr.goal_constraints[0]
+            gp = gc.position_constraints[0] \
+                .constraint_region.primitive_poses[0].position
+            last_mpr_goal = (gp.x, gp.y, gp.z)
+        except (IndexError, AttributeError):
+            last_mpr_goal = None
+
+    # Endpoint deviation is meaningful only when the final action terminated in
+    # SUCCESS — a successful goal MUST leave the EE at the planned target.
+    #
+    # Source of truth = /panda_arm_controller/state .actual (the controller's
+    # driven joint positions), NOT /joint_states. Two reasons:
+    #  1) /joint_states suffers a multi-publisher collision (the persistent
+    #     move_group's static state publisher interleaves with the live one),
+    #     so consecutive samples flip between the real arm pose and the ready
+    #     pose — a single-sample pick can grab the wrong one (false positive).
+    #  2) The controller state is single-source and reflects what actually drove
+    #     the arm. We take the sample at/just before goal-completion time so we
+    #     read the arm AT the goal, before the next launch moves it away.
+    endpoint_arm_positions = None   # dict: arm joint name -> position
+    if move_action_status_list and controller_states_list:
+        last_status_ts = move_action_status_list[-1][0]
+        chosen = None
+        for (ts, cont_state) in controller_states_list:
+            if ts <= last_status_ts:
+                chosen = cont_state
             else:
-                goal_x = goal_msg['position']['x']
-                goal_y = goal_msg['position']['y']
-                goal_z = goal_msg['position']['z']
+                break
+        if chosen is None and controller_states_list:
+            chosen = controller_states_list[-1][1]
+        if chosen is not None:
+            endpoint_arm_positions = {
+                name: chosen.actual.positions[i]
+                for i, name in enumerate(chosen.joint_names)
+                if i < len(chosen.actual.positions)
+            }
+
+    endpoint_check_valid = (
+        last_mpr_goal is not None
+        and last_action_terminal == 4
+        and endpoint_arm_positions is not None
+    )
+    if endpoint_check_valid:
+        try:
+            goal_x, goal_y, goal_z = last_mpr_goal
 
             with open(PANDA_URDF) as f:
                 urdf_content = f.read()
             chain = kinpy.build_chain_from_urdf(urdf_content)
 
-            joint_angle_map = dict()
-            for i, name in enumerate(final_joint_state.name):
-                joint_angle_map[name] = final_joint_state.position[i]
+            # Arm joints from the controller; finger joints are not part of the
+            # arm controller, default them to 0 for FK of panda_hand.
+            joint_angle_map = dict(endpoint_arm_positions)
+            joint_angle_map.setdefault("panda_finger_joint1", 0.0)
+            joint_angle_map.setdefault("panda_finger_joint2", 0.0)
 
             fwd_kin = chain.forward_kinematics(joint_angle_map)
             final_ee_pos = fwd_kin["panda_hand"].pos
@@ -306,8 +345,7 @@ def check(config, msg_list, state_dict, feedback_list):
                 + pow(goal_z - final_ee_pos[2], 2)
             )
             print(f"[oracle] endpoint deviation: {dist_goal_to_final_pos:.6f}m "
-                  f"(goal idx={last_success_idx}, "
-                  f"target=({goal_x:.3f},{goal_y:.3f},{goal_z:.3f}), "
+                  f"(last MPR goal=({goal_x:.3f},{goal_y:.3f},{goal_z:.3f}), "
                   f"actual=({final_ee_pos[0]:.3f},{final_ee_pos[1]:.3f},{final_ee_pos[2]:.3f}))")
         except (IndexError, AttributeError, FileNotFoundError, TypeError):
             pass
@@ -317,10 +355,11 @@ def check(config, msg_list, state_dict, feedback_list):
     # =================================================================
 
     # --- 3.1 Success-but-not-there ---
-    # Only report when endpoint_check_valid (last succeeded goal is final goal)
+    # The last goal MoveIt planned for SUCCEEDED, yet the end-effector did not
+    # arrive at that goal. This now correctly catches the real bug "reported
+    # SUCCESS on a goal the arm never reached", because the comparison target is
+    # the planner's own last goal (no index drift).
     if endpoint_check_valid and dist_goal_to_final_pos is not None:
-        print(f"[oracle] endpoint deviation: {dist_goal_to_final_pos:.6f}m "
-              f"(goal idx={last_success_idx})")
         if dist_goal_to_final_pos > TOL_ENDPOINT:
             errs.append(
                 f"goal and actual pos deviation too high: "

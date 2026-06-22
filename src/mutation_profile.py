@@ -18,12 +18,13 @@ class FieldRange:
     name: str
     low: float
     high: float
+    extreme_prob: float = 0.15  # P(sample an out-of-range extreme value)
 
     def sample(self) -> float:
-        """Generate a random value within the domain range,
-        with 15% chance of producing an out-of-range extreme value
+        """Generate a random value within the domain range, with
+        `extreme_prob` chance of producing an out-of-range extreme value
         that can stress the controller into undefined behavior."""
-        if random.random() < 0.15:
+        if random.random() < self.extreme_prob:
             return self._sample_extreme()
         return random.uniform(self.low, self.high)
 
@@ -190,14 +191,16 @@ class MutationProfile:
         """Profile for MoveIt2 Panda arm goal-position fuzzing.
 
         Workspace: sphere of ~0.855m radius centered at base.
-        x/y symmetric, z asymmetric (table below, arm above).
-        Strategies are geometry-aware for the 3D workspace.
+        Ranges are tightened to the reliably-reachable region (most samples
+        land within ~0.8m of the base) so planning budget is spent on goals
+        MoveIt can actually execute, rather than on unreachable goals that get
+        silently skipped. A small extreme_prob still probes the boundary/beyond.
         """
         return cls(
             field_ranges={
-                "x": FieldRange("x", -0.9, 0.9),
-                "y": FieldRange("y", -0.9, 0.9),
-                "z": FieldRange("z", -0.4, 1.3),
+                "x": FieldRange("x", -0.6, 0.6, extreme_prob=0.05),
+                "y": FieldRange("y", -0.6, 0.6, extreme_prob=0.05),
+                "z": FieldRange("z", 0.1, 0.9, extreme_prob=0.05),
             },
             strategy_weights={
                 STRATEGY_BOUNDARY_PUSH: 0.30,

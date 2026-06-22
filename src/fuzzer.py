@@ -58,6 +58,47 @@ from tracer import APITracer
 from turtlesim.msg import Pose
 
 
+def moveit_error_signature(errs):
+    """Collapse a list of MoveIt oracle error strings into a set of coarse
+    signatures, so repeated discoveries of the SAME bug (e.g. joint1 velocity
+    overshoot, over and over) collapse to one signature.
+
+    Signature drops timestamps and exact magnitudes, keeping only:
+      - the violation TYPE (velocity / acceleration / position / deviation / ...)
+      - the joint name (if present)
+      - a coarse magnitude bucket for numeric violations
+    """
+    import re
+    sigs = set()
+    for e in errs:
+        e = str(e)
+        joint_m = re.search(r"panda_\w+", e)
+        joint = joint_m.group(0) if joint_m else ""
+        if "TOPP-RA planned velocity" in e:
+            num = re.search(r":\s*([0-9.]+)\s*>", e)
+            bucket = int(float(num.group(1)) / 0.25) if num else 0
+            sigs.add(("vel", joint, bucket))
+        elif "planned acceleration" in e:
+            num = re.search(r":\s*([0-9.]+)\s*>", e)
+            bucket = int(float(num.group(1)) / 1.0) if num else 0
+            sigs.add(("acc", joint, bucket))
+        elif "deviation too high" in e:
+            num = re.search(r":\s*([0-9.]+)", e)
+            bucket = int(float(num.group(1)) / 0.25) if num else 0
+            sigs.add(("deviation", "", bucket))
+        elif "outside [" in e or "position" in e and "NaN" in e:
+            sigs.add(("position", joint, 0))
+        elif "tracking error" in e:
+            sigs.add(("tracking", joint, 0))
+        elif "abort drift" in e:
+            sigs.add(("abort_drift", "", 0))
+        elif "unexpected terminal status" in e:
+            sigs.add(("status_anomaly", "", 0))
+        else:
+            sigs.add(("other", "", hash(e) % 1000))
+    return sigs
+
+
 class SeedQueue:
     """Quality-aware seed queue with deduplication, staleness decay, and warmup.
 
@@ -1431,6 +1472,23 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 errs = list(set(errs))
                 # TODO: bring error logging and is_interesting here
 
+                # P5: novelty by error signature. A seed that only re-discovers
+                # an already-seen bug signature is NOT worth re-queueing as
+                # interesting — it just churns the queue with duplicates.
+                moveit_error_is_novel = False
+                if fuzzer.config.test_moveit and errs:
+                    if not hasattr(scheduler, '_seen_error_signatures'):
+                        scheduler._seen_error_signatures = set()
+                    sigs = moveit_error_signature(errs)
+                    new_sigs = sigs - scheduler._seen_error_signatures
+                    if new_sigs:
+                        moveit_error_is_novel = True
+                        scheduler._seen_error_signatures |= new_sigs
+                        print(f"[dedup] NEW error signature(s): {new_sigs}")
+                    else:
+                        print(f"[dedup] duplicate error signature(s): {sigs} "
+                              f"— will not re-queue as interesting")
+
                 if fuzzer.config.px4_sitl:
                     if collision_checker.found_collision():
                         col_topics = list(
@@ -1584,7 +1642,19 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     scheduler._seed_interesting_count = 0
                 scheduler._seed_interesting_count += 1
 
-                if scheduler._seed_interesting_count <= 3:
+                # P5: if this round only re-found already-seen bug signatures,
+                # don't re-queue — it would just churn duplicates. Seeds that are
+                # interesting via feedback with NO errors are still re-queued
+                # (valuable for exploration).
+                skip_dup_requeue = (
+                    fuzzer.config.test_moveit
+                    and errs
+                    and not moveit_error_is_novel
+                )
+
+                if skip_dup_requeue:
+                    print("[dedup] skip re-queue — duplicate bug signature only")
+                elif scheduler._seed_interesting_count <= 3:
                     if isinstance(fuzzer.queue, SeedQueue):
                         fuzzer.queue.append(deepcopy(msg_to_queue), is_readd=True)
                     else:

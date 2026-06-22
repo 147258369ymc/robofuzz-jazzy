@@ -261,31 +261,58 @@ def moveit_send_command(msg):
     oz = str(msg.orientation.z)
     ow = str(msg.orientation.w)
 
+    # Launch in its own process group (start_new_session=True) so the WHOLE
+    # stack spawned by `ros2 launch` (move_group, robot_state_publisher,
+    # ros2_control_node, rviz2, ...) can be torn down together. Previously only
+    # the top-level move_group_interface_tutorial was killed on timeout, which
+    # orphaned the rest and leaked hundreds of processes over a long run.
+    proc = sp.Popen(
+        [
+            "ros2",
+            "launch",
+            "moveit2_tutorials",
+            "move_group_interface_tutorial.launch.py",
+            f"x:={x}",
+            f"y:={y}",
+            f"z:={z}",
+            f"ox:={ox}",
+            f"oy:={oy}",
+            f"oz:={oz}",
+            f"w:={ow}",
+        ],
+        stdout=sp.DEVNULL,
+        stderr=sp.DEVNULL,
+        start_new_session=True,
+    )
     try:
-        sp.run(
-            [
-                "ros2",
-                "launch",
-                "moveit2_tutorials",
-                "move_group_interface_tutorial.launch.py",
-                f"x:={x}",
-                f"y:={y}",
-                f"z:={z}",
-                f"ox:={ox}",
-                f"oy:={oy}",
-                f"oz:={oz}",
-                f"w:={ow}",
-            ],
-            stdout=sp.DEVNULL,
-            stderr=sp.DEVNULL,
-            timeout=30,
-        )
+        proc.wait(timeout=30)
     except sp.TimeoutExpired:
         print("                 + timeout (30s), killing planner")
-        # Kill any lingering move_group_interface_tutorial processes
-        sp.run(["pkill", "-f", "move_group_interface_tutorial"],
-               stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+
+    # Always tear down the entire process group (covers both normal completion,
+    # where launch leaves the stack running, and the timeout path).
+    _kill_process_group(proc)
     print("                 + sent")
+
+
+def _kill_process_group(proc):
+    """Kill the whole process group of a `ros2 launch` invocation, then sweep
+    any stragglers from the move_group stack that escaped the group."""
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except sp.TimeoutExpired:
+        pass
+    # Safety net: ros2 launch sometimes daemonizes children into new sessions,
+    # so a group kill can miss them. Sweep the known stack by name.
+    sp.run(
+        ["pkill", "-9", "-f", "move_group_interface_tutorial"],
+        stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+    )
 
 
 if __name__ == "__main__":

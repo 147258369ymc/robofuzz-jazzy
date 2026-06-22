@@ -550,6 +550,8 @@ class Scheduler:
             msg.position.x = x
             msg.position.y = y
             msg.position.z = z
+            if random.random() < 0.4:
+                self._apply_random_orientation(msg)
             goals.append(msg)
         return goals
 
@@ -573,6 +575,8 @@ class Scheduler:
             msg.position.x = x
             msg.position.y = y
             msg.position.z = z
+            if random.random() < 0.4:
+                self._apply_random_orientation(msg)
             goals.append(msg)
         return goals
 
@@ -595,6 +599,8 @@ class Scheduler:
             msg.position.x = sweep_val if axis == "x" else fixed["x"]
             msg.position.y = sweep_val if axis == "y" else fixed["y"]
             msg.position.z = sweep_val if axis == "z" else fixed["z"]
+            if random.random() < 0.4:
+                self._apply_random_orientation(msg)
             goals.append(msg)
         return goals
 
