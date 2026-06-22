@@ -1,0 +1,55 @@
+lock_schema: robofuzz-jazzy.targets.v1
+generated_on: "2026-06-22"
+
+image:
+  tag: robofuzz-jazzy:latest
+  base_image: ros:jazzy-ros-base-noble
+  ubuntu: "24.04 noble"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+apt_packages:
+  ros:
+    - ros-jazzy-ros-gz
+    - ros-jazzy-moveit
+    - ros-jazzy-turtlebot4-simulator
+    - ros-jazzy-irobot-create-nodes
+  build:
+    - build-essential
+    - cmake
+    - git
+    - ninja-build
+    - python3-colcon-common-extensions
+    - python3-pip
+    - python3-pytest
+    - python3-rosdep
+    - python3-vcstool
+  exact_version_resolution:
+    status: pending_first_successful_image_build
+    command: "dpkg-query -W 'ros-jazzy-*' build-essential cmake git ninja-build python3-colcon-common-extensions python3-pip python3-pytest python3-rosdep python3-vcstool"
+
+python_packages:
+  pinned:
+    kinpy: "0.1.0"
+    sysv-ipc: "1.1.0"
+  resolve_in_image:
+    - pymavlink
+    - pyulog
+
+external_sources:
+  px4_autopilot:
+    repository: https://github.com/PX4/PX4-Autopilot.git
+    tag: v1.17.0
+    tag_object_sha: a5eb12d2ab591251faa009f76b2685b8cc64405d
+    commit_sha: d6f12ad1c4f70ad3230afd7d86e971421e02fef4
+  moveit_resources:
+    resolution: use_binary_ros_jazzy_moveit_first
+    source_checkout_policy: add_only_if_panda_demo_assets_are_missing
+  turtlebot4:
+    resolution: use_binary_ros_jazzy_turtlebot4_simulator_first
+    source_checkout_policy: add_only_if_binary_packages_fail
+
+profiles:
+  - target_profiles/turtlebot4_jazzy.yaml
+  - target_profiles/px4_v117_jazzy.yaml
+  - target_profiles/moveit2_jazzy.yaml

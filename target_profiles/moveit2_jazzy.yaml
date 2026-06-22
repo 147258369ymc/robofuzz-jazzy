@@ -1,0 +1,59 @@
+schema_version: 1
+name: moveit2_jazzy
+display_name: MoveIt2 Jazzy Panda
+status: scaffold
+
+environment:
+  ubuntu: "24.04"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+packages:
+  apt:
+    - ros-jazzy-moveit
+
+target:
+  family: moveit
+  robot: panda
+  planner: move_group
+
+launch:
+  adapter: ros2_launch
+  package: moveit2_tutorials
+  launch_file: move_group.launch.py
+  command:
+    - ros2
+    - launch
+    - moveit2_tutorials
+    - move_group.launch.py
+  note: Source tutorials/resources may be required for the Panda demo launch file even when ros-jazzy-moveit is installed from apt.
+
+input:
+  mode: motion_plan_request
+  topic: /motion_plan_request
+  type: moveit_msgs/msg/MotionPlanRequest
+  command_function: harness.moveit_send_command
+
+watch:
+  required:
+    /motion_plan_request: moveit_msgs/msg/MotionPlanRequest
+    /joint_states: sensor_msgs/msg/JointState
+    /panda_arm_controller/state: control_msgs/msg/JointTrajectoryControllerState
+    /move_action/_action/status: action_msgs/msg/GoalStatusArray
+
+oracle:
+  module: oracles.moveit
+  mode: moveit2_jazzy
+  status: preserve_current_improvements
+  preserved_behaviors:
+    - error_signature_deduplication
+    - process_group_cleanup
+    - endpoint_checking_via_last_motion_plan_request
+    - controller_state_fk
+    - velocity_and_acceleration_tolerance_ratios
+    - reachable_region_mutation
+    - orientation_mutation
+
+aliases:
+  keep:
+    - --test-moveit

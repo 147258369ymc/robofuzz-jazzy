@@ -1,5 +1,6 @@
 *.o
 *.lock
+!targets.lock
 *.swp
 *.swo
 *.pyc

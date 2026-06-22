@@ -1,0 +1,82 @@
+schema_version: 1
+name: px4_v117_jazzy
+display_name: PX4 v1.17.0 Jazzy SITL
+status: compatibility_spike
+
+environment:
+  ubuntu: "24.04"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+source:
+  repository: https://github.com/PX4/PX4-Autopilot.git
+  tag: v1.17.0
+  tag_object_sha: a5eb12d2ab591251faa009f76b2685b8cc64405d
+  commit_sha: d6f12ad1c4f70ad3230afd7d86e971421e02fef4
+
+target:
+  family: px4
+  vehicle: x500
+  simulator: gz
+  bridge: uxrce_dds
+
+launch:
+  adapter: px4_make
+  workdir: /robofuzz/targets/PX4-Autopilot
+  environment:
+    HEADLESS: "1"
+  command:
+    - make
+    - px4_sitl
+    - gz_x500
+
+bridge:
+  agent:
+    command:
+      - MicroXRCEAgent
+      - udp4
+      - -p
+      - "8888"
+    transport: udp4
+    port: 8888
+  notes:
+    - PX4 v1.16 and newer introduced message versioning; bridge smoke tests must verify current px4_msgs compatibility.
+    - Legacy micrortps_agent and px4_sitl_rtps paths are not valid for this profile.
+
+input:
+  mode: offboard_ros2
+  topics:
+    /fmu/in/offboard_control_mode: px4_msgs/msg/OffboardControlMode
+    /fmu/in/trajectory_setpoint: px4_msgs/msg/TrajectorySetpoint
+    /fmu/in/vehicle_command: px4_msgs/msg/VehicleCommand
+
+watch:
+  required:
+    /fmu/out/vehicle_status: px4_msgs/msg/VehicleStatus
+    /fmu/out/vehicle_local_position: px4_msgs/msg/VehicleLocalPosition
+    /fmu/out/vehicle_attitude: px4_msgs/msg/VehicleAttitude
+  oracle_candidates:
+    /fmu/out/vehicle_angular_velocity: px4_msgs/msg/VehicleAngularVelocity
+    /fmu/out/vehicle_acceleration: px4_msgs/msg/VehicleAcceleration
+    /fmu/out/vehicle_odometry: px4_msgs/msg/VehicleOdometry
+    /fmu/out/vehicle_control_mode: px4_msgs/msg/VehicleControlMode
+    /fmu/out/battery_status: px4_msgs/msg/BatteryStatus
+    /fmu/out/sensor_combined: px4_msgs/msg/SensorCombined
+
+oracle:
+  module: oracles.px4
+  mode: px4_v117_jazzy
+  status: requires_topic_and_parameter_refresh
+  parameter_metadata: regenerate_from_px4_v117
+  threshold_policy: Regenerate from PX4 v1.17 parameter metadata or measure baseline behavior; do not reuse v1.12 params.pkl.
+
+legacy_replacements:
+  removed:
+    - px4_sitl_rtps
+    - Tools/sitl_run.sh
+    - micrortps_agent
+    - "*_PubSubTopic"
+  current:
+    - MicroXRCEAgent
+    - /fmu/in/*
+    - /fmu/out/*

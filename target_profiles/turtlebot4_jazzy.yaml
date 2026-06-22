@@ -1,0 +1,75 @@
+schema_version: 1
+name: turtlebot4_jazzy
+display_name: TurtleBot4 Jazzy
+status: scaffold
+
+environment:
+  ubuntu: "24.04"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+packages:
+  apt:
+    - ros-jazzy-turtlebot4-simulator
+    - ros-jazzy-irobot-create-nodes
+
+target:
+  family: turtlebot
+  generation: turtlebot4
+  default_model: standard
+  supported_models:
+    - standard
+    - lite
+
+launch:
+  adapter: ros2_launch
+  package: turtlebot4_gz_bringup
+  launch_file: turtlebot4_gz.launch.py
+  args:
+    model: standard
+  command:
+    - ros2
+    - launch
+    - turtlebot4_gz_bringup
+    - turtlebot4_gz.launch.py
+    - model:=standard
+
+input:
+  mode: velocity_command
+  preferred:
+    topic: /cmd_vel
+    type: geometry_msgs/msg/TwistStamped
+  fallback:
+    topic: /cmd_vel
+    type: geometry_msgs/msg/Twist
+  compatibility_note: Use Twist only if graph inspection shows the Jazzy stack exposes no stamped command endpoint.
+
+watch:
+  required:
+    /odom: nav_msgs/msg/Odometry
+    /scan: sensor_msgs/msg/LaserScan
+  optional:
+    /hazard_detection: irobot_create_msgs/msg/HazardDetectionVector
+    /slip_status: irobot_create_msgs/msg/SlipStatus
+    /stall_status: irobot_create_msgs/msg/WheelStatus
+    /kidnap_status: irobot_create_msgs/msg/KidnapStatus
+    /wheel_status: irobot_create_msgs/msg/WheelStatus
+    /interface_buttons: irobot_create_msgs/msg/InterfaceButtons
+
+oracle:
+  module: oracles.turtlebot
+  mode: turtlebot4_jazzy
+  status: requires_adaptation
+  initial_properties:
+    - existential_topics_present
+    - command_odom_consistency
+    - sensor_range_sanity
+    - hazard_reflex_consistency
+    - velocity_envelope_from_runtime_parameters
+  threshold_policy: Derive thresholds from TurtleBot4/Create3 documentation, runtime parameters, or measured Jazzy baseline behavior.
+
+aliases:
+  add:
+    - --tb4-sitl
+  do_not_map:
+    - --tb3-sitl
