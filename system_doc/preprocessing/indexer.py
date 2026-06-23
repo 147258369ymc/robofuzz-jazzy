@@ -142,8 +142,11 @@ class IndexBuilder:
     def _auto_tag(self, block: SpecBlock) -> list[str]:
         """基于规则自动生成语义标签 — 只检查 name 以避免 NL 中的交叉引用干扰"""
         text = block.name
-        tags = set()
+        tags = set(block.tags or [])
+        semantic_tags = block.structured_fields.get("semantic_tags", [])
+        if isinstance(semantic_tags, list):
+            tags.update(str(tag) for tag in semantic_tags)
         for pattern, tag in self._tag_rules:
             if pattern.search(text):
                 tags.add(tag)
-        return sorted(tags)[:5]
+        return sorted(tags)

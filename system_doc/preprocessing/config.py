@@ -82,7 +82,7 @@ TURTLEBOT3_CONFIG = TargetConfig(
 # MoveIt2 + Franka Emika Panda 配置
 MOVEIT2_PANDA_CONFIG = TargetConfig(
     name="moveit2_panda",
-    version="moveit2-2.2.3_panda-2.0.3",
+    version="moveit2-2.12.4_panda-3.1.0_jazzy",
     doc_root="system_doc/moveit2_panda",
     # 不指定 file_configs → 自动递归发现所有文件并按扩展名分派分块器
     # 目录结构:

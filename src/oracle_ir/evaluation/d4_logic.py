@@ -15,12 +15,12 @@
 """
 
 from __future__ import annotations
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from . import DimensionScore
+from .block_resolver import load_block_map, resolve_parameter_block
 from src.oracle_ir.schema import OracleIR
 
 
@@ -34,13 +34,13 @@ def evaluate_logic(
     passed_checks = 0
     details = []
     failures = []
+    blocks = load_block_map(blocks_dir)
 
     for ir in specs:
         for param in ir.parameters:
-            block_path = blocks_dir / f"{ir.system}.parameter.{param.name}.json"
-            if not block_path.exists():
+            block = resolve_parameter_block(ir, param, blocks_dir, blocks)
+            if block is None:
                 continue
-            block = json.loads(block_path.read_text())
             sf = block.get("structured_fields", {})
             short_desc = sf.get("shortDesc", "").lower()
 

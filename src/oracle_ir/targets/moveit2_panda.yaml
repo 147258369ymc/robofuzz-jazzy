@@ -1,10 +1,9 @@
-# MoveIt2 + Franka Emika Panda 目标描述符
-# 匹配 RoboFuzz 容器中实际使用的 topic 名称 (moveit2_tutorials foxy branch)
+# MoveIt2 + Franka Emika Panda target descriptor for ROS 2 Jazzy.
 name: moveit2_panda
-display_name: "MoveIt2 + Franka Emika Panda 7-DOF"
-version: "moveit2-2.2.3_panda-2.0.3"
+display_name: "MoveIt2 Jazzy + Franka Panda 7-DOF"
+version: "moveit2-2.12.4_panda-3.1.0_jazzy"
 middleware: ros2
-description: "Franka Emika Panda 7自由度机械臂，通过 MoveIt2 move_group_interface 控制"
+description: "Franka Panda arm launched from moveit_resources_panda_moveit_config on ROS 2 Jazzy with mock_components execution."
 
 topic_suffix: ""
 
@@ -14,84 +13,84 @@ topics:
     fields: [position, velocity, effort, name]
     field_units: {position: rad, velocity: rad/s, effort: Nm}
     frequency_hz: 100.0
-    description: "7个关节 + 2个手指关节的实时状态"
+    description: "Panda arm and finger joint state from the Jazzy mock controller."
 
-  - name: /panda_arm_controller/state
+  - name: /panda_arm_controller/controller_state
     msg_type: control_msgs/msg/JointTrajectoryControllerState
     fields: [desired.positions, desired.velocities, actual.positions, actual.velocities, error.positions, error.velocities]
     field_units: {desired.positions: rad, actual.positions: rad, error.positions: rad, desired.velocities: rad/s, actual.velocities: rad/s}
     frequency_hz: 100.0
-    description: "轨迹控制器状态：期望值、实际值、跟踪误差"
+    description: "Jazzy joint trajectory controller state; replaces the Foxy-era /panda_arm_controller/state path."
 
   - name: /move_action/_action/status
     msg_type: action_msgs/msg/GoalStatusArray
     fields: [status_list]
     field_units: {}
     frequency_hz: 10.0
-    description: "MoveGroup action 执行状态 (2=executing, 4=succeeded, 6=aborted)"
+    description: "MoveGroup action lifecycle status for /move_action."
 
   - name: /motion_plan_request
     msg_type: moveit_msgs/msg/MotionPlanRequest
     fields: [group_name, goal_constraints, path_constraints, planner_id, allowed_planning_time, max_velocity_scaling_factor, max_acceleration_scaling_factor]
     field_units: {allowed_planning_time: s}
     frequency_hz: 0.0
-    description: "运动规划请求（含目标约束、路径约束、规划器参数）"
+    description: "RoboFuzz mirror of the MoveGroup MotionPlanRequest used as endpoint oracle ground truth."
+
+  - name: /panda_arm_controller/joint_trajectory
+    msg_type: trajectory_msgs/msg/JointTrajectory
+    fields: [joint_names, points]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Trajectory command topic for the Panda arm controller."
 
 operating_modes:
   - name: idle
-    description: "空闲（关节保持当前位置）"
+    description: "Controller is active but no trajectory is executing."
   - name: planning
-    description: "运动规划计算中"
+    description: "MoveGroup is planning a trajectory."
   - name: executing
-    description: "正在执行规划好的轨迹"
-    active_topics: [/joint_states, /panda_arm_controller/state, /move_action/_action/status]
-  - name: servo
-    description: "实时伺服模式（低延迟连续控制）"
-    active_topics: [/joint_states, /panda_arm_controller/state]
+    description: "MoveGroup has accepted a goal and the Panda arm controller is executing a trajectory."
+    active_topics: [/joint_states, /panda_arm_controller/controller_state, /move_action/_action/status]
 
 constraint_types:
   - category: joint_position
-    description: "关节角度范围限制（硬限位 + 软限位）"
-    relevant_topics: [/joint_states, /panda_arm_controller/state]
+    description: "URDF hard limits and safety-controller soft limits for Panda joints."
+    relevant_topics: [/joint_states, /panda_arm_controller/controller_state]
     param_patterns: [".*joint.*limit.*", ".*lower.*", ".*upper.*", ".*position.*"]
   - category: joint_velocity
-    description: "关节角速度限制"
-    relevant_topics: [/joint_states, /panda_arm_controller/state]
+    description: "MoveIt joint velocity constraints from joint_limits.yaml."
+    relevant_topics: [/joint_states, /panda_arm_controller/controller_state]
     param_patterns: [".*max_velocity.*", ".*velocity.*limit.*", ".*vel.*"]
   - category: joint_acceleration
-    description: "关节加速度限制（由 jerk 约束推导）"
-    relevant_topics: [/panda_arm_controller/state]
+    description: "MoveIt joint acceleration constraints from joint_limits.yaml."
+    relevant_topics: [/joint_states, /panda_arm_controller/controller_state]
     param_patterns: [".*max_acceleration.*", ".*accel.*"]
-  - category: joint_effort
-    description: "关节力矩/力限制"
-    relevant_topics: [/joint_states]
-    param_patterns: [".*effort.*", ".*torque.*", ".*force.*"]
   - category: trajectory_tracking
-    description: "轨迹跟踪精度（期望 vs 实际偏差）"
-    relevant_topics: [/panda_arm_controller/state]
+    description: "Desired vs actual controller trajectory state."
+    relevant_topics: [/panda_arm_controller/controller_state]
     param_patterns: [".*error.*", ".*tolerance.*", ".*tracking.*"]
   - category: workspace
-    description: "工作空间边界和末端执行器可达性"
-    relevant_topics: [/joint_states]
-    param_patterns: [".*workspace.*", ".*reach.*", ".*range.*"]
+    description: "Workspace, collision and reachability constraints."
+    relevant_topics: [/joint_states, /motion_plan_request]
+    param_patterns: [".*workspace.*", ".*reach.*", ".*range.*", ".*collision.*"]
   - category: planning_result
-    description: "规划结果一致性（action status 与执行状态）"
+    description: "MoveGroup action status and planning request consistency."
     relevant_topics: [/move_action/_action/status, /motion_plan_request]
     param_patterns: [".*planning.*", ".*goal.*", ".*status.*"]
 
 safety_conditions:
   - name: is_executing
-    description: "机械臂正在执行轨迹"
+    description: "MoveGroup action is executing a trajectory."
     check_expr: "action_status == 2"
     required_topics: [/move_action/_action/status]
   - name: within_joint_limits
-    description: "所有关节在软限位范围内"
-    check_expr: "all_joints_within_soft_limits"
+    description: "All observed joints are within URDF hard limits."
+    check_expr: "all_joints_within_hard_limits"
     required_topics: [/joint_states]
   - name: controller_active
-    description: "轨迹控制器正在活跃输出"
+    description: "Jazzy Panda trajectory controller is publishing controller_state."
     check_expr: "controller_state_received"
-    required_topics: [/panda_arm_controller/state]
+    required_topics: [/panda_arm_controller/controller_state]
 
 param_naming:
   joint_position_constraint:
@@ -120,3 +119,92 @@ param_naming:
     - ".*planning.*time.*"
     - ".*scaling.*factor.*"
     - ".*goal_bias.*"
+
+oracle_generation:
+  version: 1
+  profiles:
+    - output_profile: generic_joint_limits_v1
+      description: "Generate compiler-ready joint position, velocity and acceleration OracleIR specs from preprocessed joint limit blocks."
+      state_topic: /joint_states
+      state_fields:
+        position: position
+        velocity: velocity
+      scope:
+        operating_modes: [executing]
+      sources:
+        urdf_joint_limits:
+          block_type: joint_limit
+          name_template: "{joint}"
+        default_joint_limits:
+          block_type: parameter
+          path_template: "joint_limits.{joint}.{field}"
+          source_file: system_doc/moveit2_panda/config/joint_limits.yaml
+      checks:
+        - kind: joint_position_hard_bounds
+          source: urdf_joint_limits
+          lower_field: lower
+          upper_field: upper
+          tolerance: 0.000001
+        - kind: joint_velocity_max
+          source: default_joint_limits
+          source_field: max_velocity
+          tolerance: 0.000001
+        - kind: joint_acceleration_max
+          source: default_joint_limits
+          source_field: max_acceleration
+          tolerance: 0.000001
+      joints:
+        - name: panda_joint1
+          alias: joint1
+          index: 0
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint2
+          alias: joint2
+          index: 1
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint3
+          alias: joint3
+          index: 2
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint4
+          alias: joint4
+          index: 3
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint5
+          alias: joint5
+          index: 4
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint6
+          alias: joint6
+          index: 5
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_joint7
+          alias: joint7
+          index: 6
+          position_unit: rad
+          velocity_unit: rad/s
+          acceleration_unit: rad/s^2
+        - name: panda_finger_joint1
+          alias: finger_joint1
+          index: 7
+          position_unit: m
+          velocity_unit: m/s
+          acceleration_unit: m/s^2
+        - name: panda_finger_joint2
+          alias: finger_joint2
+          index: 8
+          position_unit: m
+          velocity_unit: m/s
+          acceleration_unit: m/s^2

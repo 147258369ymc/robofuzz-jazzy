@@ -8,7 +8,10 @@
 """
 
 from __future__ import annotations
+import json
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +20,70 @@ from .tools import TOOL_DEFINITIONS, ToolExecutor
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 25  # 单个任务最大对话轮次，防止无限循环
+DEFAULT_MAX_TURNS = 10  # 单个任务默认最大对话轮次，防止坏 block 拖住整批
+MAX_TURNS_ENV = "ORACLE_AGENT_MAX_TURNS"
+DEFAULT_API_MAX_RETRIES = 5
+DEFAULT_API_RETRY_BASE_SECONDS = 20.0
+API_MAX_RETRIES_ENV = "ORACLE_API_MAX_RETRIES"
+API_RETRY_BASE_SECONDS_ENV = "ORACLE_API_RETRY_BASE_SECONDS"
+
+
+def get_max_turns() -> int:
+    """Return per-block agent turn limit, optionally overridden for experiments."""
+    raw = os.environ.get(MAX_TURNS_ENV)
+    if not raw:
+        return DEFAULT_MAX_TURNS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is invalid; using %s", MAX_TURNS_ENV, raw, DEFAULT_MAX_TURNS)
+        return DEFAULT_MAX_TURNS
+    if value <= 0:
+        logger.warning("%s=%r must be positive; using %s", MAX_TURNS_ENV, raw, DEFAULT_MAX_TURNS)
+        return DEFAULT_MAX_TURNS
+    return value
+
+
+def get_api_max_retries() -> int:
+    """Return slow retry count for transient provider overload/rate errors."""
+    raw = os.environ.get(API_MAX_RETRIES_ENV)
+    if raw is None:
+        return DEFAULT_API_MAX_RETRIES
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is invalid; using %s", API_MAX_RETRIES_ENV, raw, DEFAULT_API_MAX_RETRIES)
+        return DEFAULT_API_MAX_RETRIES
+    if value < 0:
+        logger.warning("%s=%r must be non-negative; using %s", API_MAX_RETRIES_ENV, raw, DEFAULT_API_MAX_RETRIES)
+        return DEFAULT_API_MAX_RETRIES
+    return value
+
+
+def get_api_retry_base_seconds() -> float:
+    """Return base delay for transient API retry backoff."""
+    raw = os.environ.get(API_RETRY_BASE_SECONDS_ENV)
+    if raw is None:
+        return DEFAULT_API_RETRY_BASE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is invalid; using %s",
+            API_RETRY_BASE_SECONDS_ENV,
+            raw,
+            DEFAULT_API_RETRY_BASE_SECONDS,
+        )
+        return DEFAULT_API_RETRY_BASE_SECONDS
+    if value < 0:
+        logger.warning(
+            "%s=%r must be non-negative; using %s",
+            API_RETRY_BASE_SECONDS_ENV,
+            raw,
+            DEFAULT_API_RETRY_BASE_SECONDS,
+        )
+        return DEFAULT_API_RETRY_BASE_SECONDS
+    return value
 
 
 def build_agent_system_prompt(
@@ -44,12 +110,50 @@ def build_agent_system_prompt(
 
 ## 生成规则
 
-1. id 格式: {{system}}.{{category}}.{{name}}，category 从 range/validity/consistency 中选
-2. observations 必须绑定到真实的 topic 和 field
-3. parameter.default 必须与 SpecBlock.structured_fields.default 完全一致
-4. 表达式只能用: + - * / ** sqrt abs min max norm mean degrees acos is_valid param()
-5. feedback.direction: 上限约束用 maximize，下限约束用 minimize
-6. provenance.chunk_id 必须是 SpecIndex 中存在的 block_id
+1. 使用当前 OracleIR schema，不要使用旧版字段名。
+2. id 格式: {{system}}.range.{{name}}，速度/加速度/位置界限使用 type: range_bound。
+3. parameters 必须是列表，字段名是 parameters，不是 parameter。
+4. observations 必须绑定到真实的 topic 和 field；数组索引用 index 字段，不要写成 velocity[0]。
+5. parameter.default 必须与 SpecBlock.structured_fields.default 完全一致。
+6. 表达式只能用: + - * / ** sqrt abs min max norm mean degrees acos is_valid param()。
+7. feedback 必须是列表；feedback.direction: 上限约束用 maximize，下限约束用 minimize。
+8. provenance.chunk_id 必须是 SpecIndex 中存在的 block_id。
+9. validate_yaml 返回 valid: true 后，必须立刻调用 save_spec，不要重复 validate_yaml。
+
+## 当前 schema 示例
+
+```yaml
+id: moveit2_panda.range.panda_joint1_max_velocity
+type: range_bound
+system: moveit2_panda
+version: moveit2-2.12.4_panda-3.1.0_jazzy
+scope:
+  operating_modes: [executing]
+observations:
+  - name: joint1_velocity
+    topic: /joint_states
+    field: velocity
+    index: 0
+    unit: rad/s
+parameters:
+  - name: joint_limits.panda_joint1.max_velocity
+    source: system_doc/moveit2_panda/config/joint_limits.yaml
+    unit: rad/s
+    default: 2.175
+assertions:
+  - expr: "abs(joint1_velocity) <= param('joint_limits.panda_joint1.max_velocity') + tolerance"
+    tolerance: 0.000001
+    severity: error
+window:
+  type: every_sample
+feedback:
+  - name: joint1_velocity_margin
+    metric: "param('joint_limits.panda_joint1.max_velocity') - abs(joint1_velocity)"
+    direction: maximize
+provenance:
+  - chunk_id: moveit2_panda.parameter.joint_limits_panda_joint1_max_velocity_1
+    source_file: system_doc/moveit2_panda/config/joint_limits.yaml
+```
 
 ## 重要
 
@@ -57,6 +161,40 @@ def build_agent_system_prompt(
 - 如果参数不适合生成 oracle（如内部调试参数），直接说明原因并跳过
 - 文件名格式: {{system}}_{{category}}_{{param_name_lower}}.yaml
 """
+
+
+def call_with_transient_api_retries(
+    config: APIConfig,
+    system_prompt: str,
+    messages: list[dict],
+    tools: list[dict],
+) -> dict:
+    """Call provider API with slow retries for transient overload/rate failures."""
+    max_retries = get_api_max_retries()
+    base_delay = get_api_retry_base_seconds()
+
+    for attempt in range(max_retries + 1):
+        try:
+            return config.call_with_tools(
+                system_prompt=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+        except Exception as exc:
+            if not _is_transient_api_error(exc) or attempt >= max_retries:
+                raise
+            delay = base_delay * (2 ** attempt)
+            logger.warning(
+                "  API transient failure; retrying in %.1fs (attempt %s/%s): %s",
+                delay,
+                attempt + 1,
+                max_retries,
+                _summarize_exception(exc),
+            )
+            if delay > 0:
+                time.sleep(delay)
+
+    raise RuntimeError("unreachable API retry state")
 
 
 def run_agent_task(
@@ -79,10 +217,13 @@ def run_agent_task(
     """
     messages = [{"role": "user", "content": task_prompt}]
 
-    for turn in range(MAX_TURNS):
+    max_turns = get_max_turns()
+
+    for turn in range(max_turns):
         logger.info(f"  [Turn {turn + 1}] 调用 LLM...")
 
-        response = config.call_with_tools(
+        response = call_with_transient_api_retries(
+            config=config,
             system_prompt=system_prompt,
             messages=messages,
             tools=TOOL_DEFINITIONS,
@@ -101,10 +242,12 @@ def run_agent_task(
             for block in content_blocks:
                 if block["type"] == "text":
                     final_text += block["text"]
-            logger.info(f"  Agent 完成 (turns={turn + 1})")
             if final_text:
+                logger.warning(f"  Agent 结束但未保存 spec (turns={turn + 1})")
                 logger.debug(f"  最终回复: {final_text[:200]}")
-            return {"success": True, "message": final_text, "turns": turn + 1}
+                return {"success": False, "message": "Agent ended without save_spec", "turns": turn + 1}
+            logger.warning(f"  Agent 结束但未保存 spec (turns={turn + 1})")
+            return {"success": False, "message": "Agent ended without save_spec", "turns": turn + 1}
 
         # 处理 tool_use
         messages.append({"role": "assistant", "content": assistant_content})
@@ -116,9 +259,14 @@ def run_agent_task(
                 tool_input = block["input"]
                 tool_id = block["id"]
 
-                logger.info(f"    → {tool_name}({_summarize_input(tool_input)})")
+                logger.debug(f"    → {tool_name}({_summarize_input(tool_input)})")
                 result = tool_executor.execute(tool_name, tool_input)
                 logger.debug(f"    ← {result[:200]}")
+                if tool_name == "validate_yaml":
+                    _log_validation_result(result)
+                if tool_name == "save_spec" and _tool_saved_spec(result):
+                    logger.info(f"  Agent 保存成功 (turns={turn + 1})")
+                    return {"success": True, "message": "saved", "turns": turn + 1}
 
                 tool_results.append({
                     "type": "tool_result",
@@ -129,8 +277,8 @@ def run_agent_task(
         messages.append({"role": "user", "content": tool_results})
 
     # 超过最大轮次
-    logger.warning(f"  Agent 超过最大轮次 ({MAX_TURNS})")
-    return {"success": False, "message": "超过最大对话轮次", "turns": MAX_TURNS}
+    logger.warning(f"  Agent 超过最大轮次 ({max_turns})")
+    return {"success": False, "message": "超过最大对话轮次", "turns": max_turns}
 
 
 def run_agent_batch(
@@ -199,3 +347,50 @@ def _summarize_input(inp: dict) -> str:
         else:
             parts.append(f"{k}={v!r}")
     return ", ".join(parts) if parts else ""
+
+
+def _is_transient_api_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    transient_markers = (
+        "503",
+        "overloaded",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "temporarily unavailable",
+        "service unavailable",
+        "timeout",
+        "timed out",
+    )
+    return any(marker in text for marker in transient_markers)
+
+
+def _summarize_exception(exc: Exception) -> str:
+    text = str(exc).replace("\n", " ")
+    if len(text) > 180:
+        return text[:177] + "..."
+    return text
+
+
+def _tool_saved_spec(result: str) -> bool:
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        return False
+    return bool(data.get("saved")) and not data.get("error")
+
+
+def _log_validation_result(result: str) -> None:
+    try:
+        data = json.loads(result)
+    except json.JSONDecodeError:
+        logger.warning("    validate_yaml returned non-JSON result")
+        return
+    if data.get("valid"):
+        logger.info("    validate_yaml: valid")
+        return
+    errors = data.get("errors") or []
+    preview = "; ".join(str(error) for error in errors[:3])
+    if len(errors) > 3:
+        preview += f"; ... and {len(errors) - 3} more"
+    logger.warning("    validate_yaml: invalid%s", f" - {preview}" if preview else "")

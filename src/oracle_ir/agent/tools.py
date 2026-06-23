@@ -84,6 +84,7 @@ TOOL_DEFINITIONS = [
         "description": (
             "校验生成的 OracleIR YAML 是否符合 schema。"
             "返回校验结果：通过/失败 + 错误列表。"
+            "如果 valid 为 true，下一步必须调用 save_spec，不要重复调用 validate_yaml。"
         ),
         "input_schema": {
             "type": "object",
@@ -100,7 +101,7 @@ TOOL_DEFINITIONS = [
         "name": "save_spec",
         "description": (
             "将最终通过校验的 OracleIR YAML 保存到 specs 目录。"
-            "只有校验通过后才应调用此工具。"
+            "只有校验通过后才应调用此工具。调用成功后当前任务完成。"
         ),
         "input_schema": {
             "type": "object",

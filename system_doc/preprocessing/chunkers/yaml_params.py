@@ -71,7 +71,12 @@ class YamlParamChunker(BaseChunker):
                 index=len(chunks),
                 parent_heading=path[0] if path else "",
                 location=f"$.{param_path}",
-                extra={"path": param_path, "value": node, "type": "list"},
+                extra={
+                    "path": param_path,
+                    "value": node,
+                    "type": "list",
+                    **self._semantic_fields(path, node, file_path),
+                },
             ))
         else:
             # 叶节点（标量值）
@@ -82,8 +87,9 @@ class YamlParamChunker(BaseChunker):
                 "value": node,
                 "type": type(node).__name__,
             }
+            extra.update(self._semantic_fields(path, node, file_path))
             # 尝试推断单位（从参数名）
-            unit = self._guess_unit(path[-1] if path else "")
+            unit = extra.get("unit") or self._guess_unit(path[-1] if path else "")
             if unit:
                 extra["unit"] = unit
 
@@ -113,6 +119,128 @@ class YamlParamChunker(BaseChunker):
         if isinstance(value, bool):
             return "config"
         return "config"
+
+    def _semantic_fields(self, path: list[str], value: Any, file_path: Path) -> dict[str, Any]:
+        """Infer reusable semantic hints for downstream OracleIR generation."""
+        leaf = path[-1] if path else ""
+        path_str = ".".join(path)
+        fields: dict[str, Any] = {
+            "source_role": self._source_role(file_path),
+            "param_role": self._param_role(leaf, value),
+            "semantic_tags": [],
+            "preferred_for_oracle_generation": False,
+        }
+
+        bound_kind = self._bound_kind(leaf)
+        if bound_kind:
+            fields["bound_kind"] = bound_kind
+
+        quantity = self._quantity(path)
+        if quantity:
+            fields["quantity"] = quantity
+
+        joint = self._joint_name(path)
+        if joint:
+            fields["joint"] = joint
+            unit = self._joint_unit(quantity, joint)
+            if unit:
+                fields["unit"] = unit
+
+        tags = set()
+        role = fields["param_role"]
+        if role == "enable_flag":
+            tags.add("limit_enable_flag")
+            if quantity:
+                tags.add(f"{quantity}_enable_flag")
+        elif role in {"numeric_upper_bound", "numeric_lower_bound"}:
+            tags.add("numeric_bound")
+            if quantity:
+                tags.add(f"{quantity}_bound")
+            if self._is_preferred_oracle_candidate(fields):
+                fields["preferred_for_oracle_generation"] = True
+                fields["oracle_type_hint"] = "range_bound"
+                tags.add("oracle_numeric_bound_candidate")
+                if quantity:
+                    tags.add(f"oracle_{quantity}_bound_candidate")
+
+        if path_str.startswith("joint_limits."):
+            tags.add("joint_limit_config")
+
+        fields["semantic_tags"] = sorted(tags)
+        return fields
+
+    def _source_role(self, file_path: Path) -> str:
+        name = file_path.name
+        if name == "hard_joint_limits.yaml":
+            return "hard_joint_limits"
+        if name == "joint_limits.yaml":
+            return "default_joint_limits"
+        if name == "initial_positions.yaml":
+            return "initial_positions"
+        return "yaml_params"
+
+    def _param_role(self, leaf: str, value: Any) -> str:
+        leaf_lower = leaf.lower()
+        if isinstance(value, bool) or leaf_lower.startswith("has_") or leaf_lower.startswith("enable_"):
+            return "enable_flag"
+        if self._bound_kind(leaf) == "max":
+            return "numeric_upper_bound"
+        if self._bound_kind(leaf) == "min":
+            return "numeric_lower_bound"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return "numeric_value"
+        return "config_value"
+
+    def _bound_kind(self, leaf: str) -> str:
+        leaf_lower = leaf.lower()
+        if leaf_lower.startswith(("max_", "upper", "soft_upper")):
+            return "max"
+        if leaf_lower.startswith(("min_", "lower", "soft_lower")):
+            return "min"
+        return ""
+
+    def _quantity(self, path: list[str]) -> str:
+        text = ".".join(path).lower()
+        if "joint_limits." in text:
+            if "velocity" in text:
+                return "joint_velocity"
+            if "acceleration" in text or "accel" in text:
+                return "joint_acceleration"
+            if "jerk" in text:
+                return "joint_jerk"
+            if any(key in text for key in ("position", "lower", "upper")):
+                return "joint_position"
+        if "velocity" in text or "speed" in text:
+            return "velocity"
+        if "acceleration" in text or "accel" in text:
+            return "acceleration"
+        return ""
+
+    def _joint_name(self, path: list[str]) -> str:
+        if len(path) >= 3 and path[0] == "joint_limits":
+            return path[1]
+        if len(path) >= 2 and path[0] == "initial_positions":
+            return path[1]
+        return ""
+
+    def _joint_unit(self, quantity: str, joint: str) -> str:
+        is_prismatic_like = "finger" in joint
+        if quantity == "joint_velocity":
+            return "m/s" if is_prismatic_like else "rad/s"
+        if quantity == "joint_acceleration":
+            return "m/s^2" if is_prismatic_like else "rad/s^2"
+        if quantity == "joint_jerk":
+            return "m/s^3" if is_prismatic_like else "rad/s^3"
+        if quantity == "joint_position":
+            return "m" if is_prismatic_like else "rad"
+        return ""
+
+    def _is_preferred_oracle_candidate(self, fields: dict[str, Any]) -> bool:
+        return (
+            fields.get("source_role") == "default_joint_limits"
+            and fields.get("param_role") in {"numeric_upper_bound", "numeric_lower_bound"}
+            and fields.get("quantity") in {"joint_velocity", "joint_acceleration", "joint_jerk"}
+        )
 
     def _guess_unit(self, name: str) -> str:
         """从参数名猜测单位"""

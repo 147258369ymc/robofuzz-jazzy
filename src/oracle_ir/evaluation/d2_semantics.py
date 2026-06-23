@@ -10,11 +10,11 @@
 """
 
 from __future__ import annotations
-import json
 from pathlib import Path
 from typing import Any
 
 from . import DimensionScore
+from .block_resolver import load_block_map, resolve_parameter_block
 from src.oracle_ir.schema import OracleIR
 
 
@@ -29,18 +29,11 @@ def evaluate_semantics(
     details = []
     failures = []
 
-    # 加载所有参数类型的 block
-    param_blocks: dict[str, dict] = {}
-    for ir in specs:
-        for param in ir.parameters:
-            # 尝试加载对应的 SpecBlock（使用 ir.system 动态构建路径）
-            block_path = blocks_dir / f"{ir.system}.parameter.{param.name}.json"
-            if block_path.exists() and param.name not in param_blocks:
-                param_blocks[param.name] = json.loads(block_path.read_text())
+    blocks = load_block_map(blocks_dir)
 
     for ir in specs:
         for param in ir.parameters:
-            block = param_blocks.get(param.name)
+            block = resolve_parameter_block(ir, param, blocks_dir, blocks)
             if block is None:
                 total_checks += 1
                 failures.append(f"[FAIL] {ir.id}: param '{param.name}' has no SpecBlock")

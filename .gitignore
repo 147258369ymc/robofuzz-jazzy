@@ -28,7 +28,6 @@ system_doc/turtlebot3
 system_doc/turtlebot3_clean
 rofer-2023/
 src_nav2
-system_doc/moveit2_panda
 logs_moveit/
 src_jazzy/logs/
 src_jazzy/out
@@ -37,3 +36,4 @@ logs_jazzy
 err
 out
 src_jazzy/requirements
+system_doc/

@@ -19,7 +19,20 @@ from src.oracle_ir.schema import OracleIR
 
 # OracleIR type → 期望的 SpecBlock tags 映射（宽松匹配）
 TYPE_TAG_ALIGNMENT = {
-    "range_bound": {"velocity_constraint", "attitude_constraint", "altitude_constraint", "actuator"},
+    "range_bound": {
+        "velocity_constraint",
+        "attitude_constraint",
+        "altitude_constraint",
+        "actuator",
+        "joint_constraint",
+        "joint_position_constraint",
+        "joint_velocity_constraint",
+        "joint_acceleration_constraint",
+        "position_constraint",
+        "workspace_constraint",
+        "effort_constraint",
+        "force_constraint",
+    },
     "validity": {"sensor", "velocity_constraint", "attitude_constraint"},
     "norm_constraint": {"attitude_constraint", "position_constraint"},
     "temporal_consistency": {"velocity_constraint", "attitude_constraint", "sensor", "position_constraint"},

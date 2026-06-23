@@ -96,6 +96,10 @@ class TargetDescriptor:
     # topic 命名模板（不同系统的 topic 命名规则不同）
     topic_suffix: str = ""             # PX4 用 "_PubSubTopic"，ROS2 通常无后缀
 
+    # 可选的确定性生成规则。
+    # 目标相关事实放在 descriptor YAML 中，生成器只读取该配置，不在代码中编码目标。
+    oracle_generation: dict[str, Any] = field(default_factory=dict)
+
     def get_watchlist(self) -> dict[str, str]:
         """生成 topic → msg_type 的 watchlist（给 Validator 用）"""
         return {t.name: t.msg_type for t in self.topics}
