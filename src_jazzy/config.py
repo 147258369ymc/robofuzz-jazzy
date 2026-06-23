@@ -26,10 +26,34 @@ class RuntimeConfig:
         self.exec_cmd = None
 
         self.px4_sitl = False
+        self.px4_ros = False
+        self.use_mavlink = False
+        self.exp_pgfuzz = False
         self.tb3_sitl = False
         self.tb3_hitl = False
+        self.tb4_sitl = False
         self.sros2 = False
         self.test_rcl = False
+        self.test_cli = False
+        self.test_rosidl = False
+        self.test_moveit = False
+
+        self.target_profile = None
+        self.target_profile_name = None
+        self.target_family = None
+        self.target_generation = None
+        self.input_topic = None
+        self.input_type = None
+        self.input_topics = {}
+        self.watch_topics = {}
+        self.optional_watch_topics = {}
+        self.topic_aliases = {}
+        self.required_actions_for_readiness = {}
+        self.required_log_patterns_for_readiness = []
+        self.launch_adapter = ""
+        self.launch_command = []
+        self.oracle_mode = ""
+        self.moveit_planning_only = False
 
     def find_package_metadata(self):
         # read from provided meta file

@@ -168,16 +168,26 @@ class Executor:
         except:
             print("[executor] could not remove previous bag dir")
 
-        rosbag_cmd = f"ros2 bag record -o {bag_dir} --include-hidden-topics --qos-profile-overrides-path qos_override.yaml "
+        rosbag_cmd = [
+            "ros2",
+            "bag",
+            "record",
+            "-s",
+            "sqlite3",
+            "-o",
+            bag_dir,
+            "--include-hidden-topics",
+        ]
+        qos_path = os.path.join(self.fuzzer.config.src_dir, "qos_override.yaml")
+        if os.path.exists(qos_path):
+            rosbag_cmd.extend(["--qos-profile-overrides-path", qos_path])
         watchlist = json.loads(data)
-        for target in watchlist:
-            rosbag_cmd += target + " "
-        rosbag_cmd += "listen_flag"
+        rosbag_cmd.extend(watchlist)
+        rosbag_cmd.append("listen_flag")
 
         self.rosbag_pgrp = sp.Popen(
             rosbag_cmd,
-            shell=True,
-            preexec_fn=os.setpgrp,
+            start_new_session=True,
             stdout=sp.PIPE,
             stderr=sp.PIPE,
         )
@@ -185,15 +195,43 @@ class Executor:
 
         # need time for topics to be discovered
         time.sleep(1)
+        if self.rosbag_pgrp.poll() is not None:
+            _, stderr = self.rosbag_pgrp.communicate(timeout=1)
+            print("[executor] ros2 bag exited early:", stderr.decode("utf-8", "ignore"))
 
     def kill_rosbag(self):
         try:
             print("[executor] killing ros2 bag")
-            os.killpg(self.rosbag_pgrp.pid, signal.SIGINT)
+            pgrp = os.getpgid(self.rosbag_pgrp.pid)
+            os.killpg(pgrp, signal.SIGINT)
+            try:
+                self.rosbag_pgrp.wait(timeout=10)
+            except sp.TimeoutExpired:
+                os.killpg(pgrp, signal.SIGKILL)
+                self.rosbag_pgrp.wait(timeout=5)
         except ProcessLookupError as e:
             print("[-] ros2 bag killpg error:", e)
         except AttributeError as e:
             print("[-] ros2 bag not initialized:", e)
+        finally:
+            self.rosbag_pgrp = None
+
+    def cleanup_after_execution_error(self):
+        try:
+            self.stop_watching()
+        except Exception as e:
+            print("[-] stop watching after execution error failed:", e)
+
+        try:
+            self.kill_rosbag()
+        except Exception as e:
+            print("[-] rosbag cleanup after execution error failed:", e)
+
+        if not self.fuzzer.config.persistent:
+            try:
+                self.fuzzer.kill_target()
+            except Exception as e:
+                print("[-] target cleanup after execution error failed:", e)
 
     def save_msg_to_queue(self, msg, frame, subframe):
         if self.fuzzer.config.replay:
@@ -344,41 +382,20 @@ class Executor:
             # print()
 
             pub_failure = False
-            if mode == ExecMode.SINGLE:
-                subframe = time.time()
-                msg = msg_list[0]
-
-                self.save_msg_to_queue(msg, frame, subframe)
-
-                # TODO: publishing through API is terribly unreliable.
-                # Switch to externally calling "ros2 topic pub" as it
-                # automatically creates a new hidden publisher.
-
-                # byte doesn't work well with message_to_yaml()
-                # reported the issue here:
-                # https://github.com/ros2/rosidl_runtime_py/issues/14
-                if pub_function:
-                    pub_function(msg)
-
-                else:
-                    ret = self.do_ros2_pub(msg)
-
-                    if ret:
-                        pub_failure = True
-                        pub_failure_msg = ret
-                        print(f"[executor] failed to publish: {ret}")
-
-
-                # self.fuzzer.pub.publish(msg)
-                time.sleep(period)
-
-            elif mode == ExecMode.SEQUENCE:
-                for i, msg in enumerate(msg_list):
-                    # print("{}-th msg in sequence".format(i))
+            try:
+                if mode == ExecMode.SINGLE:
                     subframe = time.time()
+                    msg = msg_list[0]
 
                     self.save_msg_to_queue(msg, frame, subframe)
 
+                    # TODO: publishing through API is terribly unreliable.
+                    # Switch to externally calling "ros2 topic pub" as it
+                    # automatically creates a new hidden publisher.
+
+                    # byte doesn't work well with message_to_yaml()
+                    # reported the issue here:
+                    # https://github.com/ros2/rosidl_runtime_py/issues/14
                     if pub_function:
                         pub_function(msg)
 
@@ -390,17 +407,42 @@ class Executor:
                             pub_failure_msg = ret
                             print(f"[executor] failed to publish: {ret}")
 
+
                     # self.fuzzer.pub.publish(msg)
                     time.sleep(period)
 
-            if wait_lock:
-                f = open(wait_lock, "w")
-                f.close()
+                elif mode == ExecMode.SEQUENCE:
+                    for i, msg in enumerate(msg_list):
+                        # print("{}-th msg in sequence".format(i))
+                        subframe = time.time()
 
-                while True:
-                    time.sleep(0.2)
-                    if not os.path.isfile(wait_lock):
-                        break
+                        self.save_msg_to_queue(msg, frame, subframe)
+
+                        if pub_function:
+                            pub_function(msg)
+
+                        else:
+                            ret = self.do_ros2_pub(msg)
+
+                            if ret:
+                                pub_failure = True
+                                pub_failure_msg = ret
+                                print(f"[executor] failed to publish: {ret}")
+
+                        # self.fuzzer.pub.publish(msg)
+                        time.sleep(period)
+
+                if wait_lock:
+                    f = open(wait_lock, "w")
+                    f.close()
+
+                    while True:
+                        time.sleep(0.2)
+                        if not os.path.isfile(wait_lock):
+                            break
+            except Exception:
+                self.cleanup_after_execution_error()
+                raise
 
             exec_cnt += 1
 

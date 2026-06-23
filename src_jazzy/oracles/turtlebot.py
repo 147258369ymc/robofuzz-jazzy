@@ -29,8 +29,67 @@ def _ts_to_sec(ts):
     return int(ts_str[:10]) + int(ts_str[10:]) / (10 ** (len(ts_str) - 10))
 
 
+def _cmd_twist(msg):
+    return msg.twist if hasattr(msg, "twist") else msg
+
+
+def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
+    errs = []
+    odom_list = state_dict.get("/odom", [])
+    scan_list = state_dict.get("/scan", [])
+
+    if not odom_list:
+        errs.append("missing required TurtleBot4 topic /odom")
+    if not scan_list:
+        errs.append("missing required TurtleBot4 topic /scan")
+
+    for _, scan in scan_list:
+        ranges = getattr(scan, "ranges", [])
+        for value in ranges:
+            if math.isnan(value):
+                errs.append("scan.ranges contains NaN")
+                break
+            if math.isfinite(value) and value < 0.0:
+                errs.append(f"scan.ranges contains negative value {value}")
+                break
+
+    if msg_list and odom_list:
+        last_cmd = _cmd_twist(msg_list[-1])
+        cmd_x = getattr(last_cmd.linear, "x", 0.0)
+        last_odom = odom_list[-1][1]
+        odom_x = last_odom.twist.twist.linear.x
+        if cmd_x > 0.05 and odom_x < -0.05:
+            errs.append(
+                f"cmd_vel forward command conflicts with odom velocity {odom_x}"
+            )
+        if cmd_x < -0.05 and odom_x > 0.05:
+            errs.append(
+                f"cmd_vel reverse command conflicts with odom velocity {odom_x}"
+            )
+
+    optional_topics = [
+        "/hazard_detection",
+        "/slip_status",
+        "/stall_status",
+        "/kidnap_status",
+        "/wheel_status",
+    ]
+    for topic in optional_topics:
+        for _, msg in state_dict.get(topic, []):
+            if msg is None:
+                errs.append(f"{topic} contains an empty message")
+                break
+
+    return errs
+
+
 def check(config, msg_list, state_dict, feedback_list):
     errs = list()
+
+    if getattr(config, "oracle_mode", "") == "turtlebot4_jazzy":
+        return _check_turtlebot4_smoke(
+            config, msg_list, state_dict, feedback_list
+        )
 
     try:
         imu_list = state_dict["/imu"]
@@ -545,4 +604,3 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"err={ang_track_err:.3f} rad/s)")
 
     return errs
-

@@ -1,4 +1,5 @@
 import math
+import os
 import statistics
 
 import kinpy
@@ -47,7 +48,29 @@ WORKSPACE_RADIUS = 0.855       # m — Panda approximate workspace sphere
 # Tracking error: skip first N samples at trajectory start (initial transient)
 TRACKING_SKIP_SAMPLES = 5
 
-PANDA_URDF = "/opt/ros/foxy/share/moveit_resources_panda_description/urdf/panda.urdf"
+def _find_panda_urdf():
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = get_package_share_directory(
+            "moveit_resources_panda_description"
+        )
+        path = os.path.join(share, "urdf", "panda.urdf")
+        if os.path.exists(path):
+            return path
+    except Exception:
+        pass
+
+    for path in (
+        "/opt/ros/jazzy/share/moveit_resources_panda_description/urdf/panda.urdf",
+        "/opt/ros/humble/share/moveit_resources_panda_description/urdf/panda.urdf",
+        "/opt/ros/foxy/share/moveit_resources_panda_description/urdf/panda.urdf",
+    ):
+        if os.path.exists(path):
+            return path
+    return "/opt/ros/jazzy/share/moveit_resources_panda_description/urdf/panda.urdf"
+
+
+PANDA_URDF = _find_panda_urdf()
 READY_POS = (0.306890566, 0.0, 0.590282052)
 
 # Home position (from initial_positions.yaml)
@@ -64,6 +87,28 @@ def _safe_get(state_dict, topic):
         return state_dict[topic]
     except KeyError:
         return []
+
+
+def _controller_desired(cont_state):
+    """Return desired/reference trajectory point across control_msgs versions."""
+    return (
+        getattr(cont_state, "desired", None)
+        or getattr(cont_state, "reference", None)
+    )
+
+
+def _controller_actual(cont_state):
+    """Return actual/feedback trajectory point across control_msgs versions."""
+    return (
+        getattr(cont_state, "actual", None)
+        or getattr(cont_state, "feedback", None)
+    )
+
+
+def _point_values(point, field):
+    if point is None:
+        return []
+    return getattr(point, field, []) or []
 
 
 def _all_goals_unreachable(msg_list):
@@ -128,6 +173,11 @@ def check(config, msg_list, state_dict, feedback_list):
 
     data_sufficient = len(controller_states_list) >= MIN_EXEC_SAMPLES
 
+    if getattr(config, "moveit_planning_only", False):
+        if not motion_plan_request_list:
+            errs.append("no /motion_plan_request data available")
+        return errs
+
     # =================================================================
     # Layer 1: Safety Invariants (direct comparison, zero computation)
     # =================================================================
@@ -159,14 +209,22 @@ def check(config, msg_list, state_dict, feedback_list):
     desired_acc_max_ratio = 0.0
 
     for (ts, cont_state) in controller_states_list:
+        joint_names = getattr(cont_state, "joint_names", []) or []
+        desired_state = _controller_desired(cont_state)
+        actual_state = _controller_actual(cont_state)
+        desired_velocities = _point_values(desired_state, "velocities")
+        desired_accelerations = _point_values(desired_state, "accelerations")
+        desired_positions = _point_values(desired_state, "positions")
+        actual_positions = _point_values(actual_state, "positions")
+
         # 1.2 Velocity
-        if cont_state.desired.velocities:
-            for i, name in enumerate(cont_state.joint_names):
+        if desired_velocities:
+            for i, name in enumerate(joint_names):
                 limits = PANDA_JOINT_LIMITS.get(name)
-                if limits is None or i >= len(cont_state.desired.velocities):
+                if limits is None or i >= len(desired_velocities):
                     continue
                 _, _, max_vel, _ = limits
-                v = abs(cont_state.desired.velocities[i])
+                v = abs(desired_velocities[i])
                 ratio = v / max_vel if max_vel > 0 else 0
                 if ratio > desired_vel_max_ratio:
                     desired_vel_max_ratio = ratio
@@ -177,13 +235,13 @@ def check(config, msg_list, state_dict, feedback_list):
                     )
 
         # 1.3 Acceleration
-        if cont_state.desired.accelerations:
-            for i, name in enumerate(cont_state.joint_names):
+        if desired_accelerations:
+            for i, name in enumerate(joint_names):
                 limits = PANDA_JOINT_LIMITS.get(name)
-                if limits is None or i >= len(cont_state.desired.accelerations):
+                if limits is None or i >= len(desired_accelerations):
                     continue
                 _, _, _, max_acc = limits
-                a = abs(cont_state.desired.accelerations[i])
+                a = abs(desired_accelerations[i])
                 ratio = a / max_acc if max_acc > 0 else 0
                 if ratio > desired_acc_max_ratio:
                     desired_acc_max_ratio = ratio
@@ -194,19 +252,19 @@ def check(config, msg_list, state_dict, feedback_list):
                     )
 
         # 1.4 NaN/INF on actual positions (controller-level)
-        for i, pos in enumerate(cont_state.actual.positions):
+        for i, pos in enumerate(actual_positions):
             if math.isnan(pos) or math.isinf(pos):
-                name = cont_state.joint_names[i] if i < len(cont_state.joint_names) else f"joint{i}"
+                name = joint_names[i] if i < len(joint_names) else f"joint{i}"
                 errs.append(f"{ts} {name}'s actual position is NaN/INF")
 
         # 1.5 Planner desired.positions outside joint limits
-        if cont_state.desired.positions:
-            for i, name in enumerate(cont_state.joint_names):
+        if desired_positions:
+            for i, name in enumerate(joint_names):
                 limits = PANDA_JOINT_LIMITS.get(name)
-                if limits is None or i >= len(cont_state.desired.positions):
+                if limits is None or i >= len(desired_positions):
                     continue
                 min_pos, max_pos, _, _ = limits
-                dpos = cont_state.desired.positions[i]
+                dpos = desired_positions[i]
                 if dpos < (min_pos - MARGIN_RAD) or dpos > (max_pos + MARGIN_RAD):
                     errs.append(
                         f"{ts} planner desired position for {name}: "
@@ -224,19 +282,24 @@ def check(config, msg_list, state_dict, feedback_list):
 
     if data_sufficient:
         for (ts, cont_state) in controller_states_list:
-            if not cont_state.error.positions:
+            error_positions = _point_values(
+                getattr(cont_state, "error", None),
+                "positions",
+            )
+            if not error_positions:
                 continue
             sample_idx += 1
             if sample_idx <= TRACKING_SKIP_SAMPLES:
                 continue
-            for ei, epos in enumerate(cont_state.error.positions):
+            for ei, epos in enumerate(error_positions):
                 abs_err = abs(epos)
                 tracking_error_values.append(abs_err)
                 if abs_err > max_tracking_error:
                     max_tracking_error = abs_err
                 if abs_err > TOL_TRACKING:
-                    jn = (cont_state.joint_names[ei]
-                          if ei < len(cont_state.joint_names)
+                    joint_names = getattr(cont_state, "joint_names", []) or []
+                    jn = (joint_names[ei]
+                          if ei < len(joint_names)
                           else f"joint{ei}")
                     errs.append(
                         f"{ts} {jn}'s tracking error {epos:.4f} rad "
@@ -311,10 +374,13 @@ def check(config, msg_list, state_dict, feedback_list):
         if chosen is None and controller_states_list:
             chosen = controller_states_list[-1][1]
         if chosen is not None:
+            actual_state = _controller_actual(chosen)
+            actual_positions = _point_values(actual_state, "positions")
+            joint_names = getattr(chosen, "joint_names", []) or []
             endpoint_arm_positions = {
-                name: chosen.actual.positions[i]
-                for i, name in enumerate(chosen.joint_names)
-                if i < len(chosen.actual.positions)
+                name: actual_positions[i]
+                for i, name in enumerate(joint_names)
+                if i < len(actual_positions)
             }
 
     endpoint_check_valid = (
@@ -392,16 +458,22 @@ def check(config, msg_list, state_dict, feedback_list):
                         if cts <= as_ts:
                             abort_idx = ci
                     if abort_idx < len(controller_states_list) - 1:
+                        abort_actual = _controller_actual(
+                            controller_states_list[abort_idx][1]
+                        )
                         abort_pos = list(
-                            controller_states_list[abort_idx][1].actual.positions
+                            _point_values(abort_actual, "positions")
                         )
                         abort_ts_ns = controller_states_list[abort_idx][0]
                         for ci in range(abort_idx + 1, len(controller_states_list)):
                             dt = (controller_states_list[ci][0] - abort_ts_ns) / 1e9
                             if dt > 0.5:
                                 break
+                            post_actual = _controller_actual(
+                                controller_states_list[ci][1]
+                            )
                             post_pos = list(
-                                controller_states_list[ci][1].actual.positions
+                                _point_values(post_actual, "positions")
                             )
                             for j in range(min(len(abort_pos), len(post_pos))):
                                 drift = abs(post_pos[j] - abort_pos[j])
@@ -443,8 +515,11 @@ def check(config, msg_list, state_dict, feedback_list):
     joint_pos_min = {}
     joint_pos_max = {}
     for (ts, cont_state) in controller_states_list:
-        for pi, pos in enumerate(cont_state.actual.positions):
-            jname = cont_state.joint_names[pi] if pi < len(cont_state.joint_names) else ""
+        actual_state = _controller_actual(cont_state)
+        actual_positions = _point_values(actual_state, "positions")
+        joint_names = getattr(cont_state, "joint_names", []) or []
+        for pi, pos in enumerate(actual_positions):
+            jname = joint_names[pi] if pi < len(joint_names) else ""
             if jname not in PANDA_JOINT_LIMITS:
                 continue
             if jname not in joint_pos_min:

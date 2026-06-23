@@ -1,7 +1,7 @@
 schema_version: 1
 name: turtlebot4_jazzy
 display_name: TurtleBot4 Jazzy
-status: scaffold
+status: launch_smoke_verified
 
 environment:
   ubuntu: "24.04"
@@ -22,17 +22,21 @@ target:
     - lite
 
 launch:
-  adapter: ros2_launch
+  adapter: split_headless_ros_gz_launch
   package: turtlebot4_gz_bringup
   launch_file: turtlebot4_gz.launch.py
   args:
+    headless: true
     model: standard
+    gazebo: ignition
+    rviz: false
+    gz_args: "-s -r"
+    xvfb: true
+    world: warehouse
   command:
-    - ros2
-    - launch
-    - turtlebot4_gz_bringup
-    - turtlebot4_gz.launch.py
-    - model:=standard
+    - ./run_target.sh
+    - turtlebot4_jazzy
+  compatibility_note: The upstream turtlebot4_gz.launch.py path remains available with TURTLEBOT4_HEADLESS=0, but the Docker default uses split headless launch with xvfb-run because the upstream sim.launch.py hardcodes a Gazebo GUI config and TurtleBot4 sensors still require a virtual display for server-side rendering.
 
 input:
   mode: velocity_command
@@ -55,6 +59,8 @@ watch:
     /kidnap_status: irobot_create_msgs/msg/KidnapStatus
     /wheel_status: irobot_create_msgs/msg/WheelStatus
     /interface_buttons: irobot_create_msgs/msg/InterfaceButtons
+    /wheel_ticks: irobot_create_msgs/msg/WheelTicks
+    /wheel_vels: irobot_create_msgs/msg/WheelVels
 
 oracle:
   module: oracles.turtlebot

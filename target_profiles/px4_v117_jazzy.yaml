@@ -1,7 +1,7 @@
 schema_version: 1
 name: px4_v117_jazzy
 display_name: PX4 v1.17.0 Jazzy SITL
-status: compatibility_spike
+status: sitl_smoke_verified
 
 environment:
   ubuntu: "24.04"
@@ -13,6 +13,20 @@ source:
   tag: v1.17.0
   tag_object_sha: a5eb12d2ab591251faa009f76b2685b8cc64405d
   commit_sha: d6f12ad1c4f70ad3230afd7d86e971421e02fef4
+  ros2_messages:
+    repository: https://github.com/PX4/px4_msgs.git
+    ref: release/1.17
+    commit_sha: 86d8239e962f6939e05c3737784f60c02fa884db
+  xrce_dds_agent:
+    repository: https://github.com/eProsima/Micro-XRCE-DDS-Agent.git
+    tag: v2.4.3
+    commit_sha: 73622810d984349b80bbac0ef55fc0b694d62222
+    build_options:
+      UAGENT_SUPERBUILD: false
+      UAGENT_USE_SYSTEM_FASTDDS: true
+      UAGENT_USE_SYSTEM_FASTCDR: true
+      UAGENT_LOGGER_PROFILE: false
+      UAGENT_P2P_PROFILE: false
 
 target:
   family: px4
@@ -27,11 +41,13 @@ launch:
     HEADLESS: "1"
   command:
     - make
-    - px4_sitl
+    - px4_sitl_default
     - gz_x500
 
 bridge:
   agent:
+    source: Micro-XRCE-DDS-Agent
+    tag: v2.4.3
     command:
       - MicroXRCEAgent
       - udp4
@@ -40,8 +56,10 @@ bridge:
     transport: udp4
     port: 8888
   notes:
+    - PX4 v1.17 uses Micro XRCE-DDS Client v2.x; Micro XRCE-DDS Agent v3.x is intentionally not used for this profile.
     - PX4 v1.16 and newer introduced message versioning; bridge smoke tests must verify current px4_msgs compatibility.
     - Legacy micrortps_agent and px4_sitl_rtps paths are not valid for this profile.
+    - Micro XRCE-DDS Agent v2.4.3 is built without SuperBuild/logger/P2P to install cleanly on Noble/Jazzy system FastDDS/Fast-CDR; validate UDP agent behavior in PX4 smoke testing.
 
 input:
   mode: offboard_ros2
@@ -52,16 +70,17 @@ input:
 
 watch:
   required:
-    /fmu/out/vehicle_status: px4_msgs/msg/VehicleStatus
-    /fmu/out/vehicle_local_position: px4_msgs/msg/VehicleLocalPosition
+    /fmu/out/vehicle_status_v1: px4_msgs/msg/VehicleStatus
+    /fmu/out/vehicle_local_position_v1: px4_msgs/msg/VehicleLocalPosition
     /fmu/out/vehicle_attitude: px4_msgs/msg/VehicleAttitude
   oracle_candidates:
-    /fmu/out/vehicle_angular_velocity: px4_msgs/msg/VehicleAngularVelocity
-    /fmu/out/vehicle_acceleration: px4_msgs/msg/VehicleAcceleration
     /fmu/out/vehicle_odometry: px4_msgs/msg/VehicleOdometry
     /fmu/out/vehicle_control_mode: px4_msgs/msg/VehicleControlMode
-    /fmu/out/battery_status: px4_msgs/msg/BatteryStatus
+    /fmu/out/battery_status_v1: px4_msgs/msg/BatteryStatus
     /fmu/out/sensor_combined: px4_msgs/msg/SensorCombined
+  compatibility_notes:
+    - PX4 v1.17 publishes some versioned uXRCE-DDS topic names, including /fmu/out/vehicle_status_v1 and /fmu/out/vehicle_local_position_v1, while the px4_msgs type names remain VehicleStatus and VehicleLocalPosition.
+    - The smoke-tested x500 graph did not publish /fmu/out/vehicle_angular_velocity or /fmu/out/vehicle_acceleration directly; use /fmu/out/vehicle_odometry or add those topics only after a graph inspection proves they exist.
 
 oracle:
   module: oracles.px4

@@ -112,12 +112,63 @@ def _safe_get(state_dict, topic):
         return []
 
 
+def _check_px4_v117_smoke(config, msg_list, state_dict, feedback_list):
+    errs = []
+    status_list = _safe_get(state_dict, "/VehicleStatus_PubSubTopic")
+    local_position_list = _safe_get(
+        state_dict, "/VehicleLocalPosition_PubSubTopic"
+    )
+    attitude_list = _safe_get(state_dict, "/VehicleAttitude_PubSubTopic")
+
+    if not status_list:
+        errs.append("missing required PX4 topic /fmu/out/vehicle_status_v1")
+    if not local_position_list:
+        errs.append(
+            "missing required PX4 topic /fmu/out/vehicle_local_position_v1"
+        )
+    if not attitude_list:
+        errs.append("missing required PX4 topic /fmu/out/vehicle_attitude")
+
+    finite_position_seen = False
+    for _, msg in local_position_list:
+        values = []
+        for attr in ("x", "y", "z", "vx", "vy", "vz"):
+            if hasattr(msg, attr):
+                values.append(getattr(msg, attr))
+        if values and any(math.isinf(v) for v in values):
+            errs.append("vehicle_local_position contains INF")
+            break
+        if values and any(not math.isnan(v) for v in values):
+            finite_position_seen = True
+    if local_position_list and not finite_position_seen:
+        errs.append("vehicle_local_position never produced a finite value")
+
+    for _, msg in attitude_list:
+        q = getattr(msg, "q", None)
+        if q is None:
+            continue
+        if any(math.isnan(v) or math.isinf(v) for v in q):
+            errs.append("vehicle_attitude.q contains NaN/INF")
+            break
+        norm = math.sqrt(sum(v * v for v in q))
+        if norm < 0.5 or norm > 1.5:
+            errs.append(f"vehicle_attitude.q has implausible norm {norm}")
+            break
+
+    return errs
+
+
 # =========================================================================
 # Main Oracle Check
 # =========================================================================
 
 def check(config, msg_list, state_dict, feedback_list):
     errs = list()
+
+    if getattr(config, "oracle_mode", "") == "px4_v117_jazzy":
+        return _check_px4_v117_smoke(
+            config, msg_list, state_dict, feedback_list
+        )
 
     # --- Retrieve state data ---
     vehicle_acceleration_list = _safe_get(state_dict, "/VehicleAcceleration_PubSubTopic")

@@ -21,19 +21,23 @@ class RosbagParser:
 
         topics = self.get_all_topics()
 
+        # rosbag2 'topics' table column count differs across distros
+        # (Foxy: 5 cols, Jazzy: 6 cols with type_description_hash). Only the
+        # first three columns (id, name, type) are needed, so slice instead of
+        # unpacking a fixed arity.
         self.topic_name_type_map = {
-            topic_name: topic_type
-            for topic_id, topic_name, topic_type, _, _ in topics
+            row[1]: row[2]
+            for row in topics
         }
 
         self.topic_id_name_map = {
-            topic_id: topic_name
-            for topic_id, topic_name, topic_type, _, _ in topics
+            row[0]: row[1]
+            for row in topics
         }
 
         self.topic_name_msg_map = {
-            topic_name: get_message(topic_type)
-            for topic_id, topic_name, topic_type, _, _ in topics
+            row[1]: get_message(row[2])
+            for row in topics
         }
 
         self.messages = self.get_all_messages()

@@ -15,6 +15,7 @@ import rclpy
 from rclpy.node import Node
 
 import ros_utils
+import target_profiles
 
 # import checkers
 import oracles.turtlesim
@@ -126,6 +127,11 @@ def run_checks(config, msg_list, state_dict, feedback_list=[]):
     feedback_list : list of Feedback objects
     """
 
+    state_dict = target_profiles.normalize_state_dict(
+        state_dict,
+        getattr(config, "topic_aliases", {}),
+    )
+
     errs = []
     if config.rospkg == "turtlesim":
         try:
@@ -135,6 +141,13 @@ def run_checks(config, msg_list, state_dict, feedback_list=[]):
             return errs
 
         errs = oracles.turtlesim.check(config, msg_list, pose_list, feedback_list)
+
+    elif getattr(config, "tb4_sitl", False):
+        if "/odom" not in state_dict and "/scan" not in state_dict:
+            print("[checker] no TurtleBot4 state available")
+            return errs
+
+        errs = oracles.turtlebot.check(config, msg_list, state_dict, feedback_list)
 
     elif config.tb3_sitl or config.tb3_hitl:
         if (
@@ -148,6 +161,16 @@ def run_checks(config, msg_list, state_dict, feedback_list=[]):
         errs = oracles.turtlebot.check(config, msg_list, state_dict, feedback_list)
 
     elif config.px4_sitl:
+        if getattr(config, "target_profile_name", "") == "px4_v117_jazzy":
+            if (
+                "/VehicleStatus_PubSubTopic" not in state_dict
+                and "/VehicleLocalPosition_PubSubTopic" not in state_dict
+                and "/VehicleAttitude_PubSubTopic" not in state_dict
+            ):
+                print("[checker] no PX4 v1.17 state available")
+                return errs
+            return oracles.px4.check(config, msg_list, state_dict, feedback_list)
+
         if (
             "/ActuatorArmed_PubSubTopic" not in state_dict
             and "/ActuatorOutputs_PubSubTopic" not in state_dict

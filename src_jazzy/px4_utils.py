@@ -5,13 +5,15 @@ import json
 import pickle
 
 import rclpy
-from px4_msgs.msg import (
-    Timesync,
-    VehicleCommand,
-    TrajectorySetpoint,
-    OffboardControlMode,
-    ManualControlSetpoint,
-)
+from px4_msgs.msg import VehicleCommand, TrajectorySetpoint, OffboardControlMode
+try:
+    from px4_msgs.msg import Timesync
+except ImportError:
+    Timesync = None
+try:
+    from px4_msgs.msg import ManualControlSetpoint
+except ImportError:
+    ManualControlSetpoint = None
 from rosidl_runtime_py import message_to_ordereddict, set_message_fields
 import rosidl_parser.definition
 
@@ -21,9 +23,9 @@ os.environ["MAVLINK20"] = "1"
 from pymavlink import mavutil
 
 
-# TODO: add all parameters and their metadata
-# params related to the bugs pgfuzz found first
-param_dict = pickle.load(open("px4_prep/params.pkl", "rb"))
+# TODO: add all parameters and their metadata.
+# Jazzy/PX4 v1.17 ROS smoke mode must not require the old v1.12 params.pkl.
+param_dict = None
 # {name: type, min, max, default, unit}
 
 # param_dict = {
@@ -68,22 +70,27 @@ class Px4BridgeNode:
     def __init__(self, name="px4_bridge", use_mavlink=True, debug=False):
         self.use_mavlink = use_mavlink
         self.debug = debug
+        self.ts = int(time.time() * 1_000_000)
 
         if not self.use_mavlink:
             self.node_handle = rclpy.create_node(name)
 
-            self.sub_timesync = self.node_handle.create_subscription(
-                Timesync, "Timesync_PubSubTopic", self.timesync_callback, 10
-            )
+            if Timesync is not None:
+                self.sub_timesync = self.node_handle.create_subscription(
+                    Timesync,
+                    "/fmu/out/timesync",
+                    self.timesync_callback,
+                    10,
+                )
 
             self.pub_offboard_control_mode = self.node_handle.create_publisher(
-                OffboardControlMode, "/OffboardControlMode_PubSubTopic", 10
+                OffboardControlMode, "/fmu/in/offboard_control_mode", 10
             )
             self.pub_vehiclecommand = self.node_handle.create_publisher(
-                VehicleCommand, "/VehicleCommand_PubSubTopic", 10
+                VehicleCommand, "/fmu/in/vehicle_command", 10
             )
             self.pub_trajectory = self.node_handle.create_publisher(
-                TrajectorySetpoint, "/TrajectorySetpoint_PubSubTopic", 10
+                TrajectorySetpoint, "/fmu/in/trajectory_setpoint", 10
             )
 
     def init_mavlink(self):
@@ -103,12 +110,14 @@ class Px4BridgeNode:
         self.ts = msg.timestamp
 
     def get_timestamp(self):
+        if Timesync is None or not getattr(self, "ts", None):
+            self.ts = int(time.time() * 1_000_000)
         return self.ts
 
     def publish_offboard_mode(self):
         msg = VehicleCommand()
         msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
-        msg.timestamp = self.ts
+        msg.timestamp = self.get_timestamp()
         msg.param1 = 1.0
         msg.param2 = 6.0
         msg.target_system = 1
@@ -121,26 +130,28 @@ class Px4BridgeNode:
 
     def publish_offboard_control_mode(self, use_velocity=False):
         msg = OffboardControlMode()
-        msg.timestamp = self.ts
+        msg.timestamp = self.get_timestamp()
         if use_velocity:
             # Velocity control: direct velocity-to-thrust mapping
-            msg.position = False
-            msg.velocity = True
+            _set_if_present(msg, "position", False)
+            _set_if_present(msg, "velocity", True)
         else:
             # Position control: position controller tracks velocity setpoints
             # with overshoot potential — better for bug finding
-            msg.position = True
-            msg.velocity = False
-        msg.acceleration = False
-        msg.attitude = False
-        msg.body_rate = False
+            _set_if_present(msg, "position", True)
+            _set_if_present(msg, "velocity", False)
+        _set_if_present(msg, "acceleration", False)
+        _set_if_present(msg, "attitude", False)
+        _set_if_present(msg, "body_rate", False)
+        _set_if_present(msg, "thrust_and_torque", False)
+        _set_if_present(msg, "direct_actuator", False)
         # print(msg)
         self.pub_offboard_control_mode.publish(msg)
 
     def publish_arm_command(self):
         msg = VehicleCommand()
         msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-        msg.timestamp = self.ts
+        msg.timestamp = self.get_timestamp()
         msg.param1 = 1.0
         msg.target_system = 1
         msg.target_component = 1
@@ -151,33 +162,12 @@ class Px4BridgeNode:
         self.pub_vehiclecommand.publish(msg)
 
     def publish_trajectory(self, msg):
-        # msg = TrajectorySetpoint()
-        msg.timestamp = self.ts
-
-        # msg.x = float(random.randint(-1000, 1000)) / random.randint(1, 5)
-        # msg.y = float(random.randint(-1000, 1000)) / random.randint(1, 5)
-        # msg.z = float(random.randint(-100, -1)) / random.randint(1, 5)
-        # msg.x = 0.0
-        # msg.y = 0.0
-        # msg.z = -2.0
-
-        # if self.bit:
-        # msg.yaw = -3.14
-        # else:
-        # msg.yaw = 0.0
-        # self.bit ^= 1
-        # msg.yaw = 0.0
-        # msg.yawspeed = msg.yawspeed
-
-        # msg.vx = 0.0
-        # msg.vy = 0.0
-        # msg.vz = 0.0
-
-        # print(msg)
+        msg.timestamp = self.get_timestamp()
         self.pub_trajectory.publish(msg)
 
     def mav_get_param_default(self, param_name):
-        return param_dict[param_name]["default"]
+        params = _load_param_dict()
+        return params[param_name]["default"]
 
     def mav_set_param_msg(self, msg):
         # wrapper for pub_function
@@ -275,28 +265,27 @@ class Px4BridgeNode:
             # setpoints (>2Hz) before this mode can be engaged.
             # Use POSITION mode for takeoff.
             dummy = TrajectorySetpoint()
-            dummy.x = 0.0
-            dummy.y = 0.0
-            dummy.z = -8.0  # NED: 8m above ground
+            _set_position(dummy, 0.0, 0.0, -8.0)  # NED: 8m above ground
+            _set_velocity(dummy, 0.0, 0.0, 0.0)
             for i in range(50):
-                rclpy.spin_once(self.node_handle)
+                rclpy.spin_once(self.node_handle, timeout_sec=0.0)
                 self.publish_offboard_control_mode(use_velocity=False)
                 self.publish_trajectory(dummy)
                 time.sleep(0.1)
 
-            rclpy.spin_once(self.node_handle)
+            rclpy.spin_once(self.node_handle, timeout_sec=0.0)
             self.publish_offboard_mode()
             time.sleep(0.1)
 
             # The vehicle must be armed before this mode can be engaged.
-            rclpy.spin_once(self.node_handle)
+            rclpy.spin_once(self.node_handle, timeout_sec=0.0)
             self.publish_arm_command()
             time.sleep(0.1)
 
             # Wait for takeoff: keep sending position setpoint until airborne
             # (similar to put_in_air() in MAVLink mode)
             for i in range(80):
-                rclpy.spin_once(self.node_handle)
+                rclpy.spin_once(self.node_handle, timeout_sec=0.0)
                 self.publish_offboard_control_mode(use_velocity=False)
                 self.publish_trajectory(dummy)
                 time.sleep(0.1)
@@ -366,14 +355,12 @@ class Px4BridgeNode:
             )
 
         else:
-            rclpy.spin_once(self.node_handle)
+            rclpy.spin_once(self.node_handle, timeout_sec=0.0)
             # Fuzz phase uses velocity mode so vx/vy/vz are interpreted as
             # velocity setpoints. Position fields must be NaN to prevent
             # PX4 from tracking them as position targets.
             self.publish_offboard_control_mode(use_velocity=True)
-            msg.x = float('nan')
-            msg.y = float('nan')
-            msg.z = float('nan')
+            _set_position(msg, float("nan"), float("nan"), float("nan"))
             self.publish_trajectory(msg)
             print("[offboard controller] sending:", msg)
 
@@ -447,14 +434,20 @@ class Px4BridgeNode:
 
 def get_init_trajectory_msg():
     msg = TrajectorySetpoint()
-    msg.x = 0.0
-    msg.y = 0.0
-    msg.z = -5.0
+    _set_position(msg, float("nan"), float("nan"), float("nan"))
+    _set_velocity(msg, 0.0, 0.0, 0.0)
+    _set_acceleration(msg, float("nan"), float("nan"), float("nan"))
+    if hasattr(msg, "yaw"):
+        msg.yaw = 0.0
+    if hasattr(msg, "yawspeed"):
+        msg.yawspeed = 0.0
 
     return msg
 
 
 def get_init_manual_control_msg():
+    if ManualControlSetpoint is None:
+        raise RuntimeError("px4_msgs/msg/ManualControlSetpoint is unavailable")
     msg = ManualControlSetpoint()
 
     # corresponds to joystick position
@@ -472,6 +465,58 @@ def get_init_parameter_msg():
     msg.value = 2.5
 
     return msg
+
+
+def _load_param_dict():
+    global param_dict
+    if param_dict is None:
+        try:
+            param_dict = pickle.load(open("px4_prep/params.pkl", "rb"))
+        except FileNotFoundError:
+            param_dict = {}
+    return param_dict
+
+
+def _set_vector_field(msg, field_name, values):
+    if not hasattr(msg, field_name):
+        return False
+    try:
+        setattr(msg, field_name, list(values))
+    except (TypeError, AttributeError):
+        seq = getattr(msg, field_name)
+        for idx, value in enumerate(values):
+            seq[idx] = value
+    return True
+
+
+def _set_if_present(msg, field_name, value):
+    if hasattr(msg, field_name):
+        setattr(msg, field_name, value)
+
+
+def _set_position(msg, x, y, z):
+    if _set_vector_field(msg, "position", (x, y, z)):
+        return
+    if hasattr(msg, "x"):
+        msg.x = x
+        msg.y = y
+        msg.z = z
+
+
+def _set_velocity(msg, vx, vy, vz):
+    if _set_vector_field(msg, "velocity", (vx, vy, vz)):
+        return
+    if hasattr(msg, "vx"):
+        msg.vx = vx
+        msg.vy = vy
+        msg.vz = vz
+
+
+def _set_acceleration(msg, ax, ay, az):
+    if _set_vector_field(msg, "acceleration", (ax, ay, az)):
+        return
+    if hasattr(msg, "acceleration"):
+        msg.acceleration = [ax, ay, az]
 
 
 def read_trajectory_seed(seedfile):

@@ -23,6 +23,7 @@ from collections import deque  # kept for non-PX4 targets
 from copy import deepcopy
 import json
 import shutil
+import glob
 
 import numpy as np
 import sysv_ipc as ipc
@@ -33,6 +34,7 @@ import ros_utils
 import mutator
 import harness
 import checker
+import target_profiles
 from rosbag_parser import RosbagParser
 from ulg_parser import UlgStateParser, find_latest_ulg, cleanup_ulg_files, preserve_ulg_on_error
 from checker import StateMonitorNode
@@ -46,7 +48,10 @@ from ros2node.api import *
 
 # from ros2msg.api import get_all_message_types, get_message_path
 # from ros2srv.api import get_all_service_types
-from rqt_graph.rosgraph2_impl import Graph
+try:
+    from rqt_graph.rosgraph2_impl import Graph
+except ImportError:
+    Graph = None
 from ros2topic.api import get_msg_class
 from rosidl_runtime_py import message_to_ordereddict, set_message_fields
 
@@ -55,7 +60,10 @@ from ros2_fuzzer.process_handling import FuzzedNodeHandler
 
 from std_msgs.msg import Bool, String
 from tracer import APITracer
-from turtlesim.msg import Pose
+try:
+    from turtlesim.msg import Pose as TurtleSimPose
+except ImportError:
+    TurtleSimPose = None
 
 
 def moveit_error_signature(errs):
@@ -358,7 +366,10 @@ class Fuzzer:
                         seed_list.append(msg)
                     self.queue.append(seed_list)
 
-            elif self.config.px4_ros:
+            elif (
+                self.config.px4_ros
+                and self.config.target_profile_name != "px4_v117_jazzy"
+            ):
                 # --- ROS velocity mode boundary seeds ---
                 # Domain: vx/vy [-12,12], vz [-1,5], yaw [-pi,pi], yawspeed [-3.49,3.49]
                 from px4_msgs.msg import TrajectorySetpoint
@@ -425,6 +436,53 @@ class Fuzzer:
                     )
                     for seq in seq_seeds:
                         self.queue.append(seq)
+
+        elif self.config.tb4_sitl or self.config.tb3_sitl or self.config.tb3_hitl:
+            import seed_generator
+
+            if self.config.input_type == "geometry_msgs/msg/TwistStamped":
+                from geometry_msgs.msg import TwistStamped as VelocityMsg
+                platform = "tb4"
+                velocity_seeds = [
+                    (0.20, 0.0),
+                    (-0.15, 0.0),
+                    (0.0, 1.0),
+                    (0.0, -1.0),
+                    (0.15, 0.75),
+                    (0.15, -0.75),
+                ]
+            else:
+                from geometry_msgs.msg import Twist as VelocityMsg
+                platform = "tb3"
+                velocity_seeds = [
+                    (0.22, 0.0),
+                    (-0.22, 0.0),
+                    (0.0, 2.84),
+                    (0.0, -2.84),
+                    (0.22, 2.84),
+                    (0.22, -2.84),
+                    (-0.22, 2.84),
+                    (0.11, 1.42),
+                    (0.20, 0.0),
+                    (0.0, 2.80),
+                ]
+
+            for (lin_x, ang_z) in velocity_seeds:
+                msg = VelocityMsg()
+                target = msg.twist if hasattr(msg, "twist") else msg
+                target.linear.x = lin_x
+                target.angular.z = ang_z
+                self.queue.append(msg)
+
+            if self.config.schedule == Campaign.RND_SEQUENCE:
+                seq_seeds = seed_generator.generate_sequence_seeds(
+                    platform,
+                    VelocityMsg,
+                    seqlen=self.config.seqlen
+                        if hasattr(self.config, "seqlen") else 10,
+                )
+                for seq in seq_seeds:
+                    self.queue.append(seq)
 
         elif self.config.test_moveit:
             # Multi-goal sequence mode with semantic seed injection
@@ -516,6 +574,71 @@ class Fuzzer:
 
         if self.node_ptr is None:
             self.node_ptr = rclpy.create_node("_fuzzer")
+
+        if self.config.target_profile is not None:
+            profile = self.config.target_profile
+            stdout_log_path = os.path.join(
+                self.config.log_dir,
+                "target.stdout.log",
+            )
+            try:
+                stdout_log_offset = os.path.getsize(stdout_log_path)
+            except OSError:
+                stdout_log_offset = 0
+            self.ros_pgrp = harness.run_target_profile(
+                profile,
+                self.config.proj_root,
+                log_dir=self.config.log_dir,
+            )
+            ok, log_graph = harness.wait_for_log_patterns(
+                stdout_log_path,
+                profile.required_log_patterns_for_readiness,
+                since_offset=stdout_log_offset,
+                timeout_sec=180 if profile.family == "px4" else 120,
+            )
+            log_graph_path = os.path.join(
+                self.config.meta_dir,
+                "log_readiness.ready.json",
+            )
+            with open(log_graph_path, "w") as fp:
+                json.dump(log_graph, fp, indent=2, sort_keys=True)
+            if not ok:
+                raise RuntimeError(
+                    f"target profile {profile.name} did not emit "
+                    "required launch log patterns before timeout"
+                )
+            ok, topic_graph = harness.wait_for_topics(
+                profile.required_topics_for_readiness,
+                timeout_sec=180 if profile.family == "px4" else 120,
+            )
+            graph_path = os.path.join(
+                self.config.meta_dir,
+                "topic_graph.ready.json",
+            )
+            with open(graph_path, "w") as fp:
+                json.dump(topic_graph, fp, indent=2, sort_keys=True)
+            if not ok:
+                raise RuntimeError(
+                    f"target profile {profile.name} did not expose "
+                    "required topics before timeout"
+                )
+            ok, action_graph = harness.wait_for_actions(
+                profile.required_actions_for_readiness,
+                timeout_sec=180 if profile.family == "px4" else 120,
+            )
+            action_graph_path = os.path.join(
+                self.config.meta_dir,
+                "action_graph.ready.json",
+            )
+            with open(action_graph_path, "w") as fp:
+                json.dump(action_graph, fp, indent=2, sort_keys=True)
+            if not ok:
+                raise RuntimeError(
+                    f"target profile {profile.name} did not expose "
+                    "required actions before timeout"
+                )
+            self.running = True
+            return
 
         if self.config.px4_sitl:
             print("[*] Starting PX4 SITL stack & Gazebo simulator")
@@ -650,7 +773,26 @@ class Fuzzer:
             print("[-] nothing to kill")
             return
 
-        if self.config.px4_sitl:
+        if self.config.target_profile is not None:
+            try:
+                os.killpg(self.ros_pgrp.pid, signal.SIGKILL)
+                for fp in getattr(
+                    self.ros_pgrp, "_robofuzz_log_handles", None
+                ) or ():
+                    try:
+                        fp.close()
+                    except OSError:
+                        pass
+                self.running = False
+            except ProcessLookupError as e:
+                print("[-] profile target killpg error:", e)
+            except Exception as e:
+                print("[-] profile target killpg failed:", e)
+
+            if getattr(self.config, "target_family", None) == "moveit":
+                harness.sweep_moveit_processes()
+
+        elif self.config.px4_sitl:
             # Only kill PX4, keep Gazebo alive for reuse across iterations
             # (original RoboFuzz behavior — avoids zombie/port issues)
             os.system("pkill px4")
@@ -692,7 +834,10 @@ class Fuzzer:
         # kill target if still exists
         self.kill_target()
         self.kill_monitor()
-        self.executor.kill_rosbag()
+        try:
+            self.executor.kill_rosbag()
+        except AttributeError:
+            pass
 
         # clear subscriptions
         if self.node_ptr is not None:
@@ -720,6 +865,17 @@ def inspect_target(fuzzer):
 
     built_in_msg_types = ros_utils.get_all_message_types()
     subscriptions = ros_utils.get_subscriptions(fuzzer.node_ptr)
+
+    if fuzzer.config.target_profile is not None:
+        profile = fuzzer.config.target_profile
+        topic_name = profile.input_topic
+        msg_type = profile.input_type
+        if profile.family == "moveit":
+            topic_name = "/metatopic"
+            msg_type = "geometry_msgs/msg/Pose"
+        msg_type_class = _msg_class_from_type(msg_type)
+        fuzz_targets.append([topic_name, msg_type_class, profile.name])
+        return fuzz_targets
 
     if fuzzer.config.px4_sitl:
         if fuzzer.config.use_mavlink:
@@ -825,6 +981,14 @@ def inspect_target(fuzzer):
     return fuzz_targets
 
 
+def _msg_class_from_type(msg_type):
+    msg_pkg = msg_type.split("/")[0]
+    msg_name = msg_type.split("/")[-1]
+    if msg_pkg in ros_utils.get_all_message_types().keys():
+        return ros_utils.get_msg_class_from_name(msg_pkg, msg_name)
+    return ros_utils.find_custom_msg(msg_type)
+
+
 def inspect_secure_target(fuzzer):
     fuzz_targets = []
 
@@ -902,7 +1066,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
         campaign = fuzzer.config.schedule
         # Use fast float deterministic stages for TB3 (skip meaningless
         # bit flips on float64 fields)
-        fast_float = (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl)
+        fast_float = (
+            fuzzer.config.tb4_sitl
+            or fuzzer.config.tb3_sitl
+            or fuzzer.config.tb3_hitl
+        )
         scheduler = Scheduler(fuzzer, campaign, target,
                               fast_float_determ=fast_float)
 
@@ -931,16 +1099,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ]
 
             else:
-                field_whitelist = [
-                    # ["x", np.dtype("float32")],
-                    # ["y", np.dtype("float32")],
-                    # ["z", np.dtype("float32")],
-                    ["yaw", np.dtype("float64")],
-                    ["yawspeed", np.dtype("float64")],
-                    ["vx", np.dtype("float64")],
-                    ["vy", np.dtype("float64")],
-                    ["vz", np.dtype("float64")],
-                ]
+                if fuzzer.config.target_profile_name == "px4_v117_jazzy":
+                    field_whitelist = [
+                        ["yaw", np.dtype("float32")],
+                        ["yawspeed", np.dtype("float32")],
+                    ]
+                else:
+                    field_whitelist = [
+                        # ["x", np.dtype("float32")],
+                        # ["y", np.dtype("float32")],
+                        # ["z", np.dtype("float32")],
+                        ["yaw", np.dtype("float64")],
+                        ["yawspeed", np.dtype("float64")],
+                        ["vx", np.dtype("float64")],
+                        ["vy", np.dtype("float64")],
+                        ["vz", np.dtype("float64")],
+                    ]
 
             fbk = Feedback("imu_accel_inconsistency", FeedbackType.INC)
             fbk_list.append(fbk)
@@ -978,6 +1152,18 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # New: guides fuzzer toward control loop stalls
             fbk = Feedback("control_loop_gap", FeedbackType.INC)
             fbk_list.append(fbk)
+
+        elif fuzzer.config.tb4_sitl:
+            if fuzzer.config.input_type == "geometry_msgs/msg/TwistStamped":
+                field_whitelist = [
+                    ["twist", "linear", "x", np.dtype("float64")],
+                    ["twist", "angular", "z", np.dtype("float64")],
+                ]
+            else:
+                field_whitelist = [
+                    ["linear", "x", np.dtype("float64")],
+                    ["angular", "z", np.dtype("float64")],
+                ]
 
         elif fuzzer.config.tb3_hitl:
             field_whitelist = [
@@ -1306,14 +1492,17 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     # test px4 over ROS
                     pre_exec_list.extend([
                         (fuzzer.px4_bridge.prepare_flight, (fuzzer.config.flight_mode,)),
-                        (collision_checker.listen, (collision_topics,)),
                     ])
+                    if fuzzer.config.target_profile_name != "px4_v117_jazzy":
+                        pre_exec_list.append(
+                            (collision_checker.listen, (collision_topics,))
+                        )
 
                     pub_function = fuzzer.px4_bridge.send_command
 
-                    post_exec_list = [
-                        (collision_checker.stop, ()),
-                    ]
+                    post_exec_list = []
+                    if fuzzer.config.target_profile_name != "px4_v117_jazzy":
+                        post_exec_list.append((collision_checker.stop, ()))
 
                 else:
                     # test px4 over mavlink using manual control commands
@@ -1416,9 +1605,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         state_msgs_dict = parser.process_all_messages()
                 else:
                     # --- Rosbag path: original behavior ---
-                    parser = RosbagParser(
-                        f"states-{exec_cnt}.bag/states-{exec_cnt}.bag_0.db3"
-                    )
+                    bag_db = _find_rosbag_db(exec_cnt)
+                    if bag_db is None:
+                        errs.append(f"rosbag db for execution {exec_cnt} not found")
+                        continue
+                    parser = RosbagParser(bag_db)
 
                     if parser.abort:
                         print("[-] corrupted recorded states. Abort.")
@@ -1829,6 +2020,24 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     scheduler.is_new_cycle = True
                     print("--- cycle finished ---")
 
+            fuzzer.rounds += 1
+            if fuzzer.config.maxloop > 0 and fuzzer.rounds >= fuzzer.config.maxloop:
+                print(f"[*] Reached maxloop={fuzzer.config.maxloop}; stopping")
+                break
+
+
+def _find_rosbag_db(exec_cnt):
+    bag_dir = f"states-{exec_cnt}.bag"
+    candidates = [
+        f"{bag_dir}/{bag_dir}_0.db3",
+        f"{bag_dir}/states-{exec_cnt}_0.db3",
+    ]
+    candidates.extend(sorted(glob.glob(os.path.join(bag_dir, "*.db3"))))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
 
 def main(config):
     print(
@@ -1875,8 +2084,12 @@ def main(config):
     # else:
     #     fuzzer.oh_ = OracleHandler(fuzzer, "turtlesim")
 
-    # for ros graph inspection
-    fuzzer.run_target(config.rospkg, config.rosnode, config.exec_cmd)
+    # Legacy targets need graph inspection. Modern profiles already declare
+    # their input topic/type and launch the target during execution.
+    if config.target_profile is None:
+        fuzzer.run_target(config.rospkg, config.rosnode, config.exec_cmd)
+    else:
+        print(f"[*] Using target profile {config.target_profile_name}")
 
     # pp = pprint.PrettyPrinter(indent=2)
 
@@ -1916,7 +2129,7 @@ def main(config):
             try:
                 fuzz_targets = inspect_target(fuzzer)
 
-                if not config.persistent:
+                if not config.persistent and config.target_profile is None:
                     fuzzer.kill_target()
 
                 fuzz_msg(fuzzer, fuzz_targets)
@@ -2032,6 +2245,21 @@ if __name__ == "__main__":
     )
     argparser.add_argument(
         "--fuzz-seed", type=str, help="seed file for mutation"
+    )
+    argparser.add_argument(
+        "--target-profile",
+        choices=sorted(target_profiles.KNOWN_PROFILES),
+        help="Jazzy target profile to run",
+    )
+    argparser.add_argument(
+        "--tb4-sitl",
+        action="store_true",
+        help="shortcut to testing TurtleBot4 Jazzy in SITL mode",
+    )
+    argparser.add_argument(
+        "--px4-v117-sitl",
+        action="store_true",
+        help="shortcut to testing PX4 v1.17 Jazzy SITL over uXRCE-DDS",
     )
     argparser.add_argument(
         "--px4-sitl-ros",
@@ -2181,6 +2409,26 @@ if __name__ == "__main__":
     config.rosnode = args.ros_node
     config.watchlist = args.watchlist
 
+    selected_profile_name = target_profiles.resolve_profile_name(
+        target_profile=args.target_profile,
+        tb4=args.tb4_sitl,
+        px4_v117=args.px4_v117_sitl,
+        test_moveit=args.test_moveit,
+        legacy_tb3=args.tb3_sitl,
+    )
+    selected_profile = None
+    if selected_profile_name:
+        selected_profile = target_profiles.load_profile(
+            selected_profile_name,
+            config.proj_root,
+        )
+        target_profiles.attach_profile_to_config(config, selected_profile)
+        _, resolved_watchlist = target_profiles.write_profile_metadata(
+            selected_profile,
+            config.meta_dir,
+        )
+        config.watchlist = resolved_watchlist
+
     if args.schedule == "single":
         config.schedule = Campaign.RND_SINGLE
         config.seqlen = 1
@@ -2204,7 +2452,17 @@ if __name__ == "__main__":
     else:
         config.debug_wait = False
 
-    if args.px4_sitl_ros:
+    if selected_profile is not None and selected_profile.family == "px4":
+        import px4_utils
+        config.px4_sitl = True
+        config.px4_ros = True
+        config.use_mavlink = False
+        config.exp_pgfuzz = False
+        config.px4_mission_file = args.px4_mission
+        config.flight_mode = "OFFBOARD"
+    elif args.px4_sitl_ros:
+        print("[legacy] --px4-sitl-ros uses the pre-Jazzy PX4 path; "
+              "prefer --target-profile px4_v117_jazzy")
         config.px4_sitl = True
         config.px4_ros = True
         config.use_mavlink = False
@@ -2214,6 +2472,7 @@ if __name__ == "__main__":
         config.px4_mission_file = args.px4_mission
         config.flight_mode = args.px4_flight_mode.upper()
     elif args.px4_sitl_mav:
+        print("[legacy] --px4-sitl-mav uses the pre-Jazzy PX4 path")
         config.px4_sitl = True
         config.px4_ros = False
         config.use_mavlink = True
@@ -2221,6 +2480,7 @@ if __name__ == "__main__":
         config.exp_pgfuzz = False
         import px4_utils
     elif args.px4_sitl_pgfuzz:
+        print("[legacy] --px4-sitl-pgfuzz uses the pre-Jazzy PX4 path")
         config.px4_sitl = True
         config.px4_ros = False
         config.use_mavlink = True
@@ -2233,7 +2493,10 @@ if __name__ == "__main__":
         config.exp_pgfuzz = False
         config.use_mavlink = False
 
-    if args.tb3_sitl:
+    if selected_profile is not None and selected_profile.family == "turtlebot":
+        config.tb4_sitl = True
+        config.tb3_sitl = False
+    elif args.tb3_sitl:
         config.tb3_sitl = True
     else:
         config.tb3_sitl = False
@@ -2354,7 +2617,10 @@ if __name__ == "__main__":
     else:
         config.test_rosidl = False
 
-    if args.test_moveit:
+    if selected_profile is not None and selected_profile.family == "moveit":
+        from moveit_msgs.msg import Constraints, JointConstraint
+        config.test_moveit = True
+    elif args.test_moveit:
         from moveit_msgs.msg import Constraints, JointConstraint
         config.test_moveit = True
     else:
@@ -2363,7 +2629,10 @@ if __name__ == "__main__":
     config.use_ulg = args.use_ulg
 
     config.exec_cmd = None
-    ret = config.find_package_metadata()
+    if selected_profile is not None:
+        ret = -1
+    else:
+        ret = config.find_package_metadata()
 
     if ret < 0:
         if args.exec_cmd == "px4":

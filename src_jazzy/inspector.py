@@ -4,6 +4,19 @@ def inspect_target(fuzzer):
     built_in_msg_types = ros_utils.get_all_message_types()
     subscriptions = ros_utils.get_subscriptions(fuzzer.node_ptr)
 
+    if fuzzer.config.target_profile is not None:
+        profile = fuzzer.config.target_profile
+        topic_name = profile.input_topic
+        msg_type = profile.input_type
+        if profile.family == "moveit":
+            topic_name = "/metatopic"
+            msg_type = "geometry_msgs/msg/Pose"
+        msg_pkg = msg_type.split("/")[0]
+        msg_name = msg_type.split("/")[-1]
+        msg_type_class = ros_utils.get_msg_class_from_name(msg_pkg, msg_name)
+        fuzz_targets.append([topic_name, msg_type_class, profile.name])
+        return fuzz_targets
+
     if fuzzer.config.px4_sitl:
         if fuzzer.config.use_mavlink:
             topic_name = "/dummy_mavlink_topic"

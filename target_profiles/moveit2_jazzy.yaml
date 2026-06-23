@@ -1,7 +1,7 @@
 schema_version: 1
 name: moveit2_jazzy
 display_name: MoveIt2 Jazzy Panda
-status: scaffold
+status: launch_smoke_verified
 
 environment:
   ubuntu: "24.04"
@@ -11,6 +11,8 @@ environment:
 packages:
   apt:
     - ros-jazzy-moveit
+    - ros-jazzy-moveit-resources-panda-description
+    - ros-jazzy-moveit-resources-panda-moveit-config
 
 target:
   family: moveit
@@ -19,14 +21,26 @@ target:
 
 launch:
   adapter: ros2_launch
-  package: moveit2_tutorials
-  launch_file: move_group.launch.py
+  package: moveit_resources_panda_moveit_config
+  launch_file: demo.launch.py
+  args:
+    ros2_control_hardware_type: mock_components
   command:
     - ros2
     - launch
-    - moveit2_tutorials
-    - move_group.launch.py
-  note: Source tutorials/resources may be required for the Panda demo launch file even when ros-jazzy-moveit is installed from apt.
+    - moveit_resources_panda_moveit_config
+    - demo.launch.py
+  note: Jazzy apt does not provide moveit2_tutorials as a binary package; the Panda demo assets are supplied by moveit_resources_panda_moveit_config.
+
+readiness:
+  required_log_patterns:
+    - "You can start planning now!"
+    - "Configured and activated panda_arm_controller"
+  required_actions:
+    /move_action: moveit_msgs/action/MoveGroup
+    /panda_arm_controller/follow_joint_trajectory: control_msgs/action/FollowJointTrajectory
+  notes:
+    - MoveIt topic/action readiness is not enough after per-round restarts because ROS graph discovery can briefly expose stale endpoints; wait for current-launch log markers before checking graph readiness and sending fuzz goals.
 
 input:
   mode: motion_plan_request
@@ -36,10 +50,14 @@ input:
 
 watch:
   required:
-    /motion_plan_request: moveit_msgs/msg/MotionPlanRequest
     /joint_states: sensor_msgs/msg/JointState
-    /panda_arm_controller/state: control_msgs/msg/JointTrajectoryControllerState
+    /panda_arm_controller/controller_state: control_msgs/msg/JointTrajectoryControllerState
+  expected_after_planning:
+    /motion_plan_request: moveit_msgs/msg/MotionPlanRequest
     /move_action/_action/status: action_msgs/msg/GoalStatusArray
+  compatibility_notes:
+    - Jazzy Panda resources expose /panda_arm_controller/controller_state instead of the Foxy-era /panda_arm_controller/state.
+    - Hidden action status topics should be inspected with "ros2 topic list --include-hidden-topics" during smoke tests.
 
 oracle:
   module: oracles.moveit
