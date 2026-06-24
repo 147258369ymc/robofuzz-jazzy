@@ -40,12 +40,18 @@ class _FakeFuture:
 
 
 class _FakeGoalHandle:
-    def __init__(self, result_value):
+    def __init__(self, result_value, record=None):
         self.accepted = True
         self._result_value = result_value
+        self._record = record
 
     def get_result_async(self):
         return _FakeFuture(self._result_value)
+
+    def cancel_goal_async(self):
+        if self._record is not None:
+            self._record["cancel_requested"] = True
+        return _FakeFuture(_Auto())
 
 
 def _build_moveit_fakes(record):
@@ -54,12 +60,20 @@ def _build_moveit_fakes(record):
     fake_rclpy = types.ModuleType("rclpy")
 
     class _FakePublisher:
+        def __init__(self, topic):
+            self.topic = topic
+
         def publish(self, _msg):
             record["published"] = record.get("published", 0) + 1
+            record.setdefault("published_by_topic", {}).setdefault(
+                self.topic,
+                [],
+            ).append(_msg)
 
     class _FakeNode:
-        def create_publisher(self, *_a, **_k):
-            return _FakePublisher()
+        def create_publisher(self, _msg_type, topic, *_a, **_k):
+            record.setdefault("created_publishers", []).append(topic)
+            return _FakePublisher(topic)
 
         def destroy_node(self):
             record["destroyed"] = True
@@ -70,9 +84,14 @@ def _build_moveit_fakes(record):
 
     fake_rclpy.create_node = _create_node
     fake_rclpy.spin_once = lambda _node, timeout_sec=None: None
-    fake_rclpy.spin_until_future_complete = (
-        lambda _node, _future, timeout_sec=None: None
-    )
+
+    def _spin_until_future_complete(_node, future, timeout_sec=None):
+        record.setdefault("spin_timeouts", []).append(timeout_sec)
+        complete = getattr(future, "complete", None)
+        if callable(complete):
+            complete()
+
+    fake_rclpy.spin_until_future_complete = _spin_until_future_complete
 
     fake_rclpy_action = types.ModuleType("rclpy.action")
 
@@ -86,9 +105,12 @@ def _build_moveit_fakes(record):
 
         def send_goal_async(self, goal):
             record["goal"] = goal
-            result_wrapper = _Auto()
-            result_wrapper.result.error_code.val = 1
-            return _FakeFuture(_FakeGoalHandle(result_wrapper))
+            if "result_value" in record:
+                result_wrapper = record["result_value"]
+            else:
+                result_wrapper = _Auto()
+                result_wrapper.result.error_code.val = 1
+            return _FakeFuture(_FakeGoalHandle(result_wrapper, record))
 
     fake_rclpy_action.ActionClient = _FakeActionClient
 
@@ -104,6 +126,21 @@ def _build_moveit_fakes(record):
     moveit_msg.MotionPlanRequest = _Auto
     moveit_msg.OrientationConstraint = _Auto
     moveit_msg.PositionConstraint = _Auto
+
+    std_msgs_msg = types.ModuleType("std_msgs.msg")
+
+    class _Int32:
+        def __init__(self):
+            self.data = 0
+
+    class _String:
+        def __init__(self):
+            self.data = ""
+
+    std_msgs_msg.Int32 = _Int32
+    std_msgs_msg.String = _String
+    std_msgs_pkg = types.ModuleType("std_msgs")
+    std_msgs_pkg.msg = std_msgs_msg
 
     moveit_pkg = types.ModuleType("moveit_msgs")
     moveit_pkg.action = moveit_action
@@ -130,6 +167,8 @@ def _build_moveit_fakes(record):
         "moveit_msgs.msg": moveit_msg,
         "shape_msgs": shape_pkg,
         "shape_msgs.msg": shape_msg,
+        "std_msgs": std_msgs_pkg,
+        "std_msgs.msg": std_msgs_msg,
         "rosidl_runtime_py": rosidl_runtime_py,
     }
 
@@ -220,6 +259,55 @@ class MoveItHarnessTests(unittest.TestCase):
                 node_name.startswith("_moveit_profile_client_"),
                 node_name,
             )
+
+    def test_send_command_publishes_moveit_result_diagnostics(self):
+        record = {}
+        fakes = _build_moveit_fakes(record)
+        with mock.patch.dict(sys.modules, fakes):
+            sys.modules.pop("harness", None)
+            harness = importlib.import_module("harness")
+
+            goal_pose = _Auto()
+            goal_pose.position.x = 0.4
+            goal_pose.position.y = 0.1
+            goal_pose.position.z = 0.5
+            goal_pose.orientation.w = 1.0
+
+            harness.moveit_send_command(goal_pose)
+
+        published = record["published_by_topic"]
+        result_codes = published["/robofuzz/moveit_result_code"]
+        events = published["/robofuzz/moveit_goal_event"]
+        self.assertEqual(1, result_codes[-1].data)
+        self.assertIn("result", events[-1].data)
+        self.assertIn("1", events[-1].data)
+
+    def test_send_command_timeout_is_configurable_and_cancels_goal(self):
+        record = {"result_value": None}
+        fakes = _build_moveit_fakes(record)
+        with mock.patch.dict(sys.modules, fakes):
+            with mock.patch.dict(
+                os.environ,
+                {"MOVEIT_ACTION_TIMEOUT_SEC": "7.5"},
+                clear=False,
+            ):
+                sys.modules.pop("harness", None)
+                harness = importlib.import_module("harness")
+
+                goal_pose = _Auto()
+                goal_pose.position.x = 0.4
+                goal_pose.position.y = 0.1
+                goal_pose.position.z = 0.5
+                goal_pose.orientation.w = 1.0
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "MoveIt execution timed out",
+                ):
+                    harness.moveit_send_command(goal_pose)
+
+        self.assertIn(7.5, record["spin_timeouts"])
+        self.assertTrue(record.get("cancel_requested"))
 
     def test_wait_for_actions_uses_action_clients(self):
         record = {"clients": [], "lookups": []}

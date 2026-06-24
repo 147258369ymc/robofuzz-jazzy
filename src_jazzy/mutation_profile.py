@@ -95,6 +95,14 @@ _MOVEIT_FEEDBACK_STRATEGY_MAP = {
     "max_joint_vel_error": STRATEGY_REVERSAL,
     "mean_joint_pos_error": STRATEGY_SINGLE_EXTREME,
     "mean_joint_vel_error": STRATEGY_SINGLE_EXTREME,
+    "desired_vel_max_ratio": STRATEGY_BOUNDARY_PUSH,
+    "desired_acc_max_ratio": STRATEGY_REVERSAL,
+    "desired_jerk_max_ratio": STRATEGY_REVERSAL,
+    "success_endpoint_outlier_score": STRATEGY_TRAJECTORY_ARC,
+    "reachable_rejection_score": STRATEGY_BOUNDARY_PUSH,
+    "status_transition_anomaly_score": STRATEGY_SINGLE_EXTREME,
+    "tracking_error_growth": STRATEGY_TRAJECTORY_ARC,
+    "smoothness_violation_ratio": STRATEGY_REVERSAL,
 }
 
 

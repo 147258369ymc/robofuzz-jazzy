@@ -188,27 +188,39 @@ class Executor:
         self.rosbag_pgrp = sp.Popen(
             rosbag_cmd,
             start_new_session=True,
-            stdout=sp.PIPE,
-            stderr=sp.PIPE,
+            stdout=sp.DEVNULL,
+            stderr=sp.DEVNULL,
         )
         print("[executor] started ros2 bag recording")
 
         # need time for topics to be discovered
         time.sleep(1)
         if self.rosbag_pgrp.poll() is not None:
-            _, stderr = self.rosbag_pgrp.communicate(timeout=1)
-            print("[executor] ros2 bag exited early:", stderr.decode("utf-8", "ignore"))
+            print(
+                "[executor] ros2 bag exited early: "
+                f"returncode={self.rosbag_pgrp.returncode}"
+            )
 
     def kill_rosbag(self):
+        started = time.time()
         try:
             print("[executor] killing ros2 bag")
             pgrp = os.getpgid(self.rosbag_pgrp.pid)
             os.killpg(pgrp, signal.SIGINT)
             try:
                 self.rosbag_pgrp.wait(timeout=10)
+                print(
+                    "[executor] ros2 bag stopped in "
+                    f"{time.time() - started:.3f}s"
+                )
             except sp.TimeoutExpired:
+                print("[executor] ros2 bag did not stop after SIGINT; sending SIGKILL")
                 os.killpg(pgrp, signal.SIGKILL)
                 self.rosbag_pgrp.wait(timeout=5)
+                print(
+                    "[executor] ros2 bag killed in "
+                    f"{time.time() - started:.3f}s"
+                )
         except ProcessLookupError as e:
             print("[-] ros2 bag killpg error:", e)
         except AttributeError as e:
@@ -464,7 +476,12 @@ class Executor:
 
             if not self.fuzzer.config.persistent:
                 # should not kill target in persistent mode
+                target_kill_started = time.time()
                 self.fuzzer.kill_target()
+                print(
+                    "[executor] target killed in "
+                    f"{time.time() - target_kill_started:.3f}s"
+                )
 
             if pub_failure:
                 return (1, pub_failure_msg)

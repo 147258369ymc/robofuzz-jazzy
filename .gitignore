@@ -5,14 +5,25 @@
 *.swo
 *.pyc
 .gdb_history
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 fuzzing_keys
 __pycache__
+.claude/
 logs/
 src/logs/
 src/out
 src/err
 *.bag/
+states-*.bag/
+*.db3
+*.mcap
+*.sqlite3
+*.log
 analysis/
 logs_original/
 preprocessed/
@@ -32,6 +43,7 @@ logs_moveit/
 src_jazzy/logs/
 src_jazzy/out
 src_jazzy/err
+src_jazzy/states-*.bag/
 logs_jazzy
 err
 out

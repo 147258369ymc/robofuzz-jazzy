@@ -471,6 +471,7 @@ def moveit_send_command(msg):
     print("[moveit harness] sending goal command (execute)")
     from moveit_msgs.action import MoveGroup
     from rclpy.action import ActionClient
+    from std_msgs.msg import Int32, String
 
     node_name = f"_moveit_profile_client_{os.getpid()}_{time.time_ns()}"
     node = rclpy.create_node(node_name)
@@ -482,6 +483,16 @@ def moveit_send_command(msg):
         request_pub = node.create_publisher(
             type(request),
             "/motion_plan_request",
+            10,
+        )
+        result_code_pub = node.create_publisher(
+            Int32,
+            "/robofuzz/moveit_result_code",
+            10,
+        )
+        goal_event_pub = node.create_publisher(
+            String,
+            "/robofuzz/moveit_goal_event",
             10,
         )
         for _ in range(3):
@@ -506,12 +517,38 @@ def moveit_send_command(msg):
             raise RuntimeError("MoveIt goal rejected by move_group")
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(node, result_future, timeout_sec=60.0)
+        action_timeout = float(os.environ.get("MOVEIT_ACTION_TIMEOUT_SEC", "60.0"))
+        rclpy.spin_until_future_complete(
+            node,
+            result_future,
+            timeout_sec=action_timeout,
+        )
         result_wrapper = result_future.result()
         if result_wrapper is None:
+            try:
+                cancel_future = goal_handle.cancel_goal_async()
+                rclpy.spin_until_future_complete(
+                    node,
+                    cancel_future,
+                    timeout_sec=2.0,
+                )
+            except Exception:
+                pass
+            timeout_msg = Int32()
+            timeout_msg.data = -6
+            result_code_pub.publish(timeout_msg)
+            event_msg = String()
+            event_msg.data = f"timeout:-6:{action_timeout}"
+            goal_event_pub.publish(event_msg)
             raise RuntimeError("MoveIt execution timed out")
 
         err_val = getattr(result_wrapper.result.error_code, "val", None)
+        result_code_msg = Int32()
+        result_code_msg.data = int(err_val) if err_val is not None else 0
+        result_code_pub.publish(result_code_msg)
+        event_msg = String()
+        event_msg.data = f"result:{result_code_msg.data}"
+        goal_event_pub.publish(event_msg)
         print(f"                 + executed (error_code={err_val})")
     finally:
         node.destroy_node()

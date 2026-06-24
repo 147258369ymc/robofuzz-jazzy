@@ -27,6 +27,7 @@ Environment overrides:
   MOVEIT_LAUNCH_PKG=moveit_resources_panda_moveit_config
   MOVEIT_LAUNCH_FILE=demo.launch.py
   MOVEIT_HEADLESS=1|0
+  MOVEIT_WITH_RVIZ=1|0
   MOVEIT_RVIZ_CONFIG=/work/src_jazzy/rviz/moveit_fuzz.rviz
 USAGE
 }
@@ -137,6 +138,8 @@ run_px4() {
 run_moveit2() {
   local launch_pkg="${MOVEIT_LAUNCH_PKG:-moveit_resources_panda_moveit_config}"
   local launch_file="${MOVEIT_LAUNCH_FILE:-demo.launch.py}"
+  local with_rviz="${MOVEIT_WITH_RVIZ:-1}"
+  local headless_launch="${ROOT_DIR}/src_jazzy/launch/moveit2_panda_headless.launch.py"
   local default_rviz_config="${ROOT_DIR}/src_jazzy/rviz/moveit_fuzz.rviz"
   local rviz_config="${MOVEIT_RVIZ_CONFIG:-}"
   local launch_args=("ros2_control_hardware_type:=mock_components")
@@ -147,6 +150,10 @@ run_moveit2() {
 
   if [[ "${MOVEIT_HEADLESS:-0}" == "1" || -z "${DISPLAY:-}" ]]; then
     export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+  fi
+
+  if [[ "${with_rviz}" == "0" ]]; then
+    exec python3 "${headless_launch}" "${launch_args[@]}"
   fi
 
   if [[ -z "${rviz_config}" && -f "${default_rviz_config}" ]]; then

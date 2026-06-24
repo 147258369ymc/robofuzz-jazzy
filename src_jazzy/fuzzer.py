@@ -94,6 +94,30 @@ def moveit_error_signature(errs):
             num = re.search(r":\s*([0-9.]+)", e)
             bucket = int(float(num.group(1)) / 0.25) if num else 0
             sigs.add(("deviation", "", bucket))
+        elif "success_but_endpoint_outlier" in e:
+            num = re.search(r"([0-9.]+)m", e)
+            bucket = int(float(num.group(1)) / 0.01) if num else 0
+            sigs.add(("endpoint_outlier", "", bucket))
+        elif "oracle_ir_numeric_violation" in e:
+            sigs.add(("oracle_ir_numeric", joint, 0))
+        elif "execution_state_missing" in e:
+            sigs.add(("execution_state_missing", "", 0))
+        elif "unexpected_planning_rejection" in e:
+            sigs.add(("reachable_rejection", "", 0))
+        elif "reachable_failure_candidate" in e:
+            code = re.search(r"error_code=(-?[0-9]+)", e)
+            bucket = int(code.group(1)) if code else 0
+            sigs.add(("reachable_failure", "", bucket))
+        elif "result_status_inconsistency" in e:
+            code = re.search(r"error_code=(-?[0-9]+)", e)
+            bucket = int(code.group(1)) if code else 0
+            sigs.add(("result_status_inconsistency", "", bucket))
+        elif "trajectory_smoothness_violation_candidate" in e:
+            num = re.search(r"ratio\s+([0-9.]+)", e)
+            bucket = int(float(num.group(1)) / 0.25) if num else 0
+            sigs.add(("smoothness_candidate", "", bucket))
+        elif "action_status_anomaly" in e:
+            sigs.add(("status_anomaly", "", 0))
         elif "outside [" in e or "position" in e and "NaN" in e:
             sigs.add(("position", joint, 0))
         elif "tracking error" in e:
@@ -516,30 +540,30 @@ class Fuzzer:
                 (0.4, 0.0, 0.5), (0.0, 0.4, 0.6), (-0.3, 0.2, 0.4)]))
             self.queue.append(_make_seed([
                 (0.3, 0.3, 0.3), (0.3, 0.3, 0.7),
-                (0.3, 0.3, 1.0), (0.3, 0.3, 0.5)]))
+                (0.3, 0.3, 0.58), (0.3, 0.3, 0.5)]))
             self.queue.append(_make_seed([
-                (0.5, 0.0, 0.5), (0.35, 0.35, 0.5),
-                (0.0, 0.5, 0.5), (-0.35, 0.35, 0.5)]))
+                (0.48, 0.0, 0.48), (0.35, 0.35, 0.48),
+                (0.0, 0.48, 0.48), (-0.35, 0.35, 0.48)]))
 
             # Category 2: Boundary exploration seeds
             self.queue.append(_make_seed([
-                (0.4, 0.0, 0.5), (0.6, 0.0, 0.5),
-                (0.75, 0.0, 0.5), (0.85, 0.0, 0.5)]))
+                (0.40, 0.0, 0.50), (0.52, 0.0, 0.45),
+                (0.62, 0.0, 0.35), (0.68, 0.0, 0.28)]))
             self.queue.append(_make_seed([
-                (0.3, 0.0, 0.2), (0.3, 0.0, 1.0),
-                (0.3, 0.0, -0.1), (0.3, 0.0, 0.6)]))
+                (0.3, 0.0, 0.18), (0.3, 0.0, 0.68),
+                (0.3, 0.0, 0.12), (0.3, 0.0, 0.6)]))
             self.queue.append(_make_seed([
-                (0.5, 0.5, 0.8), (-0.5, -0.5, 0.3),
-                (0.5, -0.5, 0.9), (-0.5, 0.5, 0.2)]))
+                (0.42, 0.42, 0.38), (-0.42, -0.42, 0.32),
+                (0.42, -0.42, 0.38), (-0.42, 0.42, 0.32)]))
 
             # Category 3: Semantic scenario seeds
             self.queue.append(_make_seed([
-                (0.5, 0.2, 0.4), (0.5, 0.2, 0.8),
-                (-0.3, 0.4, 0.4), (-0.3, 0.4, 0.8),
-                (0.5, 0.2, 0.4)]))
+                (0.48, 0.2, 0.4), (0.48, 0.2, 0.55),
+                (-0.30, 0.4, 0.4), (-0.30, 0.4, 0.55),
+                (0.48, 0.2, 0.4)]))
             self.queue.append(_make_seed([
-                (0.6, 0.0, 0.5), (-0.6, 0.0, 0.5),
-                (0.0, 0.6, 0.5), (0.0, -0.6, 0.5)]))
+                (0.55, 0.0, 0.45), (-0.55, 0.0, 0.45),
+                (0.0, 0.55, 0.45), (0.0, -0.55, 0.45)]))
 
     # def start_virtual_display(self):
     # self.display = Display(visible=1, size=(1280, 720))
@@ -1310,6 +1334,46 @@ def fuzz_msg(fuzzer, fuzz_targets):
                            default_value=0.0, min_threshold=0.01)
             fbk_list.append(fbk)
 
+            fbk = Feedback("desired_vel_max_ratio", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.8)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("desired_acc_max_ratio", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.8)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("desired_jerk_max_ratio", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.8)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("execution_sample_count", FeedbackType.INC,
+                           default_value=0.0, min_threshold=5.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("success_endpoint_outlier_score",
+                           FeedbackType.INC,
+                           default_value=0.0,
+                           min_threshold=0.005)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("reachable_rejection_score", FeedbackType.INC,
+                           default_value=0.0, min_threshold=1.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("status_transition_anomaly_score",
+                           FeedbackType.INC,
+                           default_value=0.0,
+                           min_threshold=1.0)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("tracking_error_growth", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.01)
+            fbk_list.append(fbk)
+
+            fbk = Feedback("smoothness_violation_ratio", FeedbackType.INC,
+                           default_value=0.0, min_threshold=0.8)
+            fbk_list.append(fbk)
+
         scheduler.filter_field_list(field_whitelist, field_blacklist)
         scheduler.init_schedule()
 
@@ -1609,17 +1673,24 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     if bag_db is None:
                         errs.append(f"rosbag db for execution {exec_cnt} not found")
                         continue
+                    parse_started = time.time()
                     parser = RosbagParser(bag_db)
+                    try:
+                        if parser.abort:
+                            print("[-] corrupted recorded states. Abort.")
+                            continue
 
-                    if parser.abort:
-                        print("[-] corrupted recorded states. Abort.")
-                        continue
-
-                    state_msgs_dict = parser.process_messages()
-                    # if dict is empty, fallback to all messages w/o ts filtering
-                    if len(state_msgs_dict) == 0:
-                        print("[-] watch failed")
-                        state_msgs_dict = parser.process_all_messages()
+                        state_msgs_dict = parser.process_messages()
+                        # if dict is empty, fallback to all messages w/o ts filtering
+                        if len(state_msgs_dict) == 0:
+                            print("[-] watch failed")
+                            state_msgs_dict = parser.process_all_messages()
+                    finally:
+                        parser.close()
+                        print(
+                            "[fuzzer] parsed rosbag in "
+                            f"{time.time() - parse_started:.3f}s"
+                        )
 
                 # state_dict = checker.group_msgs_by_topic(state_msgs_dict)
 
@@ -1658,8 +1729,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # stale values from previous round leaking through
                 for fbk in fbk_list:
                     fbk.value = fbk.default_value
+                oracle_started = time.time()
                 errs = checker.run_checks(fuzzer.config, msg_list,
                         state_msgs_dict, fbk_list)
+                print(
+                    "[fuzzer] oracle checked in "
+                    f"{time.time() - oracle_started:.3f}s"
+                )
                 errs = list(set(errs))
                 # TODO: bring error logging and is_interesting here
 
@@ -1805,10 +1881,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
                             break
                     if goal_ratio_fbk and goal_ratio_fbk.value is not None:
                         if goal_ratio_fbk.value >= 1.0:
-                            # fail_ratio=1.0 means all goals failed
-                            flight_quality_ok = False
-                            print("[feedback] REJECTED — no goal succeeded "
-                                  "(quality gate)")
+                            # fail_ratio=1.0 means all goals failed. Keep a
+                            # novel semantic error as evidence; otherwise this
+                            # is usually unhelpful unreachable-goal churn.
+                            if not moveit_error_is_novel:
+                                flight_quality_ok = False
+                                print("[feedback] REJECTED — no goal succeeded "
+                                      "(quality gate)")
                     else:
                         flight_quality_ok = False
 

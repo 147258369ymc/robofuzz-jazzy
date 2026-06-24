@@ -25,7 +25,10 @@ PANDA_JOINT_LIMITS = {
 
 # --- Tolerances ---
 TOL_POS = math.radians(0.1)    # rad — position limit tolerance
-TOL_ENDPOINT = 0.001           # m (1mm, ISO 9283 repeatability)
+# Jazzy mock_components baseline produced repeatable 3-10mm endpoint offsets
+# over 100 local rounds. Treat endpoint deviation as a semantic pressure metric
+# below this calibrated outlier threshold, not as a bug.
+ENDPOINT_ERROR_THRESHOLD_M = 0.02
 TOL_TRACKING = 0.1             # rad — tracking error tolerance per joint
 TOL_ABORT_DRIFT = 0.05         # rad — max joint movement after abort (500ms window)
 
@@ -47,6 +50,17 @@ WORKSPACE_RADIUS = 0.855       # m — Panda approximate workspace sphere
 
 # Tracking error: skip first N samples at trajectory start (initial transient)
 TRACKING_SKIP_SAMPLES = 5
+GROSS_LIMIT_RATIO = 1.05
+GROSS_JERK_RATIO = 1.10
+SUSTAINED_JERK_VIOLATION_SAMPLES = 2
+DEFAULT_MAX_JERK = 300.0
+MOVEIT_SUCCESS = 1
+MOVEIT_FAILURE = 99999
+MOVEIT_INVALID_MOTION_PLAN = -2
+MOVEIT_TIMED_OUT = -6
+MOVEIT_ACTION_SUCCEEDED = 4
+MOVEIT_ACTION_ABORTED = 6
+RELIABLE_REACH_RADIUS = 0.70
 
 def _find_panda_urdf():
     try:
@@ -71,6 +85,8 @@ def _find_panda_urdf():
 
 
 PANDA_URDF = _find_panda_urdf()
+_PANDA_CHAIN = None
+_PANDA_CHAIN_URDF = None
 READY_POS = (0.306890566, 0.0, 0.590282052)
 
 # Home position (from initial_positions.yaml)
@@ -111,6 +127,148 @@ def _point_values(point, field):
     return getattr(point, field, []) or []
 
 
+def _update_feedback(feedback_list, name, value):
+    for feedback in feedback_list:
+        if feedback.name == name:
+            feedback.update_value(value)
+            return
+
+
+def _get_panda_chain():
+    """Build the Panda FK chain once per Python process."""
+    global _PANDA_CHAIN, _PANDA_CHAIN_URDF
+    if _PANDA_CHAIN is None or _PANDA_CHAIN_URDF != PANDA_URDF:
+        with open(PANDA_URDF) as f:
+            urdf_content = f.read()
+        _PANDA_CHAIN = kinpy.build_chain_from_urdf(urdf_content)
+        _PANDA_CHAIN_URDF = PANDA_URDF
+    return _PANDA_CHAIN
+
+
+def _limit_metrics(joint_states_list, controller_states_list):
+    metrics = {
+        "actual_vel_max_ratio": 0.0,
+        "desired_vel_max_ratio": 0.0,
+        "desired_acc_max_ratio": 0.0,
+        "desired_jerk_max_ratio": 0.0,
+        "sustained_jerk_violation_count": 0,
+        "max_joint_jerk": 0.0,
+        "velocity_roughness": 0.0,
+    }
+
+    for (_ts, joint_state) in joint_states_list:
+        names = getattr(joint_state, "name", []) or []
+        velocities = getattr(joint_state, "velocity", []) or []
+        for i, name in enumerate(names):
+            limits = PANDA_JOINT_LIMITS.get(name)
+            if limits is None or i >= len(velocities):
+                continue
+            max_vel = limits[2]
+            if max_vel <= 0:
+                continue
+            ratio = abs(velocities[i]) / max_vel
+            metrics["actual_vel_max_ratio"] = max(
+                metrics["actual_vel_max_ratio"],
+                ratio,
+            )
+
+    previous_acc = None
+    previous_ts = None
+    previous_vel = None
+    consecutive_jerk_violations = 0
+    for (ts, cont_state) in controller_states_list:
+        joint_names = getattr(cont_state, "joint_names", []) or []
+        desired_state = _controller_desired(cont_state)
+        desired_velocities = _point_values(desired_state, "velocities")
+        desired_accelerations = _point_values(desired_state, "accelerations")
+
+        if desired_velocities:
+            for i, name in enumerate(joint_names):
+                limits = PANDA_JOINT_LIMITS.get(name)
+                if limits is None or i >= len(desired_velocities):
+                    continue
+                max_vel = limits[2]
+                if max_vel > 0:
+                    metrics["desired_vel_max_ratio"] = max(
+                        metrics["desired_vel_max_ratio"],
+                        abs(desired_velocities[i]) / max_vel,
+                    )
+
+        if desired_accelerations:
+            for i, name in enumerate(joint_names):
+                limits = PANDA_JOINT_LIMITS.get(name)
+                if limits is None or i >= len(desired_accelerations):
+                    continue
+                max_acc = limits[3]
+                if max_acc > 0:
+                    metrics["desired_acc_max_ratio"] = max(
+                        metrics["desired_acc_max_ratio"],
+                        abs(desired_accelerations[i]) / max_acc,
+                    )
+
+        if (
+            previous_acc is not None
+            and previous_ts is not None
+            and desired_accelerations
+        ):
+            dt = (ts - previous_ts) / 1e9
+            if 0 < dt <= 1.0:
+                pair_max_jerk_ratio = 0.0
+                for i, name in enumerate(joint_names):
+                    if i >= len(desired_accelerations) or i >= len(previous_acc):
+                        continue
+                    jerk = abs(desired_accelerations[i] - previous_acc[i]) / dt
+                    metrics["max_joint_jerk"] = max(
+                        metrics["max_joint_jerk"],
+                        jerk,
+                    )
+                    max_jerk = DEFAULT_MAX_JERK
+                    ratio = jerk / max_jerk
+                    metrics["desired_jerk_max_ratio"] = max(
+                        metrics["desired_jerk_max_ratio"],
+                        ratio,
+                    )
+                    pair_max_jerk_ratio = max(pair_max_jerk_ratio, ratio)
+                if pair_max_jerk_ratio > GROSS_JERK_RATIO:
+                    consecutive_jerk_violations += 1
+                    metrics["sustained_jerk_violation_count"] = max(
+                        metrics["sustained_jerk_violation_count"],
+                        consecutive_jerk_violations,
+                    )
+                else:
+                    consecutive_jerk_violations = 0
+
+        if (
+            previous_vel is not None
+            and previous_ts is not None
+            and desired_velocities
+        ):
+            dt = (ts - previous_ts) / 1e9
+            if 0 < dt <= 1.0:
+                for i, vel in enumerate(desired_velocities):
+                    if i >= len(previous_vel):
+                        continue
+                    roughness = abs(vel - previous_vel[i]) / dt
+                    metrics["velocity_roughness"] = max(
+                        metrics["velocity_roughness"],
+                        roughness,
+                    )
+
+        if desired_accelerations:
+            previous_acc = list(desired_accelerations)
+            previous_ts = ts
+        if desired_velocities:
+            previous_vel = list(desired_velocities)
+
+    metrics["smoothness_violation_ratio"] = max(
+        metrics["actual_vel_max_ratio"],
+        metrics["desired_vel_max_ratio"],
+        metrics["desired_acc_max_ratio"],
+        metrics["desired_jerk_max_ratio"],
+    )
+    return metrics
+
+
 def _all_goals_unreachable(msg_list):
     """Check if ALL goals in msg_list are likely outside Panda reachable workspace.
 
@@ -140,6 +298,34 @@ def _all_goals_unreachable(msg_list):
     return True
 
 
+def _goal_position_xyz(msg):
+    if hasattr(msg, "position"):
+        return msg.position.x, msg.position.y, msg.position.z
+    pos = msg["position"]
+    return pos["x"], pos["y"], pos["z"]
+
+
+def _goal_radius(msg):
+    px, py, pz = _goal_position_xyz(msg)
+    return math.sqrt(px * px + py * py + pz * pz)
+
+
+def _all_goals_reliably_reachable(msg_list):
+    if not msg_list:
+        return False
+    try:
+        return all(_goal_radius(msg) <= RELIABLE_REACH_RADIUS for msg in msg_list)
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
+def _last_int32_value(topic_samples):
+    if not topic_samples:
+        return None
+    msg = topic_samples[-1][1]
+    return getattr(msg, "data", None)
+
+
 # =========================================================================
 # Main Oracle Check — 4-Layer Architecture
 # =========================================================================
@@ -151,6 +337,11 @@ def check(config, msg_list, state_dict, feedback_list):
     controller_states_list = _safe_get(state_dict, "/panda_arm_controller/state")
     move_action_status_list = _safe_get(state_dict, "/move_action/_action/status")
     motion_plan_request_list = _safe_get(state_dict, "/motion_plan_request")
+    moveit_result_code_list = _safe_get(
+        state_dict,
+        "/robofuzz/moveit_result_code",
+    )
+    last_result_code = _last_int32_value(moveit_result_code_list)
 
     if not joint_states_list:
         print("[checker] no /joint_states data available")
@@ -172,6 +363,7 @@ def check(config, msg_list, state_dict, feedback_list):
                 break
 
     data_sufficient = len(controller_states_list) >= MIN_EXEC_SAMPLES
+    limit_metrics = _limit_metrics(joint_states_list, controller_states_list)
 
     if getattr(config, "moveit_planning_only", False):
         if not motion_plan_request_list:
@@ -205,8 +397,10 @@ def check(config, msg_list, state_dict, feedback_list):
     # --- 1.2 & 1.3 Planning Layer Velocity/Acceleration Limits ---
     # Check desired.velocities and desired.accelerations directly against limits.
     # These are TOPP-RA outputs — if they exceed limits, it's a planner bug.
-    desired_vel_max_ratio = 0.0
-    desired_acc_max_ratio = 0.0
+    desired_vel_max_ratio = limit_metrics["desired_vel_max_ratio"]
+    desired_acc_max_ratio = limit_metrics["desired_acc_max_ratio"]
+    desired_jerk_max_ratio = limit_metrics["desired_jerk_max_ratio"]
+    smoothness_violation_ratio = limit_metrics["smoothness_violation_ratio"]
 
     for (ts, cont_state) in controller_states_list:
         joint_names = getattr(cont_state, "joint_names", []) or []
@@ -271,6 +465,30 @@ def check(config, msg_list, state_dict, feedback_list):
                         f"{dpos:.4f} outside [{min_pos:.4f}, {max_pos:.4f}] rad"
                     )
 
+    gross_limit_violation = (
+        limit_metrics["actual_vel_max_ratio"] > GROSS_LIMIT_RATIO
+        or desired_vel_max_ratio > GROSS_LIMIT_RATIO
+        or desired_acc_max_ratio > GROSS_LIMIT_RATIO
+        or desired_jerk_max_ratio > GROSS_JERK_RATIO
+    )
+    if (
+        desired_jerk_max_ratio > GROSS_JERK_RATIO
+        and limit_metrics["sustained_jerk_violation_count"]
+        >= SUSTAINED_JERK_VIOLATION_SAMPLES
+    ):
+        errs.append(
+            "trajectory_smoothness_violation_candidate: desired jerk ratio "
+            f"{desired_jerk_max_ratio:.3f} exceeds {GROSS_JERK_RATIO:.3f} "
+            "for "
+            f"{limit_metrics['sustained_jerk_violation_count']} consecutive "
+            "controller reference samples"
+        )
+    elif gross_limit_violation:
+        # Keep single-sample jerk/limit spikes as feedback pressure only. Mock
+        # controller sampling can produce isolated derivatives that are useful
+        # for mutation guidance but too weak for a bug-classified error.
+        pass
+
     # =================================================================
     # Layer 2: Planning-Execution Gap (tracking error + endpoint)
     # =================================================================
@@ -323,12 +541,42 @@ def check(config, msg_list, state_dict, feedback_list):
             print(f"[oracle] {num_goals_detected} goals, "
                   f"statuses: {goal_terminal_statuses}")
 
+    reachable_failure_score = 0.0
+    status_transition_anomaly_score = 0.0
+    if last_result_code is not None:
+        if (
+            last_result_code != MOVEIT_SUCCESS
+            and last_action_terminal == MOVEIT_ACTION_SUCCEEDED
+        ):
+            status_transition_anomaly_score = 1.0
+            errs.append(
+                "result_status_inconsistency: MoveGroup action status "
+                f"succeeded but result error_code={last_result_code}"
+            )
+
+        if (
+            last_result_code
+            in (MOVEIT_FAILURE, MOVEIT_INVALID_MOTION_PLAN, MOVEIT_TIMED_OUT)
+            and _all_goals_reliably_reachable(msg_list)
+        ):
+            reachable_failure_score = 1.0
+            errs.append(
+                "reachable_failure_candidate: reliable-reach goal sequence "
+                f"returned MoveIt error_code={last_result_code}"
+            )
+
     # Find the LAST SUCCEEDED goal's index (used by tracking-error check 3.2)
     last_success_idx = None
     for i in range(len(goal_terminal_statuses) - 1, -1, -1):
         if goal_terminal_statuses[i] == 4:
             last_success_idx = i
             break
+
+    if last_action_terminal == 4 and not controller_states_list:
+        errs.append(
+            "execution_state_missing: MoveGroup reported success but no "
+            "controller_state samples were recorded"
+        )
 
     # FK endpoint computation — compare final EE pos against the goal MoveIt
     # ACTUALLY planned for last, taken from the last /motion_plan_request.
@@ -392,9 +640,7 @@ def check(config, msg_list, state_dict, feedback_list):
         try:
             goal_x, goal_y, goal_z = last_mpr_goal
 
-            with open(PANDA_URDF) as f:
-                urdf_content = f.read()
-            chain = kinpy.build_chain_from_urdf(urdf_content)
+            chain = _get_panda_chain()
 
             # Arm joints from the controller; finger joints are not part of the
             # arm controller, default them to 0 for FK of panda_hand.
@@ -426,10 +672,11 @@ def check(config, msg_list, state_dict, feedback_list):
     # SUCCESS on a goal the arm never reached", because the comparison target is
     # the planner's own last goal (no index drift).
     if endpoint_check_valid and dist_goal_to_final_pos is not None:
-        if dist_goal_to_final_pos > TOL_ENDPOINT:
+        if dist_goal_to_final_pos > ENDPOINT_ERROR_THRESHOLD_M:
             errs.append(
-                f"goal and actual pos deviation too high: "
-                f"{dist_goal_to_final_pos}"
+                "success_but_endpoint_outlier: endpoint deviation "
+                f"{dist_goal_to_final_pos:.6f}m exceeds calibrated "
+                f"{ENDPOINT_ERROR_THRESHOLD_M:.6f}m threshold"
             )
 
     # --- 3.2 Success-but-high-tracking-error ---
@@ -491,10 +738,11 @@ def check(config, msg_list, state_dict, feedback_list):
     # --- 3.4 Action Status Anomaly ---
     if goal_terminal_statuses:
         for gi, gstatus in enumerate(goal_terminal_statuses):
-            if gstatus not in (4, 6):
+            if gstatus not in (4, 5, 6):
                 errs.append(
+                    "action_status_anomaly: "
                     f"goal {gi}: unexpected terminal status {gstatus} "
-                    f"(expected 4=SUCCESS or 6=ABORTED)"
+                    "(expected 4=SUCCESS, 5=CANCELED, or 6=ABORTED)"
                 )
     elif move_action_status_list:
         pass  # status received but no terminal — still executing
@@ -505,7 +753,10 @@ def check(config, msg_list, state_dict, feedback_list):
         # If no MPRs exist either, the system wasn't ready → environment issue.
         if (not _all_goals_unreachable(msg_list)
                 and motion_plan_request_list):
-            errs.append("no action status received")
+            errs.append(
+                "unexpected_planning_rejection: no action status received "
+                "for a request with planning evidence"
+            )
 
     # =================================================================
     # Feedback Updates (compatible with fuzzer.py's feedback definitions)
@@ -609,6 +860,51 @@ def check(config, msg_list, state_dict, feedback_list):
         elif feedback.name == "desired_acc_max_ratio":
             if desired_acc_max_ratio > 0:
                 feedback.update_value(desired_acc_max_ratio)
+
+        elif feedback.name == "desired_jerk_max_ratio":
+            if desired_jerk_max_ratio > 0:
+                feedback.update_value(desired_jerk_max_ratio)
+
+        elif feedback.name == "execution_sample_count":
+            feedback.update_value(len(controller_states_list))
+
+        elif feedback.name == "success_endpoint_outlier_score":
+            if endpoint_check_valid and dist_goal_to_final_pos is not None:
+                feedback.update_value(dist_goal_to_final_pos)
+
+        elif feedback.name == "reachable_rejection_score":
+            if reachable_failure_score > 0.0:
+                feedback.update_value(reachable_failure_score)
+            elif (not goal_terminal_statuses
+                    and motion_plan_request_list
+                    and not _all_goals_unreachable(msg_list)):
+                feedback.update_value(1.0)
+
+        elif feedback.name == "status_transition_anomaly_score":
+            if status_transition_anomaly_score > 0.0:
+                feedback.update_value(status_transition_anomaly_score)
+            elif goal_terminal_statuses:
+                anomaly = any(s not in (4, 5, 6) for s in goal_terminal_statuses)
+                if anomaly:
+                    feedback.update_value(1.0)
+
+        elif feedback.name == "tracking_error_growth":
+            if len(tracking_error_values) >= 2:
+                growth = tracking_error_values[-1] - tracking_error_values[0]
+                if growth > 0:
+                    feedback.update_value(growth)
+
+        elif feedback.name == "smoothness_violation_ratio":
+            if smoothness_violation_ratio > 0:
+                feedback.update_value(smoothness_violation_ratio)
+
+        elif feedback.name == "max_joint_jerk":
+            if limit_metrics["max_joint_jerk"] > 0:
+                feedback.update_value(limit_metrics["max_joint_jerk"])
+
+        elif feedback.name == "velocity_roughness":
+            if limit_metrics["velocity_roughness"] > 0:
+                feedback.update_value(limit_metrics["velocity_roughness"])
 
         elif feedback.name == "joint_motion_range":
             max_range = 0.0

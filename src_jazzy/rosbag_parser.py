@@ -56,6 +56,21 @@ class RosbagParser:
 
         return conn, c
 
+    def close(self):
+        if getattr(self, "cursor", None) is not None:
+            self.cursor.close()
+            self.cursor = None
+        if getattr(self, "conn", None) is not None:
+            self.conn.close()
+            self.conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
     def get_all_topics(self):
         """get all topic names and types"""
 
@@ -196,4 +211,3 @@ if __name__ == "__main__":
     for (ts, cont_state) in panda_arm_controller_state:
         print(cont_state.error.positions)
         print(len(cont_state.error.positions))
-

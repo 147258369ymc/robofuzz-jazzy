@@ -26,6 +26,42 @@ from mutation_profile import (
     STRATEGY_TRAJECTORY_ARC, STRATEGY_SINGLE_EXTREME
 )
 
+MOVEIT_RELIABLE_REACH_M = 0.75
+
+
+def _moveit_pose_radius(x, y, z):
+    return float((x * x + y * y + z * z) ** 0.5)
+
+
+def _clamp_moveit_reliable_goal(x, y, z, profile):
+    """Keep generated Panda goals in the reliable workspace.
+
+    Boundary-only goals are useful occasionally, but Jazzy long runs were
+    spending too much time on valid OMPL sampling failures. This helper keeps
+    high-dynamic strategies reachable so failures are more likely to expose
+    planning/execution logic issues rather than ordinary unreachable requests.
+    """
+    x = profile.get_range("x").clamp(x)
+    y = profile.get_range("y").clamp(y)
+    z = profile.get_range("z").clamp(z)
+
+    z_low = profile.get_range("z").low
+    z_high = min(profile.get_range("z").high, MOVEIT_RELIABLE_REACH_M * 0.95)
+    z = max(z_low, min(z, z_high))
+
+    radius = _moveit_pose_radius(x, y, z)
+    if radius <= MOVEIT_RELIABLE_REACH_M:
+        return x, y, z
+
+    xy_radius = (x * x + y * y) ** 0.5
+    max_xy = max(0.0, (MOVEIT_RELIABLE_REACH_M ** 2 - z ** 2) ** 0.5)
+    max_xy *= 0.999999
+    if xy_radius <= 1e-9:
+        return 0.0, 0.0, z
+
+    scale = max_xy / xy_radius
+    return x * scale, y * scale, z
+
 
 class Campaign(Enum):
     RND_SINGLE = auto()
@@ -353,6 +389,15 @@ class Scheduler:
             msg.position.x = profile.get_range("x").sample()
             msg.position.y = profile.get_range("y").sample()
             msg.position.z = profile.get_range("z").sample()
+            x, y, z = _clamp_moveit_reliable_goal(
+                msg.position.x,
+                msg.position.y,
+                msg.position.z,
+                profile,
+            )
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
             self.msg_list.append(msg)
         self.num_msgs = num_goals
         self.from_queue = False
@@ -389,12 +434,15 @@ class Scheduler:
                 new_list[idx].position.x += random.gauss(0, 0.05)
                 new_list[idx].position.y += random.gauss(0, 0.05)
                 new_list[idx].position.z += random.gauss(0, 0.03)
-                new_list[idx].position.x = profile.get_range("x").clamp(
-                    new_list[idx].position.x)
-                new_list[idx].position.y = profile.get_range("y").clamp(
-                    new_list[idx].position.y)
-                new_list[idx].position.z = profile.get_range("z").clamp(
-                    new_list[idx].position.z)
+                x, y, z = _clamp_moveit_reliable_goal(
+                    new_list[idx].position.x,
+                    new_list[idx].position.y,
+                    new_list[idx].position.z,
+                    profile,
+                )
+                new_list[idx].position.x = x
+                new_list[idx].position.y = y
+                new_list[idx].position.z = z
         elif op == 'swap' and len(new_list) >= 2:
             i, j = random.sample(range(len(new_list)), 2)
             new_list[i], new_list[j] = new_list[j], new_list[i]
@@ -405,12 +453,30 @@ class Scheduler:
                 new_list[idx].position.x = -new_list[idx].position.x
             else:
                 new_list[idx].position.y = -new_list[idx].position.y
+            x, y, z = _clamp_moveit_reliable_goal(
+                new_list[idx].position.x,
+                new_list[idx].position.y,
+                new_list[idx].position.z,
+                profile,
+            )
+            new_list[idx].position.x = x
+            new_list[idx].position.y = y
+            new_list[idx].position.z = z
         elif op == 'replace':
             idx = random.randint(0, len(new_list) - 1)
             msg = harness.get_init_moveit_pose()
             msg.position.x = profile.get_range("x").sample()
             msg.position.y = profile.get_range("y").sample()
             msg.position.z = profile.get_range("z").sample()
+            x, y, z = _clamp_moveit_reliable_goal(
+                msg.position.x,
+                msg.position.y,
+                msg.position.z,
+                profile,
+            )
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
             new_list[idx] = msg
         elif op == 'resize':
             if len(new_list) < max_goals and random.random() < 0.5:
@@ -419,6 +485,15 @@ class Scheduler:
                 msg.position.x = profile.get_range("x").sample()
                 msg.position.y = profile.get_range("y").sample()
                 msg.position.z = profile.get_range("z").sample()
+                x, y, z = _clamp_moveit_reliable_goal(
+                    msg.position.x,
+                    msg.position.y,
+                    msg.position.z,
+                    profile,
+                )
+                msg.position.x = x
+                msg.position.y = y
+                msg.position.z = z
                 pos = random.randint(0, len(new_list))
                 new_list.insert(pos, msg)
             elif len(new_list) > min_goals:
@@ -505,17 +580,17 @@ class Scheduler:
         cx, cy, cz = center if center else (0.0, 0.0, 0.5)
         goals = []
         for _ in range(num_goals):
-            # Sample in spherical coords: radius near boundary
-            r = 0.855 + random.uniform(-0.1, 0.1)
+            # Sample close to the reliable boundary, not outside it. A smaller
+            # fraction of true out-of-reach probes still comes from random
+            # fresh / extreme probability; this strategy is for executable
+            # high-pressure goals.
+            r = random.uniform(0.62, MOVEIT_RELIABLE_REACH_M)
             theta = random.uniform(0, 2 * _math.pi)  # azimuth
             phi = random.uniform(0.2, _math.pi - 0.2)  # polar (avoid poles)
-            x = cx + r * _math.sin(phi) * _math.cos(theta)
-            y = cy + r * _math.sin(phi) * _math.sin(theta)
-            z = cz + r * _math.cos(phi) * 0.5  # dampened z offset
-            # Clamp to domain
-            x = profile.get_range("x").clamp(x)
-            y = profile.get_range("y").clamp(y)
-            z = profile.get_range("z").clamp(z)
+            x = 0.25 * cx + r * _math.sin(phi) * _math.cos(theta)
+            y = 0.25 * cy + r * _math.sin(phi) * _math.sin(theta)
+            z = 0.25 * cz + 0.75 * r * abs(_math.cos(phi))
+            x, y, z = _clamp_moveit_reliable_goal(x, y, z, profile)
             msg = harness.get_init_moveit_pose()
             msg.position.x = x
             msg.position.y = y
@@ -543,9 +618,7 @@ class Scheduler:
                 x = cx - offset_x + random.uniform(-0.05, 0.05)
                 y = cy - offset_y + random.uniform(-0.05, 0.05)
                 z = cz - offset_z + random.uniform(-0.05, 0.05)
-            x = profile.get_range("x").clamp(x)
-            y = profile.get_range("y").clamp(y)
-            z = profile.get_range("z").clamp(z)
+            x, y, z = _clamp_moveit_reliable_goal(x, y, z, profile)
             msg = harness.get_init_moveit_pose()
             msg.position.x = x
             msg.position.y = y
@@ -568,9 +641,7 @@ class Scheduler:
             x = cx + r * _math.cos(t)
             y = cy + r * _math.sin(t)
             z = cz + 0.1 * _math.sin(t * 2)
-            x = profile.get_range("x").clamp(x)
-            y = profile.get_range("y").clamp(y)
-            z = profile.get_range("z").clamp(z)
+            x, y, z = _clamp_moveit_reliable_goal(x, y, z, profile)
             msg = harness.get_init_moveit_pose()
             msg.position.x = x
             msg.position.y = y
@@ -596,9 +667,13 @@ class Scheduler:
             t = i / max(1, num_goals - 1)
             sweep_val = fr.low + t * (fr.high - fr.low)
             msg = harness.get_init_moveit_pose()
-            msg.position.x = sweep_val if axis == "x" else fixed["x"]
-            msg.position.y = sweep_val if axis == "y" else fixed["y"]
-            msg.position.z = sweep_val if axis == "z" else fixed["z"]
+            x = sweep_val if axis == "x" else fixed["x"]
+            y = sweep_val if axis == "y" else fixed["y"]
+            z = sweep_val if axis == "z" else fixed["z"]
+            x, y, z = _clamp_moveit_reliable_goal(x, y, z, profile)
+            msg.position.x = x
+            msg.position.y = y
+            msg.position.z = z
             if random.random() < 0.4:
                 self._apply_random_orientation(msg)
             goals.append(msg)
@@ -623,6 +698,20 @@ class Scheduler:
                 msg.position.z = mutator.gen_special_floats() / 1000.0
             else:
                 msg.position.z = profile.get_range("z").sample()
+            if _moveit_pose_radius(
+                msg.position.x,
+                msg.position.y,
+                msg.position.z,
+            ) < 10.0:
+                x, y, z = _clamp_moveit_reliable_goal(
+                    msg.position.x,
+                    msg.position.y,
+                    msg.position.z,
+                    profile,
+                )
+                msg.position.x = x
+                msg.position.y = y
+                msg.position.z = z
             # 30% chance of non-identity orientation
             if random.random() < 0.3:
                 self._apply_random_orientation(msg)

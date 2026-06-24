@@ -137,6 +137,20 @@ class TargetProfileTests(unittest.TestCase):
             cfg.required_log_patterns_for_readiness,
         )
 
+    def test_moveit_profile_records_result_diagnostic_topics(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile("moveit2_jazzy", REPO_ROOT)
+
+        self.assertEqual(
+            "std_msgs/msg/Int32",
+            profile.optional_watch_topics["/robofuzz/moveit_result_code"],
+        )
+        self.assertEqual(
+            "std_msgs/msg/String",
+            profile.optional_watch_topics["/robofuzz/moveit_goal_event"],
+        )
+
     def test_fuzzer_waits_for_profile_actions_before_fuzzing(self):
         fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
         with open(fuzzer_path, encoding="utf-8") as fp:
