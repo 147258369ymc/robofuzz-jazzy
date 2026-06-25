@@ -7,7 +7,7 @@ import time
 import os
 import sys
 import traceback
-from functools import reduce
+from functools import partial, reduce
 import random
 import struct
 import pickle
@@ -35,6 +35,7 @@ import mutator
 import harness
 import checker
 import target_profiles
+import moveit_feedback_buckets
 from rosbag_parser import RosbagParser
 from ulg_parser import UlgStateParser, find_latest_ulg, cleanup_ulg_files, preserve_ulg_on_error
 from checker import StateMonitorNode
@@ -116,6 +117,11 @@ def moveit_error_signature(errs):
             num = re.search(r"ratio\s+([0-9.]+)", e)
             bucket = int(float(num.group(1)) / 0.25) if num else 0
             sigs.add(("smoothness_candidate", "", bucket))
+        elif "scaling_violation" in e:
+            kind = "acceleration" if "acceleration_scaling" in e else "velocity"
+            num = re.search(r"desired_(?:vel|acc)_ratio=([0-9.]+)", e)
+            bucket = int(float(num.group(1)) / 0.1) if num else 0
+            sigs.add(("scaling_violation", kind, bucket))
         elif "action_status_anomaly" in e:
             sigs.add(("status_anomaly", "", 0))
         elif "outside [" in e or "position" in e and "NaN" in e:
@@ -1064,6 +1070,80 @@ def inspect_secure_target(fuzzer):
     return fuzz_targets
 
 
+def _advance_moveit_cycle(scheduler, fbk_list, fuzzer):
+    """Run the adaptive MoveIt cycle-end bookkeeping once per round.
+
+    Returns True when a cycle boundary was crossed. ``mutate_sequence_moveit``
+    increments ``round_cnt`` *before* a sequence executes, so this must run on
+    every round outcome — including the execution-failure path. Otherwise a
+    persistently-failing target inflates ``round_cnt`` without ever ending the
+    cycle (the cycle-16 "523 rounds, never switched seed" symptom).
+    """
+    if scheduler.round_cnt < scheduler.CYCLE_MIN:
+        return False
+
+    recent = getattr(scheduler, '_recent_interesting_rounds', [])
+    recent_in_window = [
+        r for r in recent
+        if r > scheduler.round_cnt - scheduler.EXTEND_WINDOW]
+    if (len(recent_in_window) == 0
+            or scheduler.round_cnt >= scheduler.CYCLE_MAX):
+        scheduler.round_cnt = 0
+        scheduler.cycle_cnt += 1
+        scheduler.is_new_cycle = True
+        scheduler._recent_interesting_rounds = []
+        scheduler._seed_interesting_count = 0
+        print("--- cycle finished ---")
+
+        # Stagnation detection: 10 cycles without interesting
+        if not hasattr(scheduler, '_cycles_without_interesting'):
+            scheduler._cycles_without_interesting = 0
+        scheduler._cycles_without_interesting += 1
+        if scheduler._cycles_without_interesting >= 10:
+            print("[!] STAGNATION: 10 cycles without "
+                  "interesting, resetting exploration")
+            for fbk in fbk_list:
+                fbk.reset()
+            scheduler._cycles_without_interesting = 0
+            fuzzer.init_queue()
+        return True
+
+    return False
+
+
+def _record_moveit_harness_failure(fuzzer, scheduler, frame, reason):
+    """Mark a round as a harness/infrastructure failure, not a target finding.
+
+    A no-goal-handle / readiness-timeout round produces metadata + queue
+    entries but no rosbag and no error file, so historically it could only be
+    identified by cross-referencing "metadata without rosbag". Writing an
+    explicit ``harness_fail-<frame>`` marker makes the 576-style infrastructure
+    rounds self-describing for later analysis instead of inferred. This never
+    touches the rosbags/ or errors/ directories, so the bug-bearing dataset
+    stays clean.
+    """
+    meta_dir = getattr(fuzzer.config, "meta_dir", None)
+    if not meta_dir:
+        return
+    cycle_cnt = getattr(scheduler, "cycle_cnt", -1)
+    round_cnt = getattr(scheduler, "round_cnt", -1)
+    marker_path = os.path.join(meta_dir, f"harness_fail-{frame}")
+    try:
+        with open(marker_path, "w") as fp:
+            json.dump(
+                {
+                    "frame": frame,
+                    "cycle": cycle_cnt,
+                    "round": round_cnt,
+                    "reason": str(reason),
+                },
+                fp,
+                sort_keys=True,
+            )
+    except OSError as e:
+        print(f"[-] could not write harness-failure marker: {e}")
+
+
 def fuzz_msg(fuzzer, fuzz_targets):
 
     if len(fuzz_targets) == 0:
@@ -1603,7 +1683,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
                 pre_exec_list = None
                 post_exec_list = None
-                pub_function = harness.moveit_send_command
+                plan_params = getattr(scheduler, "_plan_params", None)
+                pub_function = partial(
+                    harness.moveit_send_command,
+                    plan_params=plan_params,
+                )
 
             else:
                 pre_exec_list = None
@@ -1629,6 +1713,25 @@ def fuzz_msg(fuzzer, fuzz_targets):
             except RuntimeError as e:
                 print(f"[!] Execution failed: {e}, skipping cycle")
                 fuzzer.kill_target()
+                if fuzzer.config.test_moveit:
+                    # Mark this round as a harness/infra failure so the
+                    # bookkeeping-only round is self-describing (no rosbag, no
+                    # error file) instead of inferred from "metadata without
+                    # rosbag" during later analysis.
+                    _record_moveit_harness_failure(
+                        fuzzer, scheduler, frame, e)
+                    # round_cnt was already incremented by
+                    # mutate_sequence_moveit. Advance the cycle bookkeeping and
+                    # the global round accounting here too, otherwise a
+                    # persistently-failing target loops forever on one seed and
+                    # never reaches maxloop (the cycle-16 runaway).
+                    _advance_moveit_cycle(scheduler, fbk_list, fuzzer)
+                    fuzzer.rounds += 1
+                    if (fuzzer.config.maxloop > 0
+                            and fuzzer.rounds >= fuzzer.config.maxloop):
+                        print(f"[*] Reached maxloop={fuzzer.config.maxloop}; "
+                              "stopping")
+                        break
                 continue
             # fuzzer.oh_.check_oracle() # will move everything into checker
             # (turtlesim, sros, ...)
@@ -1856,6 +1959,22 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 )
                 is_interesting = is_interesting or cur_interesting
 
+            if fuzzer.config.test_moveit:
+                if not hasattr(scheduler, '_seen_feedback_buckets'):
+                    scheduler._seen_feedback_buckets = set()
+                new_buckets = (
+                    moveit_feedback_buckets.collect_new_feedback_buckets(
+                        fbk_list,
+                        scheduler._seen_feedback_buckets,
+                    )
+                )
+                if new_buckets:
+                    print(
+                        "[feedback] NEW MoveIt feedback bucket(s): "
+                        f"{new_buckets}"
+                    )
+                    is_interesting = True
+
             if is_interesting:
                 # Flight quality gate: reject seeds where drone never flew.
                 # This prevents crash-inducing inputs from polluting the queue.
@@ -2062,32 +2181,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
                             fuzzer.init_queue()
 
             elif fuzzer.config.test_moveit:
-                # Adaptive cycle length: min 20, max 30, extend if recent interesting
-                if scheduler.round_cnt >= scheduler.CYCLE_MIN:
-                    recent = getattr(scheduler, '_recent_interesting_rounds', [])
-                    recent_in_window = [
-                        r for r in recent
-                        if r > scheduler.round_cnt - scheduler.EXTEND_WINDOW]
-                    if (len(recent_in_window) == 0
-                            or scheduler.round_cnt >= scheduler.CYCLE_MAX):
-                        scheduler.round_cnt = 0
-                        scheduler.cycle_cnt += 1
-                        scheduler.is_new_cycle = True
-                        scheduler._recent_interesting_rounds = []
-                        scheduler._seed_interesting_count = 0
-                        print("--- cycle finished ---")
-
-                        # Stagnation detection: 10 cycles without interesting
-                        if not hasattr(scheduler, '_cycles_without_interesting'):
-                            scheduler._cycles_without_interesting = 0
-                        scheduler._cycles_without_interesting += 1
-                        if scheduler._cycles_without_interesting >= 10:
-                            print("[!] STAGNATION: 10 cycles without "
-                                  "interesting, resetting exploration")
-                            for fbk in fbk_list:
-                                fbk.reset()
-                            scheduler._cycles_without_interesting = 0
-                            fuzzer.init_queue()
+                # Adaptive cycle length: min 20, max 30, extend if recent
+                # interesting. Shared with the execution-failure path so a
+                # broken target cannot stall on one seed indefinitely.
+                _advance_moveit_cycle(scheduler, fbk_list, fuzzer)
 
             elif fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl:
                 # For TB3 sequence mode: cycle every 10 rounds to consume

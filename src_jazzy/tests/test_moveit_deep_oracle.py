@@ -260,6 +260,144 @@ class MoveItDeepOracleTests(unittest.TestCase):
         )
         self.assertGreater(feedback[1].value, 1.0)
 
+    def test_scaling_violation_uses_recorded_plan_params(self):
+        moveit = import_moveit_with_fk(final_pos=(0.40, 0.10, 0.50))
+        import moveit_plan_params
+
+        state = base_state()
+        state["/panda_arm_controller/state"] = [
+            controller_state(
+                i * 10_000_000,
+                reference=point(velocities=[1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            )
+            for i in range(8)
+        ]
+        state["/robofuzz/moveit_plan_params"] = [
+            (
+                0,
+                types.SimpleNamespace(
+                    data=moveit_plan_params.plan_params_to_json(
+                        {
+                            "velocity_scaling": 0.5,
+                            "acceleration_scaling": 1.0,
+                        }
+                    )
+                ),
+            )
+        ]
+
+        errs = moveit.check(
+            types.SimpleNamespace(moveit_planning_only=False),
+            [],
+            state,
+            [FeedbackProbe("desired_vel_max_ratio")],
+        )
+
+        self.assertTrue(
+            any("scaling_violation: requested velocity_scaling" in err for err in errs),
+            errs,
+        )
+
+    def test_endpoint_outlier_respects_sampled_position_tolerance(self):
+        # U1 varies position_tolerance up to 0.05m. An endpoint that lands
+        # within the requested goal sphere must NOT be flagged as an outlier,
+        # even when the deviation exceeds the fixed 0.02m baseline.
+        moveit = import_moveit_with_fk(final_pos=(0.44, 0.10, 0.50))
+        import moveit_plan_params
+
+        state = base_state(final_status=4)
+        state["/robofuzz/moveit_plan_params"] = [
+            (
+                0,
+                types.SimpleNamespace(
+                    data=moveit_plan_params.plan_params_to_json(
+                        {"position_tolerance": 0.05}
+                    )
+                ),
+            )
+        ]
+
+        errs = moveit.check(
+            types.SimpleNamespace(moveit_planning_only=False),
+            [],
+            state,
+            [FeedbackProbe("success_endpoint_outlier_score")],
+        )
+
+        self.assertFalse(
+            any("success_but_endpoint_outlier" in err for err in errs),
+            errs,
+        )
+
+    def test_endpoint_outlier_still_flags_beyond_tolerance_plus_margin(self):
+        # A deviation that exceeds the requested sphere plus baseline margin is
+        # still a genuine "succeeded but not there" outlier.
+        moveit = import_moveit_with_fk(final_pos=(0.50, 0.10, 0.50))
+        import moveit_plan_params
+
+        state = base_state(final_status=4)
+        state["/robofuzz/moveit_plan_params"] = [
+            (
+                0,
+                types.SimpleNamespace(
+                    data=moveit_plan_params.plan_params_to_json(
+                        {"position_tolerance": 0.05}
+                    )
+                ),
+            )
+        ]
+
+        errs = moveit.check(
+            types.SimpleNamespace(moveit_planning_only=False),
+            [],
+            state,
+            [FeedbackProbe("success_endpoint_outlier_score")],
+        )
+
+        self.assertTrue(
+            any("success_but_endpoint_outlier" in err for err in errs),
+            errs,
+        )
+
+    def test_scaling_violation_ignores_near_zero_relative_noise(self):
+        # At velocity_scaling=0.05 the relative 1.05 tolerance collapses to
+        # ~0.0025, so TOPP-RA discretization noise produced false positives.
+        # An absolute margin must absorb the near-zero band.
+        moveit = import_moveit_with_fk(final_pos=(0.40, 0.10, 0.50))
+        import moveit_plan_params
+
+        state = base_state()
+        # joint1 limit 2.175 rad/s; 0.13 rad/s -> ratio ~0.0598
+        state["/panda_arm_controller/state"] = [
+            controller_state(
+                i * 10_000_000,
+                reference=point(velocities=[0.13, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            )
+            for i in range(8)
+        ]
+        state["/robofuzz/moveit_plan_params"] = [
+            (
+                0,
+                types.SimpleNamespace(
+                    data=moveit_plan_params.plan_params_to_json(
+                        {"velocity_scaling": 0.05, "acceleration_scaling": 0.05}
+                    )
+                ),
+            )
+        ]
+
+        errs = moveit.check(
+            types.SimpleNamespace(moveit_planning_only=False),
+            [],
+            state,
+            [FeedbackProbe("desired_vel_max_ratio")],
+        )
+
+        self.assertFalse(
+            any("scaling_violation" in err for err in errs),
+            errs,
+        )
+
     def test_success_without_controller_samples_is_execution_state_missing(self):
         moveit = import_moveit_with_fk(final_pos=(0.40, 0.10, 0.50))
         state = base_state()

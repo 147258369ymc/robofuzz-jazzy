@@ -282,6 +282,52 @@ class MoveItHarnessTests(unittest.TestCase):
         self.assertIn("result", events[-1].data)
         self.assertIn("1", events[-1].data)
 
+    def test_send_command_applies_and_publishes_plan_params(self):
+        record = {}
+        fakes = _build_moveit_fakes(record)
+        with mock.patch.dict(sys.modules, fakes):
+            sys.modules.pop("harness", None)
+            harness = importlib.import_module("harness")
+
+            goal_pose = _Auto()
+            goal_pose.position.x = 0.4
+            goal_pose.position.y = 0.1
+            goal_pose.position.z = 0.5
+            goal_pose.orientation.w = 1.0
+
+            harness.moveit_send_command(
+                goal_pose,
+                plan_params={
+                    "velocity_scaling": 0.75,
+                    "acceleration_scaling": 0.8,
+                    "planning_time": 2.5,
+                    "position_tolerance": 0.025,
+                    "orientation_tolerance": 0.2,
+                },
+            )
+
+        request = record["goal"].request
+        self.assertEqual(0.75, request.max_velocity_scaling_factor)
+        self.assertEqual(0.8, request.max_acceleration_scaling_factor)
+        self.assertEqual(2.5, request.allowed_planning_time)
+        self.assertEqual(
+            [0.025],
+            request.goal_constraints[0]
+            .position_constraints[0]
+            .constraint_region.primitives[0]
+            .dimensions,
+        )
+        self.assertEqual(
+            0.2,
+            request.goal_constraints[0]
+            .orientation_constraints[0]
+            .absolute_x_axis_tolerance,
+        )
+        self.assertIn(
+            "/robofuzz/moveit_plan_params",
+            record["published_by_topic"],
+        )
+
     def test_send_command_timeout_is_configurable_and_cancels_goal(self):
         record = {"result_value": None}
         fakes = _build_moveit_fakes(record)

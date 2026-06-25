@@ -467,16 +467,21 @@ def get_init_moveit_pose():
 
     return msg
 
-def moveit_send_command(msg):
+def moveit_send_command(msg, plan_params=None):
     print("[moveit harness] sending goal command (execute)")
     from moveit_msgs.action import MoveGroup
     from rclpy.action import ActionClient
     from std_msgs.msg import Int32, String
+    from moveit_plan_params import normalize_plan_params, plan_params_to_json
 
     node_name = f"_moveit_profile_client_{os.getpid()}_{time.time_ns()}"
     node = rclpy.create_node(node_name)
     try:
-        request = _build_panda_motion_plan_request(msg)
+        normalized_plan_params = normalize_plan_params(plan_params)
+        request = _build_panda_motion_plan_request(
+            msg,
+            plan_params=normalized_plan_params,
+        )
 
         # move_group does not emit /motion_plan_request for action goals, but
         # the oracle uses the last request as endpoint ground truth.
@@ -495,8 +500,16 @@ def moveit_send_command(msg):
             "/robofuzz/moveit_goal_event",
             10,
         )
+        plan_params_pub = node.create_publisher(
+            String,
+            "/robofuzz/moveit_plan_params",
+            10,
+        )
+        plan_params_msg = String()
+        plan_params_msg.data = plan_params_to_json(normalized_plan_params)
         for _ in range(3):
             request_pub.publish(request)
+            plan_params_pub.publish(plan_params_msg)
             rclpy.spin_once(node, timeout_sec=0.05)
             time.sleep(0.05)
 
@@ -554,7 +567,8 @@ def moveit_send_command(msg):
         node.destroy_node()
 
 
-def _build_panda_motion_plan_request(goal_pose):
+def _build_panda_motion_plan_request(goal_pose, plan_params=None):
+    from moveit_plan_params import normalize_plan_params
     from moveit_msgs.msg import (
         Constraints,
         MotionPlanRequest,
@@ -562,6 +576,8 @@ def _build_panda_motion_plan_request(goal_pose):
         PositionConstraint,
     )
     from shape_msgs.msg import SolidPrimitive
+
+    plan_params = normalize_plan_params(plan_params)
 
     request = MotionPlanRequest()
     request.workspace_parameters.header.frame_id = "panda_link0"
@@ -574,13 +590,14 @@ def _build_panda_motion_plan_request(goal_pose):
     request.start_state.is_diff = True
     request.group_name = "panda_arm"
     request.num_planning_attempts = 5
-    request.allowed_planning_time = 5.0
-    request.max_velocity_scaling_factor = 0.1
-    request.max_acceleration_scaling_factor = 0.1
+    request.allowed_planning_time = plan_params["planning_time"]
+    request.max_velocity_scaling_factor = plan_params["velocity_scaling"]
+    request.max_acceleration_scaling_factor = plan_params[
+        "acceleration_scaling"]
 
     region = SolidPrimitive()
     region.type = SolidPrimitive.SPHERE
-    region.dimensions = [0.01]
+    region.dimensions = [plan_params["position_tolerance"]]
 
     position = PositionConstraint()
     position.header.frame_id = "panda_link0"
@@ -593,9 +610,12 @@ def _build_panda_motion_plan_request(goal_pose):
     orientation.header.frame_id = "panda_link0"
     orientation.link_name = "panda_hand"
     orientation.orientation = goal_pose.orientation
-    orientation.absolute_x_axis_tolerance = 0.5
-    orientation.absolute_y_axis_tolerance = 0.5
-    orientation.absolute_z_axis_tolerance = 0.5
+    orientation.absolute_x_axis_tolerance = plan_params[
+        "orientation_tolerance"]
+    orientation.absolute_y_axis_tolerance = plan_params[
+        "orientation_tolerance"]
+    orientation.absolute_z_axis_tolerance = plan_params[
+        "orientation_tolerance"]
     orientation.weight = 1.0
 
     constraints = Constraints()

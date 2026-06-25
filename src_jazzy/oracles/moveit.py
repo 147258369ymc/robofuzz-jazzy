@@ -3,6 +3,10 @@ import os
 import statistics
 
 import kinpy
+from moveit_plan_params import (
+    DEFAULT_MOVEIT_PLAN_PARAMS,
+    latest_plan_params_from_state,
+)
 
 
 # =========================================================================
@@ -27,7 +31,13 @@ PANDA_JOINT_LIMITS = {
 TOL_POS = math.radians(0.1)    # rad — position limit tolerance
 # Jazzy mock_components baseline produced repeatable 3-10mm endpoint offsets
 # over 100 local rounds. Treat endpoint deviation as a semantic pressure metric
-# below this calibrated outlier threshold, not as a bug.
+# below this calibrated outlier threshold, not as a bug. U1 mutates the goal
+# position_tolerance per sequence, so a "success but not there" outlier is only
+# genuine when the endpoint misses the *requested* goal sphere by more than the
+# mock baseline. ENDPOINT_BASELINE_MARGIN_M is added on top of the sampled
+# position_tolerance; ENDPOINT_ERROR_THRESHOLD_M is the floor used when no plan
+# params were recorded (legacy bags).
+ENDPOINT_BASELINE_MARGIN_M = 0.02
 ENDPOINT_ERROR_THRESHOLD_M = 0.02
 TOL_TRACKING = 0.1             # rad — tracking error tolerance per joint
 TOL_ABORT_DRIFT = 0.05         # rad — max joint movement after abort (500ms window)
@@ -52,6 +62,13 @@ WORKSPACE_RADIUS = 0.855       # m — Panda approximate workspace sphere
 TRACKING_SKIP_SAMPLES = 5
 GROSS_LIMIT_RATIO = 1.05
 GROSS_JERK_RATIO = 1.10
+SCALING_TOL_RATIO = 1.05
+# A relative-only scaling tolerance collapses toward zero as the requested
+# scaling shrinks (at scaling=0.05 the band is only ~0.0025), so TOPP-RA's
+# discrete time-parameterization noise produced spurious scaling_violation
+# reports in the near-zero band. An absolute floor absorbs that discretization
+# noise; a genuine scaling breach still has to exceed scaling*ratio + margin.
+SCALING_ABS_MARGIN = 0.05
 SUSTAINED_JERK_VIOLATION_SAMPLES = 2
 DEFAULT_MAX_JERK = 300.0
 MOVEIT_SUCCESS = 1
@@ -364,6 +381,7 @@ def check(config, msg_list, state_dict, feedback_list):
 
     data_sufficient = len(controller_states_list) >= MIN_EXEC_SAMPLES
     limit_metrics = _limit_metrics(joint_states_list, controller_states_list)
+    plan_params = latest_plan_params_from_state(state_dict)
 
     if getattr(config, "moveit_planning_only", False):
         if not motion_plan_request_list:
@@ -488,6 +506,33 @@ def check(config, msg_list, state_dict, feedback_list):
         # controller sampling can produce isolated derivatives that are useful
         # for mutation guidance but too weak for a bug-classified error.
         pass
+
+    if plan_params:
+        velocity_limit = (
+            plan_params["velocity_scaling"] * SCALING_TOL_RATIO
+            + SCALING_ABS_MARGIN
+        )
+        if desired_vel_max_ratio > velocity_limit:
+            errs.append(
+                "scaling_violation: requested velocity_scaling="
+                f"{plan_params['velocity_scaling']:.3f} but "
+                f"desired_vel_ratio={desired_vel_max_ratio:.3f} exceeds "
+                f"scaling*{SCALING_TOL_RATIO:.2f}+{SCALING_ABS_MARGIN:.2f}"
+                f"={velocity_limit:.3f}"
+            )
+
+        acceleration_limit = (
+            plan_params["acceleration_scaling"] * SCALING_TOL_RATIO
+            + SCALING_ABS_MARGIN
+        )
+        if desired_acc_max_ratio > acceleration_limit:
+            errs.append(
+                "scaling_violation: requested acceleration_scaling="
+                f"{plan_params['acceleration_scaling']:.3f} but "
+                f"desired_acc_ratio={desired_acc_max_ratio:.3f} exceeds "
+                f"scaling*{SCALING_TOL_RATIO:.2f}+{SCALING_ABS_MARGIN:.2f}"
+                f"={acceleration_limit:.3f}"
+            )
 
     # =================================================================
     # Layer 2: Planning-Execution Gap (tracking error + endpoint)
@@ -671,12 +716,29 @@ def check(config, msg_list, state_dict, feedback_list):
     # arrive at that goal. This now correctly catches the real bug "reported
     # SUCCESS on a goal the arm never reached", because the comparison target is
     # the planner's own last goal (no index drift).
+    #
+    # U1 mutates the goal position_tolerance per sequence, so MoveIt is allowed
+    # to report SUCCESS anywhere inside the requested sphere. Flagging a fixed
+    # 0.02m deviation produced false positives whenever the sampled tolerance
+    # exceeded 0.02m. The outlier threshold therefore tracks the *requested*
+    # tolerance plus the mock-component baseline offset.
     if endpoint_check_valid and dist_goal_to_final_pos is not None:
-        if dist_goal_to_final_pos > ENDPOINT_ERROR_THRESHOLD_M:
+        requested_pos_tol = (
+            plan_params["position_tolerance"]
+            if plan_params
+            else DEFAULT_MOVEIT_PLAN_PARAMS["position_tolerance"]
+        )
+        endpoint_outlier_threshold = max(
+            ENDPOINT_ERROR_THRESHOLD_M,
+            requested_pos_tol + ENDPOINT_BASELINE_MARGIN_M,
+        )
+        if dist_goal_to_final_pos > endpoint_outlier_threshold:
             errs.append(
                 "success_but_endpoint_outlier: endpoint deviation "
-                f"{dist_goal_to_final_pos:.6f}m exceeds calibrated "
-                f"{ENDPOINT_ERROR_THRESHOLD_M:.6f}m threshold"
+                f"{dist_goal_to_final_pos:.6f}m exceeds "
+                f"{endpoint_outlier_threshold:.6f}m "
+                f"(position_tolerance={requested_pos_tol:.4f}m + "
+                f"{ENDPOINT_BASELINE_MARGIN_M:.4f}m baseline)"
             )
 
     # --- 3.2 Success-but-high-tracking-error ---

@@ -209,6 +209,16 @@ class MutationProfile:
                 "x": FieldRange("x", -0.6, 0.6, extreme_prob=0.05),
                 "y": FieldRange("y", -0.6, 0.6, extreme_prob=0.05),
                 "z": FieldRange("z", 0.1, 0.9, extreme_prob=0.05),
+                "velocity_scaling": FieldRange(
+                    "velocity_scaling", 0.7, 1.0, extreme_prob=0.0),
+                "acceleration_scaling": FieldRange(
+                    "acceleration_scaling", 0.7, 1.0, extreme_prob=0.0),
+                "planning_time": FieldRange(
+                    "planning_time", 0.5, 10.0, extreme_prob=0.0),
+                "position_tolerance": FieldRange(
+                    "position_tolerance", 0.001, 0.05, extreme_prob=0.0),
+                "orientation_tolerance": FieldRange(
+                    "orientation_tolerance", 0.05, 0.5, extreme_prob=0.0),
             },
             strategy_weights={
                 STRATEGY_BOUNDARY_PUSH: 0.30,

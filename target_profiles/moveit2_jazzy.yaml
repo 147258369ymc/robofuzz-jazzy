@@ -58,6 +58,7 @@ watch:
   optional:
     /robofuzz/moveit_result_code: std_msgs/msg/Int32
     /robofuzz/moveit_goal_event: std_msgs/msg/String
+    /robofuzz/moveit_plan_params: std_msgs/msg/String
   compatibility_notes:
     - Jazzy Panda resources expose /panda_arm_controller/controller_state instead of the Foxy-era /panda_arm_controller/state.
     - Hidden action status topics should be inspected with "ros2 topic list --include-hidden-topics" during smoke tests.

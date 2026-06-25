@@ -25,6 +25,7 @@ from mutation_profile import (
     STRATEGY_RANDOM, STRATEGY_BOUNDARY_PUSH, STRATEGY_REVERSAL,
     STRATEGY_TRAJECTORY_ARC, STRATEGY_SINGLE_EXTREME
 )
+from moveit_plan_params import normalize_plan_params
 
 MOVEIT_RELIABLE_REACH_M = 0.75
 
@@ -61,6 +62,32 @@ def _clamp_moveit_reliable_goal(x, y, z, profile):
 
     scale = max_xy / xy_radius
     return x * scale, y * scale, z
+
+
+def _sample_moveit_scaling(profile, field_name):
+    roll = random.random()
+    if roll < 0.10:
+        return 1.0
+    if roll < 0.15:
+        return 0.05
+    return profile.get_range(field_name).sample()
+
+
+def _sample_moveit_plan_params(profile):
+    """Sample per-sequence MoveIt planning knobs without touching msg_list."""
+    return normalize_plan_params(
+        {
+            "velocity_scaling": _sample_moveit_scaling(
+                profile, "velocity_scaling"),
+            "acceleration_scaling": _sample_moveit_scaling(
+                profile, "acceleration_scaling"),
+            "planning_time": profile.get_range("planning_time").sample(),
+            "position_tolerance": profile.get_range(
+                "position_tolerance").sample(),
+            "orientation_tolerance": profile.get_range(
+                "orientation_tolerance").sample(),
+        }
+    )
 
 
 class Campaign(Enum):
@@ -357,6 +384,16 @@ class Scheduler:
             self._moveit_exploit_round(profile)
         else:
             self._moveit_explore_round(profile, fbk_list)
+
+        self._plan_params = _sample_moveit_plan_params(profile)
+        print(
+            "[moveit] plan_params "
+            f"vel={self._plan_params['velocity_scaling']:.3f} "
+            f"acc={self._plan_params['acceleration_scaling']:.3f} "
+            f"time={self._plan_params['planning_time']:.2f}s "
+            f"pos_tol={self._plan_params['position_tolerance']:.4f} "
+            f"ori_tol={self._plan_params['orientation_tolerance']:.3f}"
+        )
 
         self.round_cnt += 1
         return (self.msg_list, frame)
