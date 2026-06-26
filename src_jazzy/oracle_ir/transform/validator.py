@@ -3,6 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Any
 
 from ..schema import OracleIR
@@ -125,6 +126,12 @@ def validate_oracle_ir(
             errors.append(
                 f"Feedback '{fb.name}' invalid direction: {fb.direction}"
             )
+        if fb.direction == "maximize" and _looks_like_remaining_margin(fb):
+            warnings.append(
+                f"Feedback '{fb.name}' maximizes a remaining margin; "
+                "boundary-seeking fuzz feedback should minimize remaining "
+                "margin or maximize observed pressure/ratio"
+            )
 
     # 9. Provenance 校验
     if not ir.provenance:
@@ -136,3 +143,16 @@ def validate_oracle_ir(
         warnings=warnings,
     )
 
+
+def _looks_like_remaining_margin(feedback) -> bool:
+    """Heuristic warning for target-agnostic boundary feedback direction."""
+    name = (feedback.name or "").lower()
+    metric = (feedback.metric or "").strip()
+    if not metric:
+        return False
+    if "margin" in name or "shortfall" in name:
+        if "-" in metric:
+            return True
+    return bool(
+        re.match(r"^(param\([^)]+\)|[A-Za-z_][A-Za-z0-9_]*)\s*-", metric)
+    )

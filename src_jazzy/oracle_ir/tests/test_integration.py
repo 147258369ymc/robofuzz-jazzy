@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.oracle_ir.transform.parser import load_all_specs
-from src.oracle_ir.transform.validator import validate_oracle_ir
-from src.oracle_ir.transform.compiler import compile_oracle_ir
+from src_jazzy.oracle_ir.transform.parser import load_all_specs
+from src_jazzy.oracle_ir.transform.validator import validate_oracle_ir
+from src_jazzy.oracle_ir.transform.compiler import compile_oracle_ir
 
 
 def make_mock_state_dict():
@@ -266,4 +266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

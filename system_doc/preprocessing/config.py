@@ -94,12 +94,23 @@ MOVEIT2_PANDA_CONFIG = TargetConfig(
 )
 
 
+TURTLEBOT4_JAZZY_CONFIG = TargetConfig(
+    name="turtlebot4_jazzy",
+    version="turtlebot4-jazzy-runtime-clean",
+    doc_root="system_doc/turtlebot4_clean",
+    # 不指定 file_configs → 自动递归发现官方文档、runtime 参数、ROS 接口、
+    # launch/world/profile 约束和 ready metadata。目标特定语义由
+    # src/oracle_ir/targets/turtlebot4_jazzy.yaml 的 descriptor 提供。
+)
+
+
 def get_config(target_name: str) -> TargetConfig:
     """获取目标系统配置"""
     configs = {
         "px4": PX4_CONFIG,
         "turtlebot3": TURTLEBOT3_CONFIG,
         "moveit2_panda": MOVEIT2_PANDA_CONFIG,
+        "turtlebot4_jazzy": TURTLEBOT4_JAZZY_CONFIG,
     }
     if target_name not in configs:
         raise ValueError(

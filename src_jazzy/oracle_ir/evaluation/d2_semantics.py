@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from . import DimensionScore
-from src.oracle_ir.schema import OracleIR
+from src_jazzy.oracle_ir.schema import OracleIR
 
 
 def evaluate_semantics(

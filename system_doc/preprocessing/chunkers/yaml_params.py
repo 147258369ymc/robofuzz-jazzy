@@ -145,6 +145,10 @@ class YamlParamChunker(BaseChunker):
             unit = self._joint_unit(quantity, joint)
             if unit:
                 fields["unit"] = unit
+        else:
+            unit = self._motion_unit(path, quantity)
+            if unit:
+                fields["unit"] = unit
 
         tags = set()
         role = fields["param_role"]
@@ -177,6 +181,8 @@ class YamlParamChunker(BaseChunker):
             return "default_joint_limits"
         if name == "initial_positions.yaml":
             return "initial_positions"
+        if "control" in name or "controller" in name:
+            return "runtime_control_limits"
         return "yaml_params"
 
     def _param_role(self, leaf: str, value: Any) -> str:
@@ -192,7 +198,7 @@ class YamlParamChunker(BaseChunker):
         return "config_value"
 
     def _bound_kind(self, leaf: str) -> str:
-        leaf_lower = leaf.lower()
+        leaf_lower = leaf.lower().split(".")[-1]
         if leaf_lower.startswith(("max_", "upper", "soft_upper")):
             return "max"
         if leaf_lower.startswith(("min_", "lower", "soft_lower")):
@@ -235,12 +241,29 @@ class YamlParamChunker(BaseChunker):
             return "m" if is_prismatic_like else "rad"
         return ""
 
+    def _motion_unit(self, path: list[str], quantity: str) -> str:
+        text = ".".join(path).lower()
+        is_angular = any(key in text for key in ("angular", "yaw", "theta", "omega"))
+        if quantity == "velocity":
+            return "rad/s" if is_angular else "m/s"
+        if quantity == "acceleration":
+            return "rad/s^2" if is_angular else "m/s^2"
+        return ""
+
     def _is_preferred_oracle_candidate(self, fields: dict[str, Any]) -> bool:
-        return (
-            fields.get("source_role") == "default_joint_limits"
-            and fields.get("param_role") in {"numeric_upper_bound", "numeric_lower_bound"}
-            and fields.get("quantity") in {"joint_velocity", "joint_acceleration", "joint_jerk"}
-        )
+        is_numeric_bound = fields.get("param_role") in {
+            "numeric_upper_bound",
+            "numeric_lower_bound",
+        }
+        if not is_numeric_bound:
+            return False
+        source_role = fields.get("source_role")
+        quantity = fields.get("quantity")
+        if source_role == "default_joint_limits":
+            return quantity in {"joint_velocity", "joint_acceleration", "joint_jerk"}
+        if source_role == "runtime_control_limits":
+            return quantity in {"velocity", "acceleration"}
+        return False
 
     def _guess_unit(self, name: str) -> str:
         """从参数名猜测单位"""

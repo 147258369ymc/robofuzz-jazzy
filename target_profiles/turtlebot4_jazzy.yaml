@@ -68,6 +68,8 @@ watch:
     /odom: nav_msgs/msg/Odometry
     /scan: sensor_msgs/msg/LaserScan
   optional:
+    /cmd_vel: geometry_msgs/msg/TwistStamped
+    /clock: rosgraph_msgs/msg/Clock
     /hazard_detection: irobot_create_msgs/msg/HazardDetectionVector
     /slip_status: irobot_create_msgs/msg/SlipStatus
     /stall_status: irobot_create_msgs/msg/WheelStatus

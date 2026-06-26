@@ -227,8 +227,8 @@ class ToolExecutor:
             return {"valid": False, "errors": ["输出不是有效的 YAML 字典"]}
 
         try:
-            from src.oracle_ir.transform.parser import _dict_to_oracle_ir
-            from src.oracle_ir.transform.validator import validate_oracle_ir
+            from src_jazzy.oracle_ir.transform.parser import _dict_to_oracle_ir
+            from src_jazzy.oracle_ir.transform.validator import validate_oracle_ir
             ir = _dict_to_oracle_ir(data)
             result = validate_oracle_ir(ir)
             return {"valid": result.valid, "errors": result.errors}

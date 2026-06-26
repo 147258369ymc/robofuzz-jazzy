@@ -7,11 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from src.oracle_ir.transform.parser import load_all_specs
-from src.oracle_ir.evaluation import EvalReport
-from src.oracle_ir.evaluation.d1_provenance import evaluate_provenance
-from src.oracle_ir.evaluation.d2_semantics import evaluate_semantics
-from src.oracle_ir.evaluation.d4_logic import evaluate_logic
+from src_jazzy.oracle_ir.transform.parser import load_all_specs
+from src_jazzy.oracle_ir.evaluation import EvalReport
+from src_jazzy.oracle_ir.evaluation.d1_provenance import evaluate_provenance
+from src_jazzy.oracle_ir.evaluation.d2_semantics import evaluate_semantics
+from src_jazzy.oracle_ir.evaluation.d4_logic import evaluate_logic
 
 
 def run_evaluation(

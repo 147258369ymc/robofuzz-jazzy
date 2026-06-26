@@ -2,14 +2,25 @@
 # 修改此文件即可切换 API 提供商 / 模型 / 地址，无需改代码
 
 # 当前激活的配置（对应下面 profiles 中的 key）
-active_profile: claude_awsq
+active_profile: rightcode_gpt
 
 profiles:
+  # RightCode GPT / OpenAI Responses 兼容接口
+  # api_key 留空时会优先读取环境变量 OPENAI_API_KEY，
+  # 再回退读取 ~/.codex/auth.json 中的 OPENAI_API_KEY。
+  rightcode_gpt:
+    provider: openai_responses
+    base_url: "https://right.codes/codex/v1"
+    api_key: ""
+    model: "gpt-5.5"
+    max_tokens: 4096
+    temperature:
+
   # 你的逆向 Claude API
   claude_awsq:
-    provider: anthropic          # anthropic | openai
+    provider: anthropic          # anthropic | openai | openai_responses
     base_url: "https://right.codes/claude-aws"   # 改成你的实际地址
-    api_key: "sk-670b93b884e24a07859351011c4c1de4"            # 改成你的实际 key
+    api_key: ""                  # 留空则从环境变量 ANTHROPIC_API_KEY 读取
     model: "claude-opus-4-6"
     max_tokens: 4096
     temperature: 0.0

@@ -64,7 +64,13 @@ class SpecIndex:
 # 通用标签规则（不绑定任何特定目标系统）
 _GENERIC_TAG_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(r"(velocity|vel_max|vel_min|speed|airspd)", re.I), "velocity_constraint"),
-    (re.compile(r"(roll|pitch|yaw|tilt|attitude|orientation)", re.I), "attitude_constraint"),
+    (
+        re.compile(
+            r"(?<![A-Za-z])(rollrate|pitchrate|yawrate|roll|pitch|yaw|tilt|attitude|orientation)(?![A-Za-z])",
+            re.I,
+        ),
+        "attitude_constraint",
+    ),
     (re.compile(r"(altitude|height|alt_max|alt_min|climb_rate|sink_rate)", re.I), "altitude_constraint"),
     (re.compile(r"(position\s*(max|min|limit|error)|waypoint|pos_max|pos_min|gps\s*(loss|fail))", re.I), "position_constraint"),
     (re.compile(r"(^|_)(imu|gyro|accel|baro|mag|lidar|sonar|encoder)(_|$)", re.I), "sensor"),

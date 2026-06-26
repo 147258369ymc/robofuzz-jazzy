@@ -53,6 +53,10 @@ def _parse_scope(data: dict | None) -> Scope:
     if not data:
         return Scope()
 
+    flight_modes = data.get("flight_modes")
+    if flight_modes is None:
+        flight_modes = data.get("operating_modes", [])
+
     filter_expr = data.get("filter_expr", "")
     filter_obs_raw = data.get("filter_observations", [])
     filter_observations = _parse_observations(filter_obs_raw)
@@ -69,7 +73,7 @@ def _parse_scope(data: dict | None) -> Scope:
                 filter_observations = _parse_observations([airborne_obs])
 
     return Scope(
-        flight_modes=data.get("flight_modes", []),
+        flight_modes=flight_modes,
         vehicle_type=data.get("vehicle_type", ""),
         require_airborne=require_airborne,
         preconditions=data.get("preconditions", []),

@@ -93,6 +93,10 @@ class TargetDescriptor:
     param_naming: dict[str, list[str]] = field(default_factory=dict)
     # 格式: {"velocity_constraint": [".*VEL.*", ".*SPEED.*"], ...}
 
+    # 目标特定但可迁移呈现的生成约束。
+    # Agent 只读取文本规则，通用 parser/validator 不硬编码目标逻辑。
+    generation_rules: list[str] = field(default_factory=list)
+
     # topic 命名模板（不同系统的 topic 命名规则不同）
     topic_suffix: str = ""             # PX4 用 "_PubSubTopic"，ROS2 通常无后缀
 
@@ -146,6 +150,12 @@ class TargetDescriptor:
         for sc in self.safety_conditions:
             lines.append(f"  - {sc.name}: {sc.check_expr}")
             lines.append(f"    说明: {sc.description}")
+
+        if self.generation_rules:
+            lines.append(f"")
+            lines.append(f"## OracleIR 生成规则")
+            for rule in self.generation_rules:
+                lines.append(f"  - {rule}")
 
         return "\n".join(lines)
 

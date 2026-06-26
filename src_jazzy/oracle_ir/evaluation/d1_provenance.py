@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import DimensionScore
-from src.oracle_ir.schema import OracleIR
+from src_jazzy.oracle_ir.schema import OracleIR
 
 
 # OracleIR type → 期望的 SpecBlock tags 映射（宽松匹配）

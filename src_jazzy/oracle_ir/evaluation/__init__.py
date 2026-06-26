@@ -17,8 +17,8 @@ from typing import Any
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.oracle_ir.schema import OracleIR
-from src.oracle_ir.transform.parser import load_all_specs
+from src_jazzy.oracle_ir.schema import OracleIR
+from src_jazzy.oracle_ir.transform.parser import load_all_specs
 
 
 # =========================================================================

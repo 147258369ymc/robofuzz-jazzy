@@ -7,13 +7,13 @@ OracleIR 生成 Agent 调用器
 
 用法:
     # 为所有速度约束参数生成 oracle
-    python -m src.oracle_ir.agent.generate --target px4 --tag velocity_constraint
+    python -m src_jazzy.oracle_ir.agent.generate --target px4 --tag velocity_constraint
 
     # 为单个参数生成 oracle
-    python -m src.oracle_ir.agent.generate --target px4 --block-id px4.parameter.MPC_XY_VEL_MAX
+    python -m src_jazzy.oracle_ir.agent.generate --target px4 --block-id px4.parameter.MPC_XY_VEL_MAX
 
     # 干跑模式（只看 prompt，不调 API）
-    python -m src.oracle_ir.agent.generate --target px4 --block-id px4.parameter.MPC_XY_VEL_MAX --dry-run
+    python -m src_jazzy.oracle_ir.agent.generate --target px4 --block-id px4.parameter.MPC_XY_VEL_MAX --dry-run
 """
 
 import json
@@ -189,9 +189,11 @@ def build_system_prompt(target_name: str, descriptor_context: str = "") -> str:
 1. id 格式: {{system}}.{{category}}.{{name}}，category 从 range/validity/consistency 中选
 2. observations 必须绑定到真实的 topic 和 field（从下文给出的可用 topics 中选择）
 3. parameter.default 必须与给定的 structured_fields.default 完全一致
-4. 表达式只能用: + - * / ** sqrt abs min max norm mean degrees acos is_valid
-5. feedback.direction: 如果是上限约束用 maximize，下限约束用 minimize
-6. provenance.chunk_id 必须填写给定的 block_id
+4. 表达式只能用: + - * / ** sqrt abs min max norm mean degrees acos is_valid param()
+5. 时间导数类约束（acceleration, jerk, rate-of-change）必须使用 window.type: sequential_pairs，并通过 (current - prev_current) / dt 计算；禁止把 velocity 直接和 acceleration/jerk 参数比较。
+6. feedback.direction 表示 fuzz 引导方向，不是安全方向。若 metric 是剩余裕量（如 limit - abs(observed) 或 observed - lower_limit），direction 必须用 minimize；若 metric 是观测压力/比值（如 abs(observed) 或 abs(observed)/limit），direction 才用 maximize。
+7. 可执行 spec 优先使用目标 descriptor 中的运行时 topics；如果必须使用未录制或非默认 topic，应在 provenance.evidence 中说明需要扩展 watchlist。
+8. provenance.chunk_id 必须填写给定的 block_id
 
 只输出 YAML，不要解释。
 """
@@ -274,7 +276,7 @@ def call_agent(system_prompt: str, user_prompt: str, dry_run: bool = False) -> s
         print("=" * 60)
         return ""
 
-    from src.oracle_ir.agent.api_manager import load_config
+    from src_jazzy.oracle_ir.agent.api_manager import load_config
     config = load_config()
     logger.info(f"使用 API: {config.provider} / {config.model}")
     return config.call(system_prompt, user_prompt)
@@ -299,8 +301,8 @@ def validate_output(yaml_text: str) -> tuple[bool, list[str]]:
     返回 (是否通过, 错误列表)
     """
     import yaml as yaml_lib
-    from src.oracle_ir.transform.parser import load_oracle_ir
-    from src.oracle_ir.transform.validator import validate_oracle_ir
+    from src_jazzy.oracle_ir.transform.parser import load_oracle_ir
+    from src_jazzy.oracle_ir.transform.validator import validate_oracle_ir
 
     yaml_text = strip_yaml_fences(yaml_text)
 
@@ -315,7 +317,7 @@ def validate_output(yaml_text: str) -> tuple[bool, list[str]]:
 
     # 用 OracleIR 的 validator 做完整校验
     try:
-        from src.oracle_ir.transform.parser import _dict_to_oracle_ir
+        from src_jazzy.oracle_ir.transform.parser import _dict_to_oracle_ir
         ir = _dict_to_oracle_ir(data)
         result = validate_oracle_ir(ir)
         return result.valid, result.errors
@@ -423,7 +425,7 @@ def main():
     # 加载数据（路径由 target 决定）
     blocks_dir = PROJECT_ROOT / "system_doc" / "preprocessed" / target / "blocks"
     index_path = PROJECT_ROOT / "system_doc" / "preprocessed" / target / "index.json"
-    specs_dir = PROJECT_ROOT / "src" / "oracle_ir" / "specs" / target
+    specs_dir = PROJECT_ROOT / "src_jazzy" / "oracle_ir" / "specs" / target
     output_dir = Path(args.output) if args.output else specs_dir
 
     if not blocks_dir.exists():
@@ -433,9 +435,9 @@ def main():
 
     # 加载 descriptor（可选）
     descriptor_context = ""
-    descriptor_path = PROJECT_ROOT / "src" / "oracle_ir" / "targets" / f"{target}.yaml"
+    descriptor_path = PROJECT_ROOT / "src_jazzy" / "oracle_ir" / "targets" / f"{target}.yaml"
     if descriptor_path.exists():
-        from src.oracle_ir.targets.descriptor import TargetDescriptor
+        from src_jazzy.oracle_ir.targets.descriptor import TargetDescriptor
         descriptor = TargetDescriptor.load(descriptor_path)
         descriptor_context = descriptor.to_agent_context()
         target_display = descriptor.display_name
@@ -467,7 +469,7 @@ def main():
 
     # ─── Agent 模式 ───
     if args.mode == "agent" and not args.dry_run:
-        from src.oracle_ir.agent.agent_loop import run_agent_batch
+        from src_jazzy.oracle_ir.agent.agent_loop import run_agent_batch
         run_agent_batch(
             block_ids=target_ids,
             target_name=target_display,
