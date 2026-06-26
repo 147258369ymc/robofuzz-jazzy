@@ -16,6 +16,34 @@ def _set_velocity(msg, lin_x, ang_z):
     return msg
 
 
+def _clamp(value, lower, upper):
+    return min(max(value, lower), upper)
+
+
+def clamp_velocity_message(msg, max_linear=0.15, max_angular=0.8):
+    """Clamp a diff-drive velocity command after generic mutation.
+
+    RoboFuzz's generic float mutator can inject values such as +/-5.0 into
+    Twist/TwistStamped fields. TurtleBot4 phase-1 fuzzing should explore within
+    a conservative drivable envelope, while deeper velocity-limit oracles can
+    later widen this intentionally.
+    """
+    target = msg.twist if hasattr(msg, "twist") else msg
+    target.linear.x = _clamp(target.linear.x, -max_linear, max_linear)
+    target.linear.y = 0.0
+    target.linear.z = 0.0
+    target.angular.x = 0.0
+    target.angular.y = 0.0
+    target.angular.z = _clamp(target.angular.z, -max_angular, max_angular)
+    return msg
+
+
+def clamp_velocity_sequence(msg_list, max_linear=0.15, max_angular=0.8):
+    for msg in msg_list:
+        clamp_velocity_message(msg, max_linear, max_angular)
+    return msg_list
+
+
 def generate_velocity_sequence_seeds(
     msg_class,
     seqlen=10,
@@ -122,13 +150,15 @@ def generate_tb3_sequence_seeds(msg_class, seqlen=10):
 
 
 def generate_tb4_sequence_seeds(msg_class, seqlen=10):
-    # Conservative smoke defaults for TurtleBot4/Create3. Deep oracle thresholds
-    # are derived later from runtime parameters or measured Jazzy baselines.
+    # Conservative Phase-1 smoke envelope for TurtleBot4 Standard / Create3.
+    # These are safe seed bounds (NOT oracle thresholds): deep velocity /
+    # hazard thresholds are derived later from runtime parameters,
+    # TurtleBot4/Create3 docs, or measured Jazzy baselines.
     return generate_velocity_sequence_seeds(
         msg_class,
         seqlen=seqlen,
-        max_linear=0.25,
-        max_angular=1.5,
+        max_linear=0.15,
+        max_angular=0.8,
     )
 
 

@@ -202,6 +202,115 @@ def wait_for_log_patterns(
     return False, graph
 
 
+def wait_for_topic_data(topic_map, timeout_sec=120, min_msgs=1):
+    """Wait until each topic is not just advertised but actually publishing.
+
+    ``topic_map`` maps topic name -> message type string (e.g.
+    ``"nav_msgs/msg/Odometry"``). A topic is considered ready once at least
+    ``min_msgs`` messages are received on it within the timeout. This guards
+    against readiness gates that pass on mere topic presence while the
+    underlying producer (e.g. a ros2_control controller still spawning) has
+    not begun streaming data yet.
+
+    Returns ``(ok, graph)`` mirroring the other ``wait_for_*`` helpers.
+    """
+    expected = dict(topic_map or {})
+    graph = {
+        "expected": expected,
+        "received": {},
+        "missing": sorted(expected),
+        "errors": {},
+    }
+    if not expected:
+        graph["missing"] = []
+        return True, graph
+
+    from rosidl_runtime_py.utilities import get_message
+
+    created_context = False
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        created_context = True
+
+    node_name = f"_robofuzz_data_wait_{os.getpid()}_{time.time_ns()}"
+    node = rclpy.create_node(node_name)
+    counts = {topic: 0 for topic in expected}
+    subs = []
+
+    def _make_cb(topic):
+        def _cb(_msg):
+            counts[topic] += 1
+        return _cb
+
+    try:
+        from rclpy.qos import (
+            QoSProfile,
+            QoSReliabilityPolicy,
+            QoSHistoryPolicy,
+            QoSDurabilityPolicy,
+        )
+
+        # Readiness topics come from different ROS 2 QoS worlds. TurtleBot4
+        # /odom is reliable + transient-local, while laser/sensor streams are
+        # often best-effort. Create a small set of compatible subscriptions so
+        # readiness depends on real samples rather than one brittle QoS choice.
+        qos_candidates = [
+            QoSProfile(depth=10),
+            QoSProfile(
+                reliability=QoSReliabilityPolicy.BEST_EFFORT,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=10,
+            ),
+            QoSProfile(
+                reliability=QoSReliabilityPolicy.RELIABLE,
+                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                history=QoSHistoryPolicy.KEEP_LAST,
+                depth=10,
+            ),
+        ]
+        for topic, type_name in expected.items():
+            try:
+                msg_class = get_message(type_name)
+            except Exception as exc:
+                graph["errors"][topic] = str(exc)
+                return False, graph
+            for qos in qos_candidates:
+                subs.append(
+                    node.create_subscription(
+                        msg_class, topic, _make_cb(topic), qos
+                    )
+                )
+
+        deadline = time.time() + timeout_sec
+        last_report = 0
+        while time.time() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.1)
+            received = {t: c for t, c in counts.items() if c >= min_msgs}
+            missing = sorted(t for t in expected if counts[t] < min_msgs)
+            graph["received"] = dict(received)
+            graph["missing"] = missing
+            if not missing:
+                return True, graph
+
+            now = time.time()
+            if now - last_report >= 2.0:
+                print("[data wait] no data yet on:", ", ".join(missing))
+                last_report = now
+
+        return False, graph
+    finally:
+        for sub in subs:
+            try:
+                node.destroy_subscription(sub)
+            except Exception:
+                pass
+        try:
+            node.destroy_node()
+        finally:
+            if created_context:
+                rclpy.shutdown()
+
+
 def get_topic_type_map():
     try:
         proc = sp.run(
@@ -654,6 +763,36 @@ def sweep_moveit_processes():
         "ros2_control_node",
         "robot_state_publisher",
         "static_transform_publisher",
+    ):
+        sp.run(
+            ["pkill", "-9", "-f", name],
+            stdout=sp.DEVNULL,
+            stderr=sp.DEVNULL,
+        )
+
+
+def sweep_turtlebot_processes():
+    """Best-effort cleanup for TurtleBot/Gazebo processes that escaped launch PGID.
+
+    Needed for GUI mode multi-round stability: gz sim gui processes can survive
+    killpg() and interfere with subsequent rounds. This ensures clean slate.
+    """
+    for name in (
+        "gz sim",
+        "ruby.*gz",
+        "ign gazebo",
+        "gzserver",
+        "gzclient",
+        "turtlebot4_node",
+        "turtlebot4_gz_hmi_node",
+        "motion_control",
+        "controller_manager",
+        "spawner_.*controller",
+        "component_container",
+        "robot_state_publisher",
+        "static_transform_publisher",
+        "ros_gz_bridge",
+        "parameter_bridge",
     ):
         sp.run(
             ["pkill", "-9", "-f", name],

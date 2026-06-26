@@ -1,7 +1,7 @@
 schema_version: 1
 name: turtlebot4_jazzy
 display_name: TurtleBot4 Jazzy
-status: launch_smoke_verified
+status: tested
 
 environment:
   ubuntu: "24.04"
@@ -38,6 +38,21 @@ launch:
     - turtlebot4_jazzy
   compatibility_note: The upstream turtlebot4_gz.launch.py path remains available with TURTLEBOT4_HEADLESS=0, but the Docker default uses split headless launch with xvfb-run because the upstream sim.launch.py hardcodes a Gazebo GUI config and TurtleBot4 sensors still require a virtual display for server-side rendering.
 
+readiness:
+  required_log_patterns:
+    - "Turtlebot4 standard running."
+    - "Configured and activated diffdrive_controller"
+  required_topics_with_data:
+    /odom: nav_msgs/msg/Odometry
+  compatibility_note: >
+    TurtleBot4 bring-up can advertise topics before sensors and odometry are
+    publishing useful samples. Use a stable TurtleBot4 node log marker plus
+    the diffdrive activation marker for launch liveness, then require live
+    /odom samples before fuzzing. /scan remains a watched oracle topic, but it
+    is not a startup readiness gate because minimal debug worlds can advertise
+    /scan before useful laser samples arrive.
+
+
 input:
   mode: velocity_command
   preferred:
@@ -65,7 +80,7 @@ watch:
 oracle:
   module: oracles.turtlebot
   mode: turtlebot4_jazzy
-  status: requires_adaptation
+  status: verified
   initial_properties:
     - existential_topics_present
     - command_odom_consistency

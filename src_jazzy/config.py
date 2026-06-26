@@ -50,6 +50,7 @@ class RuntimeConfig:
         self.topic_aliases = {}
         self.required_actions_for_readiness = {}
         self.required_log_patterns_for_readiness = []
+        self.required_topics_with_data_for_readiness = {}
         self.launch_adapter = ""
         self.launch_command = []
         self.oracle_mode = ""

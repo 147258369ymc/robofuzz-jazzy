@@ -28,6 +28,7 @@ class ExecMode(Enum):
 class Executor:
     def __init__(self, fuzzer):
         self.fuzzer = fuzzer
+        self.rosbag_pgrp = None
 
     def prep_execution(self, msg_type_class, topic_name):
         # prepare execution
@@ -69,6 +70,20 @@ class Executor:
         #     print("[executor] waiting for stop_monitor service")
 
         # # self.fuzzer.req_stop_monitor = Empty.Request()
+
+    def prepare_msg_for_publish(self, msg):
+        if not getattr(self.fuzzer.config, "tb4_sitl", False):
+            return msg
+
+        header = getattr(msg, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
+            return msg
+
+        now_ns = time.time_ns()
+        stamp.sec = int(now_ns // 1_000_000_000)
+        stamp.nanosec = int(now_ns % 1_000_000_000)
+        return msg
 
     def clear_execution(self):
         return
@@ -202,6 +217,8 @@ class Executor:
             )
 
     def kill_rosbag(self):
+        if self.rosbag_pgrp is None:
+            return
         started = time.time()
         try:
             print("[executor] killing ros2 bag")
@@ -398,6 +415,7 @@ class Executor:
                 if mode == ExecMode.SINGLE:
                     subframe = time.time()
                     msg = msg_list[0]
+                    self.prepare_msg_for_publish(msg)
 
                     self.save_msg_to_queue(msg, frame, subframe)
 
@@ -427,6 +445,7 @@ class Executor:
                     for i, msg in enumerate(msg_list):
                         # print("{}-th msg in sequence".format(i))
                         subframe = time.time()
+                        self.prepare_msg_for_publish(msg)
 
                         self.save_msg_to_queue(msg, frame, subframe)
 

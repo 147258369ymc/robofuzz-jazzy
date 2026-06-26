@@ -30,6 +30,9 @@ class TargetProfile:
     required_log_patterns_for_readiness: List[str] = field(
         default_factory=list
     )
+    required_topics_with_data_for_readiness: Dict[str, str] = field(
+        default_factory=dict
+    )
     launch_adapter: str = ""
     launch_command: List[str] = field(default_factory=list)
     oracle_module: str = ""
@@ -100,6 +103,9 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
     required_log_patterns = list(
         readiness.get("required_log_patterns", []) or []
     )
+    required_topics_with_data = dict(
+        readiness.get("required_topics_with_data", {}) or {}
+    )
     launch = raw.get("launch", {}) or {}
     oracle = raw.get("oracle", {}) or {}
 
@@ -115,6 +121,7 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
         topic_aliases=topic_aliases,
         required_actions_for_readiness=required_actions,
         required_log_patterns_for_readiness=required_log_patterns,
+        required_topics_with_data_for_readiness=required_topics_with_data,
         launch_adapter=launch.get("adapter", ""),
         launch_command=list(launch.get("command", []) or []),
         oracle_module=oracle.get("module", ""),
@@ -157,6 +164,9 @@ def attach_profile_to_config(config, profile: TargetProfile):
     )
     config.required_log_patterns_for_readiness = list(
         profile.required_log_patterns_for_readiness
+    )
+    config.required_topics_with_data_for_readiness = dict(
+        profile.required_topics_with_data_for_readiness
     )
     config.launch_adapter = profile.launch_adapter
     config.launch_command = list(profile.launch_command)

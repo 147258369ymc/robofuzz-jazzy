@@ -67,6 +67,14 @@ except ImportError:
     TurtleSimPose = None
 
 
+def safe_rclpy_shutdown():
+    try:
+        if rclpy.ok():
+            rclpy.shutdown()
+    except Exception as e:
+        print(f"[-] rclpy shutdown skipped: {e}")
+
+
 def moveit_error_signature(errs):
     """Collapse a list of MoveIt oracle error strings into a set of coarse
     signatures, so repeated discoveries of the SAME bug (e.g. joint1 velocity
@@ -275,6 +283,8 @@ class Fuzzer:
         self.client = None
         self.shm = None
         self.shm_data = None
+        self.running = False
+        self.state_monitor_pgrp = None
 
     def init_cov_map(self):
         print("[*] Initializing shm for coverage tracking")
@@ -473,13 +483,15 @@ class Fuzzer:
             if self.config.input_type == "geometry_msgs/msg/TwistStamped":
                 from geometry_msgs.msg import TwistStamped as VelocityMsg
                 platform = "tb4"
+                # Conservative Phase-1 envelope (see seed_generator.py):
+                # linear.x in [-0.15, 0.15], angular.z in [-0.8, 0.8].
                 velocity_seeds = [
-                    (0.20, 0.0),
+                    (0.15, 0.0),
                     (-0.15, 0.0),
-                    (0.0, 1.0),
-                    (0.0, -1.0),
-                    (0.15, 0.75),
-                    (0.15, -0.75),
+                    (0.0, 0.8),
+                    (0.0, -0.8),
+                    (0.10, 0.5),
+                    (0.10, -0.5),
                 ]
             else:
                 from geometry_msgs.msg import Twist as VelocityMsg
@@ -667,6 +679,21 @@ class Fuzzer:
                     f"target profile {profile.name} did not expose "
                     "required actions before timeout"
                 )
+            ok, data_graph = harness.wait_for_topic_data(
+                profile.required_topics_with_data_for_readiness,
+                timeout_sec=180 if profile.family == "px4" else 120,
+            )
+            data_graph_path = os.path.join(
+                self.config.meta_dir,
+                "topic_data.ready.json",
+            )
+            with open(data_graph_path, "w") as fp:
+                json.dump(data_graph, fp, indent=2, sort_keys=True)
+            if not ok:
+                raise RuntimeError(
+                    f"target profile {profile.name} did not publish data on "
+                    "required topics before timeout"
+                )
             self.running = True
             return
 
@@ -799,28 +826,46 @@ class Fuzzer:
         self.running = True
 
     def kill_target(self):
-        if not self.running:
+        if not self.running and self.config.target_profile is None:
             print("[-] nothing to kill")
             return
 
         if self.config.target_profile is not None:
-            try:
-                os.killpg(self.ros_pgrp.pid, signal.SIGKILL)
+            proc = getattr(self, "ros_pgrp", None)
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    for fp in getattr(
+                        proc, "_robofuzz_log_handles", None
+                    ) or ():
+                        try:
+                            fp.close()
+                        except OSError:
+                            pass
+                except ProcessLookupError as e:
+                    print("[-] profile target killpg error:", e)
+                except Exception as e:
+                    print("[-] profile target killpg failed:", e)
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+                self.ros_pgrp = None
+            else:
                 for fp in getattr(
-                    self.ros_pgrp, "_robofuzz_log_handles", None
+                    self, "_robofuzz_log_handles", None
                 ) or ():
                     try:
                         fp.close()
                     except OSError:
                         pass
-                self.running = False
-            except ProcessLookupError as e:
-                print("[-] profile target killpg error:", e)
-            except Exception as e:
-                print("[-] profile target killpg failed:", e)
+
+            self.running = False
 
             if getattr(self.config, "target_family", None) == "moveit":
                 harness.sweep_moveit_processes()
+            elif getattr(self.config, "target_family", None) == "turtlebot":
+                harness.sweep_turtlebot_processes()
 
         elif self.config.px4_sitl:
             # Only kill PX4, keep Gazebo alive for reuse across iterations
@@ -846,19 +891,25 @@ class Fuzzer:
             if self.config.tb3_sitl:
                 os.system("pkill gzserver")
 
-        self.node_ptr.destroy_node()
-        self.node_ptr = None
         # os.system("ros2 daemon stop")
 
     def kill_monitor(self):
         # kill state monitor
+        if self.state_monitor_pgrp is None:
+            return
         try:
             print("killing state monitor")
             os.killpg(self.state_monitor_pgrp.pid, signal.SIGKILL)
+            self.state_monitor_pgrp = None
         except ProcessLookupError as e:
             print("[-] state monitor killpg error:", e)
         except AttributeError as e:
             print("[-] state monitor not initialized:", e)
+
+    def destroy_fuzzer_node(self):
+        if self.node_ptr is not None:
+            self.node_ptr.destroy_node()
+            self.node_ptr = None
 
     def destroy(self):
         # kill target if still exists
@@ -873,6 +924,8 @@ class Fuzzer:
         if self.node_ptr is not None:
             for sub in self.subs:
                 self.node_ptr.destroy_subscription(sub)
+            self.subs = []
+            self.destroy_fuzzer_node()
 
         try:
             self.display.stop()
@@ -1269,6 +1322,20 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     ["angular", "z", np.dtype("float64")],
                 ]
 
+            # Phase-1 TurtleBot4 feedback metrics (populated by
+            # oracles.turtlebot._check_turtlebot4_smoke). These are basic
+            # semantic signals, not deep oracle thresholds. DEC favors
+            # smaller minimum scan distances, guiding toward obstacle/contact
+            # boundaries; the other metrics use INC for larger anomalies.
+            fbk = Feedback("scan_min_range", FeedbackType.DEC)
+            fbk_list.append(fbk)
+            fbk = Feedback("scan_invalid_ratio", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("cmd_odom_linear_agreement", FeedbackType.INC)
+            fbk_list.append(fbk)
+            fbk = Feedback("cmd_odom_angular_agreement", FeedbackType.INC)
+            fbk_list.append(fbk)
+
         elif fuzzer.config.tb3_hitl:
             field_whitelist = [
                 ["linear", "x", np.dtype("float64")],
@@ -1597,6 +1664,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
             if msg_list is None:
                 continue
 
+            if fuzzer.config.tb4_sitl:
+                import seed_generator
+                seed_generator.clamp_velocity_sequence(
+                    msg_list,
+                    max_linear=0.15,
+                    max_angular=0.8,
+                )
+
             executor.prep_execution(msg_type_class, topic_name)
 
             # register pre_exec functions and custom publisher function
@@ -1732,6 +1807,17 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         print(f"[*] Reached maxloop={fuzzer.config.maxloop}; "
                               "stopping")
                         break
+                elif fuzzer.config.target_profile is not None:
+                    # Modern non-MoveIt profiles can fail in readiness before
+                    # a rosbag/oracle phase starts. Count the attempt so
+                    # maxloop still terminates short smoke tests instead of
+                    # retrying forever.
+                    fuzzer.rounds += 1
+                    if (fuzzer.config.maxloop > 0
+                            and fuzzer.rounds >= fuzzer.config.maxloop):
+                        print(f"[*] Reached maxloop={fuzzer.config.maxloop}; "
+                              "stopping")
+                        break
                 continue
             # fuzzer.oh_.check_oracle() # will move everything into checker
             # (turtlesim, sros, ...)
@@ -1786,7 +1872,10 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         state_msgs_dict = parser.process_messages()
                         # if dict is empty, fallback to all messages w/o ts filtering
                         if len(state_msgs_dict) == 0:
-                            print("[-] watch failed")
+                            print(
+                                "[fuzzer] time-window parser returned no "
+                                "messages; using full rosbag fallback"
+                            )
                             state_msgs_dict = parser.process_all_messages()
                     finally:
                         parser.close()
@@ -2186,8 +2275,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # broken target cannot stall on one seed indefinitely.
                 _advance_moveit_cycle(scheduler, fbk_list, fuzzer)
 
-            elif fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl:
-                # For TB3 sequence mode: cycle every 10 rounds to consume
+            elif (fuzzer.config.tb4_sitl or fuzzer.config.tb3_sitl
+                    or fuzzer.config.tb3_hitl):
+                # For TB3/TB4 sequence mode: cycle every 10 rounds to consume
                 # interesting seeds from the queue regularly
                 if (scheduler.campaign == Campaign.RND_SEQUENCE
                         and scheduler.round_cnt >= 10):
@@ -2299,7 +2389,7 @@ def main(config):
             finally:
                 fuzzer.kill_target()
                 fuzzer.destroy()
-                rclpy.shutdown()
+                safe_rclpy_shutdown()
 
         else:
             try:
@@ -2321,7 +2411,7 @@ def main(config):
             finally:
                 fuzzer.kill_target()
                 fuzzer.destroy()
-                rclpy.shutdown()
+                safe_rclpy_shutdown()
 
     elif config.method == "service":
         try:
@@ -2332,7 +2422,7 @@ def main(config):
             traceback.print_tb(exc_tb)
         finally:
             fuzzer.destroy()
-            rclpy.shutdown()
+            safe_rclpy_shutdown()
 
 
 if __name__ == "__main__":

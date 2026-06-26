@@ -137,6 +137,159 @@ class TargetProfileTests(unittest.TestCase):
             cfg.required_log_patterns_for_readiness,
         )
 
+    def test_tb4_profile_declares_drivable_readiness(self):
+        import config as config_module
+        import target_profiles
+
+        profile = target_profiles.load_profile("turtlebot4_jazzy", REPO_ROOT)
+
+        # Use the TurtleBot4 node marker plus diffdrive activation. /odom can
+        # appear before the controller is ready to consume commands, so the
+        # activation marker prevents publishing the whole fuzz sequence too
+        # early.
+        self.assertIn(
+            "Turtlebot4 standard running.",
+            profile.required_log_patterns_for_readiness,
+        )
+        self.assertIn(
+            "Configured and activated diffdrive_controller",
+            profile.required_log_patterns_for_readiness,
+        )
+        # /odom must be producing data, not merely advertised. /scan stays in
+        # the oracle watchlist, but it is not a readiness gate because the
+        # minimal empty debug world can advertise /scan without producing laser
+        # samples.
+        self.assertEqual(
+            "nav_msgs/msg/Odometry",
+            profile.required_topics_with_data_for_readiness["/odom"],
+        )
+        self.assertNotIn(
+            "/scan",
+            profile.required_topics_with_data_for_readiness,
+        )
+        metadata = profile.to_metadata()
+        self.assertIn(
+            "required_topics_with_data_for_readiness", metadata
+        )
+
+        cfg = config_module.RuntimeConfig()
+        target_profiles.attach_profile_to_config(cfg, profile)
+        self.assertEqual(
+            profile.required_topics_with_data_for_readiness,
+            cfg.required_topics_with_data_for_readiness,
+        )
+
+    def test_profiles_without_data_readiness_default_empty(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile("px4_v117_jazzy", REPO_ROOT)
+        self.assertEqual(
+            {}, profile.required_topics_with_data_for_readiness
+        )
+
+    def test_tb4_sequence_seeds_use_conservative_envelope(self):
+        import seed_generator
+
+        class FakeTwist:
+            def __init__(self):
+                self.linear = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
+                self.angular = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
+
+        seqs = seed_generator.generate_sequence_seeds(
+            "tb4", FakeTwist, seqlen=6
+        )
+        self.assertTrue(seqs)
+        for seq in seqs:
+            for msg in seq:
+                self.assertLessEqual(abs(msg.linear.x), 0.15 + 1e-9)
+                self.assertLessEqual(abs(msg.angular.z), 0.8 + 1e-9)
+
+    def test_tb4_velocity_clamp_restricts_mutated_twiststamped(self):
+        import seed_generator
+
+        class FakeTwist:
+            def __init__(self):
+                self.linear = types.SimpleNamespace(x=5.0, y=3.0, z=-4.0)
+                self.angular = types.SimpleNamespace(x=2.0, y=-2.0, z=-5.0)
+
+        class FakeTwistStamped:
+            def __init__(self):
+                self.twist = FakeTwist()
+
+        msg = FakeTwistStamped()
+        seed_generator.clamp_velocity_sequence([msg], 0.15, 0.8)
+
+        self.assertEqual(0.15, msg.twist.linear.x)
+        self.assertEqual(0.0, msg.twist.linear.y)
+        self.assertEqual(0.0, msg.twist.linear.z)
+        self.assertEqual(0.0, msg.twist.angular.x)
+        self.assertEqual(0.0, msg.twist.angular.y)
+        self.assertEqual(-0.8, msg.twist.angular.z)
+
+    def test_tb4_scan_min_range_feedback_prefers_smaller_distances(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn(
+            'Feedback("scan_min_range", FeedbackType.DEC)',
+            text,
+        )
+
+    def test_tb4_empty_world_avoids_headless_sensors_crash(self):
+        world_path = os.path.join(REPO_ROOT, "worlds", "empty.sdf")
+        with open(world_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertNotIn("gz-sim-sensors-system", text)
+
+    def test_tb4_gui_simple_world_uses_official_stable_sensor_policy(self):
+        world_path = os.path.join(REPO_ROOT, "worlds", "simple.sdf")
+        with open(world_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn('<world name="simple">', text)
+        self.assertNotIn("gz-sim-sensors-system", text)
+
+    def test_run_target_uses_simple_world_for_tb4_gui(self):
+        run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
+        with open(run_target_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("TURTLEBOT4_GUI_WORLD:-simple", text)
+        self.assertIn("/work/worlds:", text)
+
+    def test_run_target_installs_custom_tb4_world_before_official_launch(self):
+        run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
+        with open(run_target_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("install_custom_tb4_world", text)
+        self.assertIn('/work/worlds/${world}.sdf', text)
+        self.assertIn('${tb4_gz_share}/worlds/${world}.sdf', text)
+
+    def test_fuzzer_initializes_running_before_profile_readiness(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("self.running = False", text)
+
+    def test_topic_data_readiness_uses_qos_candidates(self):
+        harness_path = os.path.join(SRC_DIR, "harness.py")
+        with open(harness_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("qos_candidates", text)
+        self.assertIn("QoSDurabilityPolicy.TRANSIENT_LOCAL", text)
+
+    def test_fuzzer_clamps_tb4_velocity_before_execution(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("clamp_velocity_sequence", text)
+
     def test_moveit_profile_records_result_diagnostic_topics(self):
         import target_profiles
 

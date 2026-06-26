@@ -132,6 +132,52 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertEqual(sp.DEVNULL, record["kwargs"]["stdout"])
         self.assertEqual(sp.DEVNULL, record["kwargs"]["stderr"])
 
+    def test_executor_kill_rosbag_is_quiet_when_not_started(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Cfg:
+            src_dir = SRC_DIR
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        with mock.patch("builtins.print") as print_mock:
+            ex.kill_rosbag()
+
+        self.assertEqual([], print_mock.call_args_list)
+
+    def test_executor_stamps_tb4_twiststamped_before_publish(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Stamp:
+            sec = 0
+            nanosec = 0
+
+        class _Header:
+            stamp = _Stamp()
+            frame_id = ""
+
+        class _Msg:
+            header = _Header()
+
+        class _Cfg:
+            tb4_sitl = True
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        msg = _Msg()
+        ex = executor.Executor(_Fuzzer())
+
+        ex.prepare_msg_for_publish(msg)
+
+        self.assertGreater(msg.header.stamp.sec + msg.header.stamp.nanosec, 0)
+
     def test_run_target_has_explicit_moveit_rviz_disable_switch(self):
         run_target = os.path.join(REPO_ROOT, "run_target.sh")
         with open(run_target, "r", encoding="utf-8") as fp:
@@ -140,3 +186,52 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertIn("MOVEIT_WITH_RVIZ=1|0", text)
         self.assertIn('MOVEIT_WITH_RVIZ:-1', text)
         self.assertIn("moveit2_panda_headless.launch.py", text)
+
+    def test_empty_time_window_log_is_not_reported_as_watch_failure(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertNotIn('print("[-] watch failed")', text)
+        self.assertIn("time-window parser returned no", text)
+        self.assertIn("using full rosbag fallback", text)
+
+    def test_profile_target_cleanup_does_not_depend_on_running_flag(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn(
+            "if not self.running and self.config.target_profile is None:",
+            text,
+        )
+        self.assertIn("self.ros_pgrp = None", text)
+
+    def test_kill_target_keeps_fuzzer_node_alive_between_profile_rounds(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+
+        kill_target_body = text.split(
+            "    def kill_target(self):", 1
+        )[1].split("    def kill_monitor(self):", 1)[0]
+        destroy_fuzzer_node_body = text.split(
+            "    def destroy_fuzzer_node(self):", 1
+        )[1].split("    def destroy(self):", 1)[0]
+        destroy_body = text.split(
+            "    def destroy(self):", 1
+        )[1].split("def inspect_target", 1)[0]
+
+        self.assertNotIn("destroy_node()", kill_target_body)
+        self.assertNotIn("destroy_fuzzer_node()", kill_target_body)
+        self.assertIn("destroy_node()", destroy_fuzzer_node_body)
+        self.assertIn("self.destroy_fuzzer_node()", destroy_body)
+
+    def test_rclpy_shutdown_is_idempotent_on_interrupt_cleanup(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("def safe_rclpy_shutdown():", text)
+        self.assertNotIn("                rclpy.shutdown()", text)
+        self.assertIn("safe_rclpy_shutdown()", text)

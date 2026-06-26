@@ -19,7 +19,8 @@ Environment overrides:
   TURTLEBOT4_GAZEBO=ignition|classic
   TURTLEBOT4_GZ_ARGS="-s -r"
   TURTLEBOT4_USE_XVFB=1|0
-  TURTLEBOT4_WORLD=warehouse
+  TURTLEBOT4_WORLD=warehouse|simple
+  TURTLEBOT4_GUI_WORLD=simple
   QT_QPA_PLATFORM=offscreen
   PX4_ROOT=/robofuzz/targets/PX4-Autopilot
   START_UXRCE_AGENT=1
@@ -62,33 +63,75 @@ pkg_share() {
   printf '%s/share/%s\n' "${prefix}" "${pkg}"
 }
 
+install_custom_tb4_world() {
+  local world="$1"
+  local tb4_gz_share="$2"
+  local src="/work/worlds/${world}.sdf"
+  local dst="${tb4_gz_share}/worlds/${world}.sdf"
+
+  if [[ "${world}" == */* || ! -f "${src}" ]]; then
+    return
+  fi
+
+  if [[ ! -f "${dst}" ]] || ! cmp -s "${src}" "${dst}"; then
+    cp -f "${src}" "${dst}"
+  fi
+}
+
 run_turtlebot4() {
   local model="${TURTLEBOT4_MODEL:-standard}"
   local gazebo="${TURTLEBOT4_GAZEBO:-ignition}"
-  local gz_args="${TURTLEBOT4_GZ_ARGS:--s -r}"
   local headless="${TURTLEBOT4_HEADLESS:-1}"
-  local world="${TURTLEBOT4_WORLD:-warehouse}"
+  local default_world="warehouse"
+  if [[ "${headless}" != "1" ]]; then
+    default_world="${TURTLEBOT4_GUI_WORLD:-simple}"
+  fi
+  local world="${TURTLEBOT4_WORLD:-${default_world}}"
+  local tb4_gz_share
+  local create_gz_share
+  local ros_share="/opt/ros/${ROS_DISTRO}/share"
 
-  export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+  tb4_gz_share="$(pkg_share turtlebot4_gz_bringup)"
+  create_gz_share="$(pkg_share irobot_create_gz_bringup)"
+  install_custom_tb4_world "${world}" "${tb4_gz_share}"
+  # Add /work/worlds to both GUI and headless resource paths so the lightweight
+  # RoboFuzz worlds can be selected by world name (e.g. TURTLEBOT4_WORLD=simple).
+  export GZ_SIM_RESOURCE_PATH="/work/worlds:${tb4_gz_share}/worlds:${create_gz_share}/worlds:${ros_share}:${GZ_SIM_RESOURCE_PATH:-}"
+
+  # Support custom world file paths (e.g., /work/worlds/empty.sdf)
+  # If world contains '/', treat as full path; otherwise append .sdf
+  local world_arg
+  if [[ "${world}" == */* ]]; then
+    world_arg="${world}"
+  elif [[ -f "/work/worlds/${world}.sdf" ]]; then
+    world_arg="/work/worlds/${world}.sdf"
+  else
+    world_arg="${world}.sdf"
+  fi
+
+  # GUI mode needs gz_args without -s (server-only); headless uses -s -r
+  local gz_args
+  if [[ "${headless}" == "1" ]]; then
+    gz_args="${TURTLEBOT4_GZ_ARGS:--s -r}"
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+  else
+    gz_args="${TURTLEBOT4_GZ_ARGS:--r}"
+    # GUI mode: unset offscreen to allow X11 display
+    unset QT_QPA_PLATFORM
+  fi
 
   if [[ "${headless}" == "1" ]]; then
-    local tb4_gz_share
-    local create_gz_share
-    local ros_share="/opt/ros/${ROS_DISTRO}/share"
     local sim_pid=""
     local clock_pid=""
     local use_xvfb="${TURTLEBOT4_USE_XVFB:-1}"
 
-    tb4_gz_share="$(pkg_share turtlebot4_gz_bringup)"
-    create_gz_share="$(pkg_share irobot_create_gz_bringup)"
-    export GZ_SIM_RESOURCE_PATH="${tb4_gz_share}/worlds:${create_gz_share}/worlds:${ros_share}:${GZ_SIM_RESOURCE_PATH:-}"
     export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 
     if [[ "${use_xvfb}" == "1" ]] && command -v xvfb-run >/dev/null 2>&1; then
       xvfb-run -a -s "-screen 0 1280x1024x24" \
-        ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world}.sdf" &
+        ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
     else
-      ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world}.sdf" &
+      ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
     fi
     sim_pid="$!"
     ros2 run ros_gz_bridge parameter_bridge \
@@ -104,9 +147,11 @@ run_turtlebot4() {
     return
   fi
 
+  # GUI mode (non-headless): use turtlebot4_gz.launch.py
   exec ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py \
     "model:=${model}" \
     "gazebo:=${gazebo}" \
+    "world:=${world}" \
     rviz:=false \
     "gz_args:=${gz_args}"
 }

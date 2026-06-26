@@ -33,6 +33,176 @@ def _cmd_twist(msg):
     return msg.twist if hasattr(msg, "twist") else msg
 
 
+# === TurtleBot4 Phase-1 sanity thresholds ===
+# These are generic numerical-sanity / sign-agreement tolerances, NOT
+# TurtleBot3/Burger hardware limits. Real velocity-envelope and
+# hazard/reflex thresholds are deferred to later phases (derived from
+# TurtleBot4/Create3 docs, runtime parameters, or measured baselines).
+TB4_QUAT_NORM_TOL = 0.05      # unit-quaternion deviation tolerance
+TB4_CMD_SIGN_THRESH = 0.05    # min |cmd| to assert a direction (m/s, rad/s)
+TB4_ODOM_SIGN_THRESH = 0.05   # min mean |odom| to assert a direction
+TB4_SCAN_RANGE_REL_TOL = 0.05  # relative tolerance over declared range_max
+TB4_SCAN_RANGE_ABS_TOL = 0.05  # absolute tolerance over declared range_max
+
+
+def _mean(values):
+    return sum(values) / len(values) if values else 0.0
+
+
+def _consistent_sign(values, threshold):
+    signs = set()
+    for value in values:
+        if value > threshold:
+            signs.add(1)
+        elif value < -threshold:
+            signs.add(-1)
+    if not signs:
+        return 0
+    if len(signs) > 1:
+        return None
+    return next(iter(signs))
+
+
+def _check_scan_sanity(scan_list, errs, feedback_list):
+    """LaserScan prepass: NaN / negative are errors; inf is a valid
+    'no return' reading. Finite values beyond the declared range_max
+    (with tolerance) are flagged. Populates scan feedback metrics."""
+    min_finite = float("inf")
+    total = 0
+    invalid = 0
+    saw_nan = False
+    saw_negative = False
+    saw_over_range = False
+
+    for _, scan in scan_list:
+        ranges = getattr(scan, "ranges", [])
+        range_max = getattr(scan, "range_max", None)
+        for value in ranges:
+            total += 1
+            if math.isnan(value):
+                invalid += 1
+                saw_nan = True
+                continue
+            if math.isinf(value):
+                # inf == out of range / no obstacle; valid for LaserScan
+                continue
+            if value < 0.0:
+                invalid += 1
+                saw_negative = True
+                continue
+            if value < min_finite:
+                min_finite = value
+            if (
+                range_max is not None
+                and range_max > 0.0
+                and value > range_max * (1.0 + TB4_SCAN_RANGE_REL_TOL)
+                + TB4_SCAN_RANGE_ABS_TOL
+            ):
+                saw_over_range = True
+
+    if saw_nan:
+        errs.append("scan.ranges contains NaN")
+    if saw_negative:
+        errs.append("scan.ranges contains negative value")
+    if saw_over_range:
+        errs.append("scan.ranges exceeds declared range_max")
+
+    min_range_val = 0.0 if math.isinf(min_finite) else min_finite
+    invalid_ratio = (invalid / total) if total else 0.0
+    for fbk in feedback_list:
+        if fbk.name == "scan_min_range":
+            fbk.update_value(min_range_val)
+        elif fbk.name == "scan_invalid_ratio":
+            fbk.update_value(invalid_ratio)
+
+
+def _check_odom_sanity(odom_list, errs):
+    """Ground-robot odometry prepass: flag NaN/Inf in pose/twist and
+    quaternion norm far from unit. No TB3 velocity/accel limits here."""
+    for _, odom in odom_list:
+        pose = odom.pose.pose
+        twist = odom.twist.twist
+        scalars = [
+            pose.position.x, pose.position.y, pose.position.z,
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w,
+            twist.linear.x, twist.linear.y, twist.linear.z,
+            twist.angular.x, twist.angular.y, twist.angular.z,
+        ]
+        if any(math.isnan(v) for v in scalars):
+            errs.append("odom contains NaN")
+        if any(math.isinf(v) for v in scalars):
+            errs.append("odom contains Inf")
+
+        qx = pose.orientation.x
+        qy = pose.orientation.y
+        qz = pose.orientation.z
+        qw = pose.orientation.w
+        if all(math.isfinite(v) for v in (qx, qy, qz, qw)):
+            norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+            if abs(norm - 1.0) > TB4_QUAT_NORM_TOL:
+                errs.append(
+                    f"odom quaternion norm ({norm:.4f}) deviates from 1.0"
+                )
+
+
+def _check_cmd_odom_consistency(msg_list, odom_list, errs, feedback_list):
+    """Sign-agreement check using the published command (msg_list) against
+    the mean odom velocity over the recorded window. A single transient
+    opposite sample is tolerated because the mean is used. Populates
+    cmd/odom feedback metrics."""
+    if not msg_list or not odom_list:
+        return
+
+    cmd_x_values = [
+        getattr(_cmd_twist(msg).linear, "x", 0.0) for msg in msg_list
+    ]
+    cmd_z_values = [
+        getattr(_cmd_twist(msg).angular, "z", 0.0) for msg in msg_list
+    ]
+    last_cmd = _cmd_twist(msg_list[-1])
+    cmd_x = getattr(last_cmd.linear, "x", 0.0)
+    cmd_z = getattr(last_cmd.angular, "z", 0.0)
+    cmd_x_sign = _consistent_sign(cmd_x_values, TB4_CMD_SIGN_THRESH)
+    cmd_z_sign = _consistent_sign(cmd_z_values, TB4_CMD_SIGN_THRESH)
+
+    lin_vals = [o.twist.twist.linear.x for _, o in odom_list
+                if math.isfinite(o.twist.twist.linear.x)]
+    ang_vals = [o.twist.twist.angular.z for _, o in odom_list
+                if math.isfinite(o.twist.twist.angular.z)]
+    mean_lin = _mean(lin_vals)
+    mean_ang = _mean(ang_vals)
+
+    if cmd_x_sign == 1 and mean_lin < -TB4_ODOM_SIGN_THRESH:
+        errs.append(
+            f"cmd_vel forward command conflicts with mean odom velocity "
+            f"{mean_lin:.3f}"
+        )
+    if cmd_x_sign == -1 and mean_lin > TB4_ODOM_SIGN_THRESH:
+        errs.append(
+            f"cmd_vel reverse command conflicts with mean odom velocity "
+            f"{mean_lin:.3f}"
+        )
+    if cmd_z_sign == 1 and mean_ang < -TB4_ODOM_SIGN_THRESH:
+        errs.append(
+            f"cmd_vel left turn conflicts with mean angular odom velocity "
+            f"{mean_ang:.3f}"
+        )
+    if cmd_z_sign == -1 and mean_ang > TB4_ODOM_SIGN_THRESH:
+        errs.append(
+            f"cmd_vel right turn conflicts with mean angular odom velocity "
+            f"{mean_ang:.3f}"
+        )
+
+    # Feedback: |commanded - achieved| discrepancy. INC favors larger
+    # divergence (more anomalous tracking) for exploration guidance.
+    for fbk in feedback_list:
+        if fbk.name == "cmd_odom_linear_agreement":
+            fbk.update_value(abs(cmd_x - mean_lin))
+        elif fbk.name == "cmd_odom_angular_agreement":
+            fbk.update_value(abs(cmd_z - mean_ang))
+
+
 def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
     errs = []
     odom_list = state_dict.get("/odom", [])
@@ -43,30 +213,12 @@ def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
     if not scan_list:
         errs.append("missing required TurtleBot4 topic /scan")
 
-    for _, scan in scan_list:
-        ranges = getattr(scan, "ranges", [])
-        for value in ranges:
-            if math.isnan(value):
-                errs.append("scan.ranges contains NaN")
-                break
-            if math.isfinite(value) and value < 0.0:
-                errs.append(f"scan.ranges contains negative value {value}")
-                break
+    _check_scan_sanity(scan_list, errs, feedback_list)
+    _check_odom_sanity(odom_list, errs)
+    _check_cmd_odom_consistency(msg_list, odom_list, errs, feedback_list)
 
-    if msg_list and odom_list:
-        last_cmd = _cmd_twist(msg_list[-1])
-        cmd_x = getattr(last_cmd.linear, "x", 0.0)
-        last_odom = odom_list[-1][1]
-        odom_x = last_odom.twist.twist.linear.x
-        if cmd_x > 0.05 and odom_x < -0.05:
-            errs.append(
-                f"cmd_vel forward command conflicts with odom velocity {odom_x}"
-            )
-        if cmd_x < -0.05 and odom_x > 0.05:
-            errs.append(
-                f"cmd_vel reverse command conflicts with odom velocity {odom_x}"
-            )
-
+    # Optional Create3 topics: only sanity-check if present. Missing
+    # optional topics are NOT treated as bugs (recorded as optional elsewhere).
     optional_topics = [
         "/hazard_detection",
         "/slip_status",
