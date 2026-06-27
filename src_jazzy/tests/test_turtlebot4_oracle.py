@@ -23,15 +23,21 @@ def make_odom(
     qx=0.0, qy=0.0, qz=0.0, qw=1.0,
     lx=0.0, ly=0.0, lz=0.0,
     ax=0.0, ay=0.0, az=0.0,
+    stamp_sec=None, stamp_nanosec=0,
 ):
+    header = NS(stamp=NS(sec=stamp_sec, nanosec=stamp_nanosec))
     pose = NS(pose=NS(position=_vec(px, py, pz),
                       orientation=_quat(qx, qy, qz, qw)))
     twist = NS(twist=NS(linear=_vec(lx, ly, lz), angular=_vec(ax, ay, az)))
-    return NS(pose=pose, twist=twist)
+    return NS(header=header, pose=pose, twist=twist)
 
 
 def make_scan(ranges, range_min=0.1, range_max=12.0):
     return NS(ranges=list(ranges), range_min=range_min, range_max=range_max)
+
+
+def make_wheel_vels(left=0.0, right=0.0):
+    return NS(velocity_left=left, velocity_right=right)
 
 
 def make_twist(lx=0.0, az=0.0):
@@ -51,6 +57,41 @@ def tb4_config():
 def odom_series(n, **kw):
     """n identical odom samples with incrementing timestamps."""
     return [(1_000_000_000 + i, make_odom(**kw)) for i in range(n)]
+
+
+def odom_ns_series(values, field="lx", start_ns=1_000_000_000_000_000_000,
+                   step_ns=100_000_000):
+    samples = []
+    for i, value in enumerate(values):
+        kwargs = {field: value}
+        samples.append((start_ns + i * step_ns, make_odom(**kwargs)))
+    return samples
+
+
+def odom_header_series(values, field="lx",
+                       bag_start_ns=1_000_000_000_000_000_000,
+                       bag_step_ns=1_000_000,
+                       header_start_ns=2_000_000_000,
+                       header_step_ns=100_000_000):
+    samples = []
+    for i, value in enumerate(values):
+        header_ns = header_start_ns + i * header_step_ns
+        kwargs = {
+            field: value,
+            "stamp_sec": header_ns // 1_000_000_000,
+            "stamp_nanosec": header_ns % 1_000_000_000,
+        }
+        samples.append((bag_start_ns + i * bag_step_ns, make_odom(**kwargs)))
+    return samples
+
+
+class FeedbackProbe:
+    def __init__(self, name):
+        self.name = name
+        self.value = None
+
+    def update_value(self, value):
+        self.value = value
 
 
 class TurtleBot4SmokeOracleTests(unittest.TestCase):
@@ -79,10 +120,10 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
         errs = self.run_check([], state)
         self.assertTrue(any("/odom" in e for e in errs), errs)
 
-    def test_missing_scan_reports_error(self):
+    def test_missing_scan_is_not_a_motion_bug(self):
         state = {"/odom": odom_series(3)}
         errs = self.run_check([], state)
-        self.assertTrue(any("/scan" in e for e in errs), errs)
+        self.assertFalse(any("/scan" in e for e in errs), errs)
 
     # --- scan sanity ---
     def test_scan_nan_reports_error(self):
@@ -108,6 +149,19 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
         }
         errs = self.run_check([], state)
         self.assertEqual(errs, [])
+
+    def test_all_inf_scan_feedback_is_not_zero_distance(self):
+        state = {
+            "/odom": odom_series(3),
+            "/scan": [(1, make_scan([float("inf"), float("inf")],
+                                    range_max=12.0))],
+        }
+        feedback = [FeedbackProbe("scan_min_range")]
+
+        errs = self.run_check([], state, feedback)
+
+        self.assertEqual(errs, [])
+        self.assertGreater(feedback[0].value, 1.0)
 
     def test_scan_value_outside_declared_range_reports_error(self):
         # range_max is 12.0; 50.0 finite value is far outside + tolerance
@@ -209,10 +263,17 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
             "scan_invalid_ratio",
             "cmd_odom_linear_agreement",
             "cmd_odom_angular_agreement",
+            "tb4_cmd_linear_velocity_ratio",
+            "tb4_cmd_angular_velocity_ratio",
+            "tb4_odom_linear_velocity_ratio",
+            "tb4_odom_angular_velocity_ratio",
+            "tb4_linear_accel_ratio",
+            "tb4_angular_accel_ratio",
+            "tb4_odom_publish_gap",
         ]
         feedback_list = [Feedback(n, FeedbackType.INC) for n in fbk_names]
         state = {
-            "/odom": odom_series(6, lx=0.1),
+            "/odom": odom_ns_series([0.0, 0.05, 0.1, 0.1, 0.1, 0.1]),
             "/scan": [(1, make_scan([0.5, 1.0, 2.0]))],
         }
         msg_list = [make_twist(lx=0.1)]
@@ -220,6 +281,208 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
         by_name = {f.name: f for f in feedback_list}
         self.assertIsNotNone(by_name["scan_min_range"].value)
         self.assertIsNotNone(by_name["scan_invalid_ratio"].value)
+        self.assertIsNotNone(by_name["tb4_cmd_linear_velocity_ratio"].value)
+        self.assertIsNotNone(by_name["tb4_linear_accel_ratio"].value)
+        self.assertIsNotNone(by_name["tb4_odom_publish_gap"].value)
+
+    # --- deeper OracleIR-derived checks ---
+    def test_command_velocity_envelope_uses_whitelist_fields(self):
+        state = {
+            "/odom": odom_ns_series([0.0, 0.0, 0.0]),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+        feedback = [
+            FeedbackProbe("tb4_cmd_linear_velocity_ratio"),
+            FeedbackProbe("tb4_cmd_angular_velocity_ratio"),
+        ]
+
+        errs = self.run_check([make_twist(lx=0.60, az=2.10)], state,
+                              feedback)
+
+        self.assertTrue(any("cmd_vel linear velocity envelope" in e
+                            for e in errs), errs)
+        self.assertTrue(any("cmd_vel angular velocity envelope" in e
+                            for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
+        self.assertGreater(feedback[1].value, 1.0)
+
+    def test_odom_velocity_envelope_reports_error_and_feedback(self):
+        state = {
+            "/odom": odom_ns_series([0.55, 0.56, 0.57]),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_odom_linear_velocity_ratio")]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertTrue(any("linear velocity envelope" in e for e in errs),
+                        errs)
+        self.assertGreater(feedback[0].value, 1.0)
+
+    def test_odom_acceleration_uses_adjacent_samples(self):
+        state = {
+            "/odom": odom_ns_series([0.0, 0.2, 0.4]),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_linear_accel_ratio")]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertTrue(any("linear acceleration envelope" in e
+                            for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
+
+    def test_single_mild_acceleration_spike_is_feedback_only(self):
+        state = {
+            "/odom": odom_ns_series([0.0, 0.11, 0.11, 0.11]),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_linear_accel_ratio")]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertFalse(any("linear acceleration envelope" in e
+                             for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
+
+    def test_acceleration_uses_odom_header_stamp_over_bag_burst(self):
+        state = {
+            "/odom": odom_header_series([0.0, 0.11, 0.11, 0.11],
+                                        bag_step_ns=200_000,
+                                        header_step_ns=100_000_000),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_linear_accel_ratio")]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertFalse(any("linear acceleration envelope" in e
+                             for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
+        self.assertLess(feedback[0].value, self.tb.TB4_ACCEL_STRONG_RATIO_ERROR)
+
+    def test_header_time_sustained_acceleration_reports_error(self):
+        state = {
+            "/odom": odom_header_series([0.0, 0.12, 0.24, 0.24],
+                                        bag_step_ns=100_000_000,
+                                        header_step_ns=100_000_000),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+
+        errs = self.run_check([make_twist(lx=0.15)], state)
+
+        self.assertTrue(any("linear acceleration envelope" in e
+                            for e in errs), errs)
+
+    def test_strong_single_acceleration_spike_still_reports_error(self):
+        state = {
+            "/odom": odom_ns_series([0.0, 0.60, 0.60, 0.60]),
+            "/scan": [(1, make_scan([1.0]))],
+        }
+
+        errs = self.run_check([make_twist(lx=0.15)], state)
+
+        self.assertTrue(any("linear acceleration envelope" in e
+                            for e in errs), errs)
+
+    def test_timeout_requires_recorded_command_coverage(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/cmd_vel": [(base, make_twist_stamped(lx=0.1))],
+            "/odom": [
+                (base + 1_100_000_000, make_odom(lx=0.12)),
+                (base + 1_200_000_000, make_odom(lx=0.12)),
+                (base + 1_300_000_000, make_odom(lx=0.12)),
+            ],
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        msg_list = [make_twist_stamped(lx=0.1) for _ in range(8)]
+        feedback = [FeedbackProbe("tb4_cmd_timeout_motion")]
+
+        errs = self.run_check(msg_list, state, feedback)
+
+        self.assertFalse(any("cmd_vel timeout" in e for e in errs), errs)
+        self.assertGreater(feedback[0].value, 0.0)
+
+    def test_timeout_requires_complete_recorded_command_sequence(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/cmd_vel": [
+                (base + i * 100_000_000, make_twist_stamped(lx=0.1))
+                for i in range(7)
+            ],
+            "/odom": [
+                (base + 1_400_000_000, make_odom(lx=0.12)),
+                (base + 1_500_000_000, make_odom(lx=0.12)),
+                (base + 1_600_000_000, make_odom(lx=0.12)),
+            ],
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        msg_list = [make_twist_stamped(lx=0.1) for _ in range(8)]
+        feedback = [FeedbackProbe("tb4_cmd_timeout_motion")]
+
+        errs = self.run_check(msg_list, state, feedback)
+
+        self.assertFalse(any("cmd_vel timeout" in e for e in errs), errs)
+        self.assertGreater(feedback[0].value, 0.0)
+
+    def test_stale_command_with_continuing_motion_reports_error(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/cmd_vel": [
+                (base + i * 100_000_000, make_twist_stamped(lx=0.1))
+                for i in range(8)
+            ],
+            "/odom": [
+                (base + 1_500_000_000, make_odom(lx=0.12)),
+                (base + 1_600_000_000, make_odom(lx=0.12)),
+                (base + 1_700_000_000, make_odom(lx=0.12)),
+            ],
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_cmd_timeout_motion")]
+
+        errs = self.run_check([make_twist_stamped(lx=0.1) for _ in range(8)],
+                              state, feedback)
+
+        self.assertTrue(any("cmd_vel timeout" in e for e in errs), errs)
+        self.assertGreater(feedback[0].value, 0.0)
+
+    def test_short_stale_motion_after_timeout_is_feedback_only(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/cmd_vel": [(base, make_twist_stamped(lx=0.1))],
+            "/odom": [
+                (base + 520_000_000, make_odom(lx=0.12)),
+                (base + 540_000_000, make_odom(lx=0.12)),
+                (base + 560_000_000, make_odom(lx=0.12)),
+            ],
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_cmd_timeout_motion")]
+
+        errs = self.run_check([make_twist(lx=0.1)], state, feedback)
+
+        self.assertFalse(any("cmd_vel timeout" in e for e in errs), errs)
+        self.assertGreater(feedback[0].value, 0.0)
+
+    def test_wheel_odom_sign_conflict_reports_error(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/odom": odom_ns_series([-0.12, -0.11, -0.10], start_ns=base),
+            "/wheel_vels": [
+                (base + i * 100_000_000, make_wheel_vels(1.0, 1.1))
+                for i in range(3)
+            ],
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_wheel_odom_consistency_error")]
+
+        errs = self.run_check([], state, feedback)
+
+        self.assertTrue(any("wheel/odom direction conflict" in e
+                            for e in errs), errs)
+        self.assertGreater(feedback[0].value, 0.0)
 
 
 if __name__ == "__main__":

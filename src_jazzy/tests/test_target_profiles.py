@@ -179,6 +179,40 @@ class TargetProfileTests(unittest.TestCase):
             cfg.required_topics_with_data_for_readiness,
         )
 
+    def test_tb4_profile_records_limited_command_observation_chain(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile("turtlebot4_jazzy", REPO_ROOT)
+
+        self.assertEqual(
+            "geometry_msgs/msg/TwistStamped",
+            profile.optional_watch_topics["/diffdrive_controller/cmd_vel"],
+        )
+        self.assertNotIn(
+            "/diffdrive_controller/cmd_vel",
+            profile.watch_topics,
+        )
+        self.assertNotIn(
+            "/diffdrive_controller/cmd_vel",
+            profile.required_topics_with_data_for_readiness,
+        )
+        self.assertNotIn(
+            "/diffdrive_controller/cmd_vel",
+            profile.required_topics_for_readiness,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _, watchlist_path = target_profiles.write_profile_metadata(
+                profile, tmpdir
+            )
+            with open(watchlist_path, encoding="utf-8") as fp:
+                watchlist = json.load(fp)
+
+        self.assertEqual(
+            "geometry_msgs/msg/TwistStamped",
+            watchlist["/diffdrive_controller/cmd_vel"],
+        )
+
     def test_profiles_without_data_readiness_default_empty(self):
         import target_profiles
 
@@ -203,6 +237,39 @@ class TargetProfileTests(unittest.TestCase):
             for msg in seq:
                 self.assertLessEqual(abs(msg.linear.x), 0.15 + 1e-9)
                 self.assertLessEqual(abs(msg.angular.z), 0.8 + 1e-9)
+
+    def test_tb4_sequence_seeds_include_deep_oracle_patterns(self):
+        import seed_generator
+
+        class FakeTwist:
+            def __init__(self):
+                self.linear = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
+                self.angular = types.SimpleNamespace(x=0.0, y=0.0, z=0.0)
+
+        seqs = seed_generator.generate_sequence_seeds(
+            "tb4", FakeTwist, seqlen=8
+        )
+
+        self.assertGreaterEqual(len(seqs), 11)
+        # Near-zero threshold probes exercise cmd/odom sign agreement around
+        # the TB4 smoke oracle's 0.05 thresholds.
+        self.assertTrue(any(
+            any(0.0 < abs(msg.linear.x) <= 0.05 for msg in seq)
+            for seq in seqs
+        ))
+        # Arc/coupled-motion seeds drive linear.x and angular.z together,
+        # useful for wheel/odom consistency and scan proximity feedback.
+        self.assertTrue(any(
+            any(abs(msg.linear.x) > 0.0 and abs(msg.angular.z) > 0.0
+                for msg in seq)
+            for seq in seqs
+        ))
+        # Timeout-tail seeds leave a nonzero final command so the oracle can
+        # observe whether motion decays after publication stops.
+        self.assertTrue(any(
+            abs(seq[-1].linear.x) > 0.0 or abs(seq[-1].angular.z) > 0.0
+            for seq in seqs
+        ))
 
     def test_tb4_velocity_clamp_restricts_mutated_twiststamped(self):
         import seed_generator
@@ -236,6 +303,39 @@ class TargetProfileTests(unittest.TestCase):
             text,
         )
 
+    def test_tb4_deep_feedback_metrics_are_registered(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        for name in [
+            "tb4_cmd_linear_velocity_ratio",
+            "tb4_cmd_angular_velocity_ratio",
+            "tb4_odom_linear_velocity_ratio",
+            "tb4_odom_angular_velocity_ratio",
+            "tb4_linear_accel_ratio",
+            "tb4_angular_accel_ratio",
+            "tb4_cmd_timeout_motion",
+            "tb4_odom_publish_gap",
+            "tb4_wheel_odom_consistency_error",
+        ]:
+            self.assertIn(f'"{name}"', text)
+
+    def test_tb4_deep_feedback_has_mutation_strategy_mapping(self):
+        mutation_profile_path = os.path.join(SRC_DIR, "mutation_profile.py")
+        with open(mutation_profile_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("_TB4_FEEDBACK_STRATEGY_MAP", text)
+        self.assertIn("def turtlebot4_velocity", text)
+        self.assertIn(
+            '"tb4_cmd_linear_velocity_ratio": STRATEGY_BOUNDARY_PUSH', text
+        )
+        self.assertIn('"tb4_linear_accel_ratio": STRATEGY_REVERSAL', text)
+        self.assertIn(
+            '"tb4_cmd_timeout_motion": STRATEGY_SINGLE_BLOCK', text
+        )
+
     def test_tb4_empty_world_avoids_headless_sensors_crash(self):
         world_path = os.path.join(REPO_ROOT, "worlds", "empty.sdf")
         with open(world_path, encoding="utf-8") as fp:
@@ -258,6 +358,10 @@ class TargetProfileTests(unittest.TestCase):
 
         self.assertIn("TURTLEBOT4_GUI_WORLD:-simple", text)
         self.assertIn("/work/worlds:", text)
+        self.assertIn("TURTLEBOT4_SPLIT_LAUNCH:-1", text)
+        self.assertIn('if [[ "${headless}" == "1" || "${split_launch}" == "1" ]]', text)
+        self.assertIn('TURTLEBOT4_USE_XVFB:-${headless}', text)
+        self.assertNotIn("exec ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py", text)
 
     def test_run_target_installs_custom_tb4_world_before_official_launch(self):
         run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
@@ -289,6 +393,23 @@ class TargetProfileTests(unittest.TestCase):
             text = fp.read()
 
         self.assertIn("clamp_velocity_sequence", text)
+
+    def test_tb4_uses_quality_aware_seedqueue_and_resets_cycle_budget(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("or self.config.tb4_sitl", text)
+        tb4_cycle = text[text.index("elif (fuzzer.config.tb4_sitl"):]
+        tb4_cycle = tb4_cycle[:tb4_cycle.index("fuzzer.rounds += 1")]
+        self.assertIn("scheduler._seed_interesting_count = 0", tb4_cycle)
+
+    def test_fuzzer_routes_tb4_sequences_to_semantic_mutator(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("mutate_sequence_tb4(config, fbk_list)", text)
 
     def test_moveit_profile_records_result_diagnostic_topics(self):
         import target_profiles

@@ -85,6 +85,63 @@ class Executor:
         stamp.nanosec = int(now_ns % 1_000_000_000)
         return msg
 
+    def _published_command_trace_path(self, frame):
+        if not getattr(self.fuzzer.config, "tb4_sitl", False):
+            return None
+        if getattr(self.fuzzer.config, "target_profile_name", "") not in (
+            "", "turtlebot4_jazzy",
+        ):
+            return None
+
+        meta_dir = getattr(self.fuzzer.config, "meta_dir", None)
+        if not meta_dir:
+            return None
+
+        safe_frame = str(frame).replace(os.sep, "_")
+        return os.path.join(meta_dir, f"published_commands-{safe_frame}.jsonl")
+
+    @staticmethod
+    def _twist_for_trace(msg):
+        return getattr(msg, "twist", msg)
+
+    def record_published_command(
+        self,
+        msg,
+        frame,
+        subframe,
+        sequence_index,
+        publish_success,
+        error="",
+    ):
+        trace_path = self._published_command_trace_path(frame)
+        if trace_path is None:
+            return
+
+        try:
+            twist = self._twist_for_trace(msg)
+            linear = getattr(twist, "linear", None)
+            angular = getattr(twist, "angular", None)
+            header = getattr(msg, "header", None)
+            stamp = getattr(header, "stamp", None)
+            row = {
+                "publish_time_ns": time.time_ns(),
+                "subframe": subframe,
+                "sequence_index": sequence_index,
+                "topic": getattr(self, "topic_name", ""),
+                "message_type": getattr(self, "msg_typestr", ""),
+                "publish_success": bool(publish_success),
+                "error": error or "",
+                "linear_x": getattr(linear, "x", None),
+                "angular_z": getattr(angular, "z", None),
+                "header_stamp_sec": getattr(stamp, "sec", None),
+                "header_stamp_nanosec": getattr(stamp, "nanosec", None),
+            }
+            os.makedirs(os.path.dirname(trace_path), exist_ok=True)
+            with open(trace_path, "a", encoding="utf-8") as fp:
+                fp.write(json.dumps(row, sort_keys=True) + "\n")
+        except Exception as exc:
+            print(f"[executor] could not write published command trace: {exc}")
+
     def clear_execution(self):
         return
         self.fuzzer.pub.destroy()
@@ -418,6 +475,8 @@ class Executor:
                     self.prepare_msg_for_publish(msg)
 
                     self.save_msg_to_queue(msg, frame, subframe)
+                    publish_success = True
+                    publish_error = ""
 
                     # TODO: publishing through API is terribly unreliable.
                     # Switch to externally calling "ros2 topic pub" as it
@@ -435,8 +494,13 @@ class Executor:
                         if ret:
                             pub_failure = True
                             pub_failure_msg = ret
+                            publish_success = False
+                            publish_error = ret
                             print(f"[executor] failed to publish: {ret}")
 
+                    self.record_published_command(
+                        msg, frame, subframe, 0, publish_success, publish_error
+                    )
 
                     # self.fuzzer.pub.publish(msg)
                     time.sleep(period)
@@ -448,6 +512,8 @@ class Executor:
                         self.prepare_msg_for_publish(msg)
 
                         self.save_msg_to_queue(msg, frame, subframe)
+                        publish_success = True
+                        publish_error = ""
 
                         if pub_function:
                             pub_function(msg)
@@ -458,7 +524,14 @@ class Executor:
                             if ret:
                                 pub_failure = True
                                 pub_failure_msg = ret
+                                publish_success = False
+                                publish_error = ret
                                 print(f"[executor] failed to publish: {ret}")
+
+                        self.record_published_command(
+                            msg, frame, subframe, i,
+                            publish_success, publish_error
+                        )
 
                         # self.fuzzer.pub.publish(msg)
                         time.sleep(period)

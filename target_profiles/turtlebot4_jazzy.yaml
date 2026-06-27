@@ -69,6 +69,7 @@ watch:
     /scan: sensor_msgs/msg/LaserScan
   optional:
     /cmd_vel: geometry_msgs/msg/TwistStamped
+    /diffdrive_controller/cmd_vel: geometry_msgs/msg/TwistStamped
     /clock: rosgraph_msgs/msg/Clock
     /hazard_detection: irobot_create_msgs/msg/HazardDetectionVector
     /slip_status: irobot_create_msgs/msg/SlipStatus
@@ -78,6 +79,12 @@ watch:
     /interface_buttons: irobot_create_msgs/msg/InterfaceButtons
     /wheel_ticks: irobot_create_msgs/msg/WheelTicks
     /wheel_vels: irobot_create_msgs/msg/WheelVels
+  compatibility_note: >
+    /cmd_vel records the RoboFuzz input command, while
+    /diffdrive_controller/cmd_vel records the motion-control / Gazebo bridge
+    command path when it is available. The latter is optional so profile
+    readiness does not fail on environments where the limited/bridged command
+    topic is not advertised.
 
 oracle:
   module: oracles.turtlebot

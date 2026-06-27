@@ -154,12 +154,71 @@ def generate_tb4_sequence_seeds(msg_class, seqlen=10):
     # These are safe seed bounds (NOT oracle thresholds): deep velocity /
     # hazard thresholds are derived later from runtime parameters,
     # TurtleBot4/Create3 docs, or measured Jazzy baselines.
-    return generate_velocity_sequence_seeds(
+    seeds = generate_velocity_sequence_seeds(
         msg_class,
         seqlen=seqlen,
         max_linear=0.15,
         max_angular=0.8,
     )
+
+    # 8. Near-zero sign-threshold probes around the smoke oracle's direction
+    # agreement threshold. These help separate deadband/rounding behavior from
+    # true cmd/odom sign conflicts.
+    seq = []
+    near_values = [0.0, 0.03, 0.05, -0.03, -0.05]
+    for i in range(seqlen):
+        msg = msg_class()
+        _set_velocity(msg, near_values[i % len(near_values)], 0.0)
+        seq.append(msg)
+    seeds.append(seq)
+
+    # 9. Coupled arc: linear and angular commands together. This stresses
+    # wheel/odom consistency more effectively than pure translation or spin.
+    seq = []
+    for i in range(seqlen):
+        msg = msg_class()
+        phase = i / max(seqlen - 1, 1)
+        lin_x = 0.05 + 0.10 * phase
+        ang_z = 0.25 + 0.55 * phase
+        if i >= seqlen // 2:
+            ang_z = -ang_z
+        _set_velocity(msg, lin_x, ang_z)
+        seq.append(msg)
+    seeds.append(seq)
+
+    # 10. Timeout-tail probe: leave the last command nonzero so that after the
+    # publisher stops, the cmd_vel timeout oracle can observe whether motion
+    # decays rather than being kept alive by a final zero command.
+    seq = []
+    for i in range(seqlen):
+        msg = msg_class()
+        lin_x = 0.0 if i < seqlen // 3 else 0.12
+        _set_velocity(msg, lin_x, 0.0)
+        seq.append(msg)
+    seeds.append(seq)
+
+    # 11. Angular timeout-tail probe.
+    seq = []
+    for i in range(seqlen):
+        msg = msg_class()
+        ang_z = 0.0 if i < seqlen // 3 else 0.65
+        _set_velocity(msg, 0.0, ang_z)
+        seq.append(msg)
+    seeds.append(seq)
+
+    # 12. Curved reversal: both velocity components flip sign. This targets
+    # acceleration-ratio and wheel/odom direction consistency feedback.
+    seq = []
+    for i in range(seqlen):
+        msg = msg_class()
+        if i < seqlen // 2:
+            _set_velocity(msg, 0.12, 0.65)
+        else:
+            _set_velocity(msg, -0.12, -0.65)
+        seq.append(msg)
+    seeds.append(seq)
+
+    return seeds
 
 
 def generate_sequence_seeds(platform, msg_class, seqlen=10):

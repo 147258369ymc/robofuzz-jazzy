@@ -19,6 +19,7 @@ Environment overrides:
   TURTLEBOT4_GAZEBO=ignition|classic
   TURTLEBOT4_GZ_ARGS="-s -r"
   TURTLEBOT4_USE_XVFB=1|0
+  TURTLEBOT4_SPLIT_LAUNCH=1|0
   TURTLEBOT4_WORLD=warehouse|simple
   TURTLEBOT4_GUI_WORLD=simple
   QT_QPA_PLATFORM=offscreen
@@ -82,6 +83,7 @@ run_turtlebot4() {
   local model="${TURTLEBOT4_MODEL:-standard}"
   local gazebo="${TURTLEBOT4_GAZEBO:-ignition}"
   local headless="${TURTLEBOT4_HEADLESS:-1}"
+  local split_launch="${TURTLEBOT4_SPLIT_LAUNCH:-1}"
   local default_world="warehouse"
   if [[ "${headless}" != "1" ]]; then
     default_world="${TURTLEBOT4_GUI_WORLD:-simple}"
@@ -120,10 +122,10 @@ run_turtlebot4() {
     unset QT_QPA_PLATFORM
   fi
 
-  if [[ "${headless}" == "1" ]]; then
+  if [[ "${headless}" == "1" || "${split_launch}" == "1" ]]; then
     local sim_pid=""
     local clock_pid=""
-    local use_xvfb="${TURTLEBOT4_USE_XVFB:-1}"
+    local use_xvfb="${TURTLEBOT4_USE_XVFB:-${headless}}"
 
     export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 
@@ -141,14 +143,17 @@ run_turtlebot4() {
     trap 'kill "${clock_pid}" "${sim_pid}" >/dev/null 2>&1 || true' EXIT
     sleep 5
 
-    ros2 launch turtlebot4_gz_bringup turtlebot4_spawn.launch.py \
+    python3 "${ROOT_DIR}/src_jazzy/launch/turtlebot4_fuzz_spawn.launch.py" \
       "model:=${model}" \
+      "world:=${world}" \
       rviz:=false
     return
   fi
 
-  # GUI mode (non-headless): use turtlebot4_gz.launch.py
-  exec ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py \
+  # Legacy GUI mode: use the upstream complete TurtleBot4 launch path only
+  # when explicitly requested. RoboFuzz defaults to split no-dock launch
+  # because the upstream path starts docked and may trigger autonomous motion.
+  ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py \
     "model:=${model}" \
     "gazebo:=${gazebo}" \
     "world:=${world}" \

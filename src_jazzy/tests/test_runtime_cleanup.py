@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sqlite3
 import subprocess as sp
@@ -178,6 +179,64 @@ class RuntimeCleanupTests(unittest.TestCase):
 
         self.assertGreater(msg.header.stamp.sec + msg.header.stamp.nanosec, 0)
 
+    def test_executor_writes_tb4_published_command_trace(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Linear:
+            x = 0.12
+            y = 0.0
+            z = 0.0
+
+        class _Angular:
+            x = 0.0
+            y = 0.0
+            z = -0.4
+
+        class _Twist:
+            linear = _Linear()
+            angular = _Angular()
+
+        class _Stamp:
+            sec = 123
+            nanosec = 456
+
+        class _Header:
+            stamp = _Stamp()
+            frame_id = ""
+
+        class _Msg:
+            header = _Header()
+            twist = _Twist()
+
+        class _Cfg:
+            tb4_sitl = True
+            target_profile_name = "turtlebot4_jazzy"
+            meta_dir = None
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        with tempfile.TemporaryDirectory() as td:
+            _Cfg.meta_dir = td
+            ex = executor.Executor(_Fuzzer())
+            ex.topic_name = "/cmd_vel"
+            ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+
+            ex.record_published_command(_Msg(), "frame-a", 10.5, 3, True)
+
+            trace_path = os.path.join(td, "published_commands-frame-a.jsonl")
+            with open(trace_path, encoding="utf-8") as fp:
+                rows = [json.loads(line) for line in fp]
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual("/cmd_vel", rows[0]["topic"])
+        self.assertEqual(3, rows[0]["sequence_index"])
+        self.assertTrue(rows[0]["publish_success"])
+        self.assertAlmostEqual(0.12, rows[0]["linear_x"])
+        self.assertAlmostEqual(-0.4, rows[0]["angular_z"])
+
     def test_run_target_has_explicit_moveit_rviz_disable_switch(self):
         run_target = os.path.join(REPO_ROOT, "run_target.sh")
         with open(run_target, "r", encoding="utf-8") as fp:
@@ -186,6 +245,14 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertIn("MOVEIT_WITH_RVIZ=1|0", text)
         self.assertIn('MOVEIT_WITH_RVIZ:-1', text)
         self.assertIn("moveit2_panda_headless.launch.py", text)
+
+    def test_tb4_docs_require_docker_init_for_repeated_gui_runs(self):
+        doc_path = os.path.join(REPO_ROOT, "docs", "TB4_GUI_USAGE.md")
+        with open(doc_path, "r", encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("--init", text)
+        self.assertIn("zombie", text.lower())
 
     def test_empty_time_window_log_is_not_reported_as_watch_failure(self):
         fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")

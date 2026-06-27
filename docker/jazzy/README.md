@@ -41,15 +41,27 @@ docker run --rm -it robofuzz-jazzy:latest ./run_target.sh moveit2_jazzy
 docker run --rm -it robofuzz-jazzy:latest ./run_target.sh px4_v117_jazzy
 ```
 
-The TurtleBot4 launcher defaults to a split headless mode: it starts
-`ros_gz_sim` under `xvfb-run` with `gz_args:="-s -r warehouse.sdf"` and then
-starts the `/clock` bridge before launching `turtlebot4_spawn.launch.py`. Set
-`TURTLEBOT4_HEADLESS=0` to use the upstream `turtlebot4_gz.launch.py` path, or
-`TURTLEBOT4_USE_XVFB=0` to test without a virtual display. The MoveIt launcher
-defaults to the binary Panda
+The TurtleBot4 launcher defaults to a RoboFuzz split launch: it starts
+`ros_gz_sim`, starts the `/clock` bridge, and then launches
+`src_jazzy/launch/turtlebot4_fuzz_spawn.launch.py`. That fuzz spawn path does
+not spawn the standard charging dock, because starting docked can trigger
+Create3 autonomous docking / undocking behavior and pollute `/cmd_vel` oracle
+checks. Set `TURTLEBOT4_HEADLESS=0` to show the Gazebo GUI while keeping the
+same split no-dock fuzz path; in this mode `xvfb-run` is not used unless you
+explicitly set `TURTLEBOT4_USE_XVFB=1`. Set `TURTLEBOT4_SPLIT_LAUNCH=0` only when you
+explicitly want the upstream `turtlebot4_gz.launch.py` path for comparison, or
+`TURTLEBOT4_USE_XVFB=0` to test headless mode without a virtual display. The
+MoveIt launcher defaults to the binary Panda
 resources package, `moveit_resources_panda_moveit_config`, because
 `moveit2_tutorials` is not available as a Jazzy apt package in the verified
 image.
+
+For repeated TurtleBot4 fuzzing rounds, start the container with Docker
+`--init`. Without an init process as PID 1, killed ROS/Gazebo child processes can
+remain as zombies across rounds and eventually make long campaigns slow or
+unstable. Long TB4 runs should also avoid `--ipc host`, use a private
+`--shm-size=2g`, and set `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` to avoid FastDDS
+shared-memory port-lock buildup.
 
 ## MoveIt2 with visible RViz (host X11)
 

@@ -252,6 +252,19 @@ class SeedQueue:
             dy = abs(a.position.y - b.position.y)
             dz = abs(a.position.z - b.position.z)
             return (dx + dy + dz) < threshold
+        a_twist = a.twist if hasattr(a, "twist") else a
+        b_twist = b.twist if hasattr(b, "twist") else b
+        if (
+            hasattr(a_twist, "linear")
+            and hasattr(a_twist, "angular")
+            and hasattr(b_twist, "linear")
+            and hasattr(b_twist, "angular")
+        ):
+            dx = abs(getattr(a_twist.linear, "x", 0.0)
+                     - getattr(b_twist.linear, "x", 0.0))
+            dz = abs(getattr(a_twist.angular, "z", 0.0)
+                     - getattr(b_twist.angular, "z", 0.0))
+            return dx <= threshold and dz <= threshold
         for attr in ('vx', 'vy', 'vz', 'yawspeed', 'x', 'y', 'z', 'r'):
             va = getattr(a, attr, None)
             vb = getattr(b, attr, None)
@@ -347,8 +360,10 @@ class Fuzzer:
     def init_queue(self):
         print("[*] Initializing test case queue")
 
-        # PX4 and MoveIt use quality-aware SeedQueue; others keep FIFO deque
-        if self.config.px4_sitl or self.config.test_moveit:
+        # PX4, MoveIt, and TurtleBot4 use quality-aware SeedQueue; legacy
+        # targets keep FIFO deque.
+        if (self.config.px4_sitl or self.config.test_moveit
+                or self.config.tb4_sitl):
             self.queue = SeedQueue()
         else:
             self.queue = deque()
@@ -1335,6 +1350,69 @@ def fuzz_msg(fuzzer, fuzz_targets):
             fbk_list.append(fbk)
             fbk = Feedback("cmd_odom_angular_agreement", FeedbackType.INC)
             fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_cmd_linear_velocity_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.25,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_cmd_angular_velocity_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.25,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_odom_linear_velocity_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.6,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_odom_angular_velocity_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.6,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_linear_accel_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.6,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_angular_accel_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.6,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_cmd_timeout_motion",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.01,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_odom_publish_gap",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.05,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_wheel_odom_consistency_error",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.1,
+            )
+            fbk_list.append(fbk)
 
         elif fuzzer.config.tb3_hitl:
             field_whitelist = [
@@ -1588,6 +1666,8 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 elif fuzzer.config.px4_ros:
                     (msg_list, frame) = scheduler.mutate_sequence_ros(
                         config, fbk_list)
+                elif fuzzer.config.tb4_sitl:
+                    (msg_list, frame) = scheduler.mutate_sequence_tb4(config, fbk_list)
                 else:
                     (msg_list, frame) = scheduler.mutate_sequence(config)
 
@@ -2284,6 +2364,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     scheduler.round_cnt = 0
                     scheduler.cycle_cnt += 1
                     scheduler.is_new_cycle = True
+                    scheduler._seed_interesting_count = 0
                     print("--- cycle finished ---")
 
             fuzzer.rounds += 1

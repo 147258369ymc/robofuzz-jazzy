@@ -29,6 +29,25 @@ def _ts_to_sec(ts):
     return int(ts_str[:10]) + int(ts_str[10:]) / (10 ** (len(ts_str) - 10))
 
 
+def _odom_header_stamp_to_sec(odom):
+    header = getattr(odom, "header", None)
+    stamp = getattr(header, "stamp", None)
+    if stamp is None:
+        return None
+
+    sec = getattr(stamp, "sec", None)
+    nanosec = getattr(stamp, "nanosec", None)
+    if sec is None or nanosec is None:
+        return None
+
+    try:
+        ts_sec = float(sec) + float(nanosec) / 1e9
+    except (TypeError, ValueError):
+        return None
+
+    return ts_sec if math.isfinite(ts_sec) else None
+
+
 def _cmd_twist(msg):
     return msg.twist if hasattr(msg, "twist") else msg
 
@@ -44,9 +63,43 @@ TB4_ODOM_SIGN_THRESH = 0.05   # min mean |odom| to assert a direction
 TB4_SCAN_RANGE_REL_TOL = 0.05  # relative tolerance over declared range_max
 TB4_SCAN_RANGE_ABS_TOL = 0.05  # absolute tolerance over declared range_max
 
+# TurtleBot4 Jazzy diffdrive_controller limits derived from
+# src_jazzy/oracle_ir/specs/turtlebot4_jazzy and the corresponding cleaned
+# runtime parameters. These are executable oracle thresholds; OracleIR remains
+# provenance / design input rather than a runtime dependency.
+TB4_MAX_LIN_VEL = 0.46        # m/s
+TB4_MIN_LIN_VEL = -0.46       # m/s
+TB4_MAX_ANG_VEL = 1.9         # rad/s
+TB4_MIN_ANG_VEL = -1.9        # rad/s
+TB4_MAX_LIN_ACCEL = 0.9       # m/s^2
+TB4_MAX_ANG_ACCEL = 7.725     # rad/s^2
+TB4_MIN_ANG_ACCEL = -7.725    # rad/s^2
+TB4_CMD_TIMEOUT = 0.5         # s
+TB4_PUBLISH_RATE_HZ = 62.0    # Hz
+
+# Conservative bug thresholds. Values slightly over the exact parameter bound
+# avoid treating bag timestamp jitter and simulator/controller discretization
+# as target bugs.
+TB4_VEL_RATIO_ERROR = 1.05
+TB4_ACCEL_RATIO_ERROR = 1.10
+TB4_ACCEL_STRONG_RATIO_ERROR = 5.00
+TB4_ACCEL_SUSTAINED_SAMPLES = 2
+TB4_STALE_MOTION_THRESH_LIN = 0.03
+TB4_STALE_MOTION_THRESH_ANG = 0.08
+TB4_CMD_TIMEOUT_ERROR_GRACE = 0.25
+TB4_CMD_TIMEOUT_ERROR_SAMPLES = 2
+TB4_WHEEL_SIGN_THRESH = 0.05
+
 
 def _mean(values):
     return sum(values) / len(values) if values else 0.0
+
+
+def _update_feedback(feedback_list, name, value):
+    for fbk in feedback_list:
+        if fbk.name == name:
+            fbk.update_value(value)
+            return
 
 
 def _consistent_sign(values, threshold):
@@ -107,7 +160,16 @@ def _check_scan_sanity(scan_list, errs, feedback_list):
     if saw_over_range:
         errs.append("scan.ranges exceeds declared range_max")
 
-    min_range_val = 0.0 if math.isinf(min_finite) else min_finite
+    if math.isinf(min_finite):
+        finite_range_max = [
+            getattr(scan, "range_max", 0.0)
+            for _, scan in scan_list
+            if math.isfinite(getattr(scan, "range_max", 0.0))
+            and getattr(scan, "range_max", 0.0) > 0.0
+        ]
+        min_range_val = max(finite_range_max) if finite_range_max else 0.0
+    else:
+        min_range_val = min_finite
     invalid_ratio = (invalid / total) if total else 0.0
     for fbk in feedback_list:
         if fbk.name == "scan_min_range":
@@ -203,6 +265,346 @@ def _check_cmd_odom_consistency(msg_list, odom_list, errs, feedback_list):
             fbk.update_value(abs(cmd_z - mean_ang))
 
 
+def _cmd_velocity_samples(msg_list, state_dict):
+    records = state_dict.get("/cmd_vel", [])
+    msgs = [msg for _, msg in records] if records else msg_list
+    samples = []
+    for msg in msgs:
+        try:
+            cmd = _cmd_twist(msg)
+            lin_x = float(getattr(cmd.linear, "x", 0.0))
+            ang_z = float(getattr(cmd.angular, "z", 0.0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if math.isfinite(lin_x) and math.isfinite(ang_z):
+            samples.append((lin_x, ang_z))
+    return samples
+
+
+def _check_tb4_command_velocity_envelope(msg_list, state_dict, errs,
+                                         feedback_list):
+    samples = _cmd_velocity_samples(msg_list, state_dict)
+    if not samples:
+        _update_feedback(feedback_list, "tb4_cmd_linear_velocity_ratio", 0.0)
+        _update_feedback(feedback_list, "tb4_cmd_angular_velocity_ratio", 0.0)
+        return
+
+    max_lin_ratio = 0.0
+    max_ang_ratio = 0.0
+    max_lin = 0.0
+    max_ang = 0.0
+    for lin_x, ang_z in samples:
+        lin_ratio = _limit_ratio(lin_x, TB4_MAX_LIN_VEL, TB4_MIN_LIN_VEL)
+        ang_ratio = _limit_ratio(ang_z, TB4_MAX_ANG_VEL, TB4_MIN_ANG_VEL)
+        if lin_ratio > max_lin_ratio:
+            max_lin_ratio = lin_ratio
+            max_lin = lin_x
+        if ang_ratio > max_ang_ratio:
+            max_ang_ratio = ang_ratio
+            max_ang = ang_z
+
+    _update_feedback(feedback_list, "tb4_cmd_linear_velocity_ratio",
+                     max_lin_ratio)
+    _update_feedback(feedback_list, "tb4_cmd_angular_velocity_ratio",
+                     max_ang_ratio)
+
+    if max_lin_ratio > TB4_VEL_RATIO_ERROR:
+        errs.append(
+            "TB4 cmd_vel linear velocity envelope violated: "
+            f"linear.x={max_lin:.3f} m/s ratio={max_lin_ratio:.2f} "
+            f"limit=[{TB4_MIN_LIN_VEL:.2f}, {TB4_MAX_LIN_VEL:.2f}]"
+        )
+    if max_ang_ratio > TB4_VEL_RATIO_ERROR:
+        errs.append(
+            "TB4 cmd_vel angular velocity envelope violated: "
+            f"angular.z={max_ang:.3f} rad/s ratio={max_ang_ratio:.2f} "
+            f"limit=[{TB4_MIN_ANG_VEL:.3f}, {TB4_MAX_ANG_VEL:.3f}]"
+        )
+
+
+def _has_usable_timebase(samples):
+    if len(samples) < 2:
+        return False
+
+    positive_intervals = 0
+    prev_t = samples[0][0]
+    for cur_t, _, _ in samples[1:]:
+        dt = cur_t - prev_t
+        if dt < 0.0:
+            return False
+        if dt > 1e-6:
+            positive_intervals += 1
+        prev_t = cur_t
+
+    return positive_intervals > 0
+
+
+def _odom_velocity_samples(odom_list, prefer_header_stamp=False):
+    bag_samples = []
+    header_samples = []
+    for ts, odom in odom_list:
+        try:
+            lin_x = float(odom.twist.twist.linear.x)
+            ang_z = float(odom.twist.twist.angular.z)
+            ts_sec = _ts_to_sec(ts)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if math.isfinite(ts_sec) and math.isfinite(lin_x) and math.isfinite(ang_z):
+            bag_samples.append((ts_sec, lin_x, ang_z))
+            header_ts_sec = _odom_header_stamp_to_sec(odom)
+            if header_ts_sec is not None:
+                header_samples.append((header_ts_sec, lin_x, ang_z))
+
+    if (
+        prefer_header_stamp
+        and len(header_samples) == len(bag_samples)
+        and _has_usable_timebase(header_samples)
+    ):
+        header_samples.sort(key=lambda item: item[0])
+        return header_samples
+
+    bag_samples.sort(key=lambda item: item[0])
+    return bag_samples
+
+
+def _limit_ratio(value, positive_limit, negative_limit):
+    limit = positive_limit if value >= 0.0 else abs(negative_limit)
+    if limit <= 0.0:
+        return 0.0
+    return abs(value) / limit
+
+
+def _check_tb4_velocity_envelope(odom_list, errs, feedback_list):
+    samples = _odom_velocity_samples(odom_list)
+    if not samples:
+        _update_feedback(feedback_list, "tb4_odom_linear_velocity_ratio", 0.0)
+        _update_feedback(feedback_list, "tb4_odom_angular_velocity_ratio", 0.0)
+        return
+
+    max_lin_ratio = 0.0
+    max_ang_ratio = 0.0
+    max_lin = 0.0
+    max_ang = 0.0
+    for _, lin_x, ang_z in samples:
+        lin_ratio = _limit_ratio(lin_x, TB4_MAX_LIN_VEL, TB4_MIN_LIN_VEL)
+        ang_ratio = _limit_ratio(ang_z, TB4_MAX_ANG_VEL, TB4_MIN_ANG_VEL)
+        if lin_ratio > max_lin_ratio:
+            max_lin_ratio = lin_ratio
+            max_lin = lin_x
+        if ang_ratio > max_ang_ratio:
+            max_ang_ratio = ang_ratio
+            max_ang = ang_z
+
+    _update_feedback(feedback_list, "tb4_odom_linear_velocity_ratio",
+                     max_lin_ratio)
+    _update_feedback(feedback_list, "tb4_odom_angular_velocity_ratio",
+                     max_ang_ratio)
+
+    if max_lin_ratio > TB4_VEL_RATIO_ERROR:
+        errs.append(
+            "TB4 linear velocity envelope violated: "
+            f"odom linear.x={max_lin:.3f} m/s ratio={max_lin_ratio:.2f} "
+            f"limit=[{TB4_MIN_LIN_VEL:.2f}, {TB4_MAX_LIN_VEL:.2f}]"
+        )
+    if max_ang_ratio > TB4_VEL_RATIO_ERROR:
+        errs.append(
+            "TB4 angular velocity envelope violated: "
+            f"odom angular.z={max_ang:.3f} rad/s ratio={max_ang_ratio:.2f} "
+            f"limit=[{TB4_MIN_ANG_VEL:.3f}, {TB4_MAX_ANG_VEL:.3f}]"
+        )
+
+
+def _check_tb4_acceleration_envelope(odom_list, errs, feedback_list):
+    samples = _odom_velocity_samples(odom_list, prefer_header_stamp=True)
+    max_lin_ratio = 0.0
+    max_ang_ratio = 0.0
+    max_lin_acc = 0.0
+    max_ang_acc = 0.0
+    lin_run = 0
+    ang_run = 0
+    max_lin_run = 0
+    max_ang_run = 0
+
+    for (prev_t, prev_lin, prev_ang), (cur_t, cur_lin, cur_ang) in zip(
+        samples, samples[1:]
+    ):
+        dt = cur_t - prev_t
+        if dt <= 1e-6 or dt > 1.0:
+            continue
+
+        lin_acc = (cur_lin - prev_lin) / dt
+        ang_acc = (cur_ang - prev_ang) / dt
+        lin_ratio = abs(lin_acc) / TB4_MAX_LIN_ACCEL
+        ang_ratio = _limit_ratio(
+            ang_acc, TB4_MAX_ANG_ACCEL, TB4_MIN_ANG_ACCEL
+        )
+
+        if lin_ratio > max_lin_ratio:
+            max_lin_ratio = lin_ratio
+            max_lin_acc = lin_acc
+        if ang_ratio > max_ang_ratio:
+            max_ang_ratio = ang_ratio
+            max_ang_acc = ang_acc
+
+        if lin_ratio > TB4_ACCEL_RATIO_ERROR:
+            lin_run += 1
+            max_lin_run = max(max_lin_run, lin_run)
+        else:
+            lin_run = 0
+
+        if ang_ratio > TB4_ACCEL_RATIO_ERROR:
+            ang_run += 1
+            max_ang_run = max(max_ang_run, ang_run)
+        else:
+            ang_run = 0
+
+    _update_feedback(feedback_list, "tb4_linear_accel_ratio", max_lin_ratio)
+    _update_feedback(feedback_list, "tb4_angular_accel_ratio", max_ang_ratio)
+
+    lin_error = (
+        max_lin_ratio >= TB4_ACCEL_STRONG_RATIO_ERROR
+        or max_lin_run >= TB4_ACCEL_SUSTAINED_SAMPLES
+    )
+    ang_error = (
+        max_ang_ratio >= TB4_ACCEL_STRONG_RATIO_ERROR
+        or max_ang_run >= TB4_ACCEL_SUSTAINED_SAMPLES
+    )
+
+    if lin_error:
+        errs.append(
+            "TB4 linear acceleration envelope violated: "
+            f"accel={max_lin_acc:.3f} m/s^2 ratio={max_lin_ratio:.2f} "
+            f"limit={TB4_MAX_LIN_ACCEL:.3f}"
+        )
+    if ang_error:
+        errs.append(
+            "TB4 angular acceleration envelope violated: "
+            f"accel={max_ang_acc:.3f} rad/s^2 ratio={max_ang_ratio:.2f} "
+            f"limit=[{TB4_MIN_ANG_ACCEL:.3f}, {TB4_MAX_ANG_ACCEL:.3f}]"
+        )
+
+
+def _check_tb4_publish_gap(odom_list, errs, feedback_list):
+    samples = _odom_velocity_samples(odom_list)
+    max_gap = 0.0
+    for (prev_t, _, _), (cur_t, _, _) in zip(samples, samples[1:]):
+        gap = cur_t - prev_t
+        if gap > max_gap:
+            max_gap = gap
+
+    _update_feedback(feedback_list, "tb4_odom_publish_gap", max_gap)
+
+
+def _check_tb4_cmd_timeout(state_dict, odom_list, errs, feedback_list,
+                           expected_cmd_count=0):
+    cmd_records = state_dict.get("/cmd_vel", [])
+    if not cmd_records:
+        _update_feedback(feedback_list, "tb4_cmd_timeout_motion", 0.0)
+        return
+
+    cmd_times = []
+    for ts, _ in cmd_records:
+        try:
+            ts_sec = _ts_to_sec(ts)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(ts_sec):
+            cmd_times.append(ts_sec)
+    if not cmd_times:
+        _update_feedback(feedback_list, "tb4_cmd_timeout_motion", 0.0)
+        return
+
+    latest_cmd_ts = max(cmd_times)
+    max_stale_motion = 0.0
+    violation_samples = []
+    for ts_sec, lin_x, ang_z in _odom_velocity_samples(odom_list):
+        stale_by = ts_sec - latest_cmd_ts - TB4_CMD_TIMEOUT
+        if stale_by <= 0.0:
+            continue
+        lin_excess = max(abs(lin_x) - TB4_STALE_MOTION_THRESH_LIN, 0.0)
+        ang_excess = max(abs(ang_z) - TB4_STALE_MOTION_THRESH_ANG, 0.0)
+        stale_motion = max(lin_excess, ang_excess)
+        if stale_motion > max_stale_motion:
+            max_stale_motion = stale_motion
+        if stale_motion > 0.0 and stale_by >= TB4_CMD_TIMEOUT_ERROR_GRACE:
+            violation_samples.append((stale_by, lin_x, ang_z, stale_motion))
+
+    _update_feedback(feedback_list, "tb4_cmd_timeout_motion",
+                     max_stale_motion)
+
+    if expected_cmd_count > 1:
+        # Timeout is sensitive to the final command timestamp. A high but
+        # incomplete rosbag coverage (for example 7/8 samples) can miss the
+        # last command and turn normal post-command motion into a false timeout.
+        if len(cmd_records) < expected_cmd_count:
+            return
+
+    if len(violation_samples) >= TB4_CMD_TIMEOUT_ERROR_SAMPLES:
+        stale_by, lin_x, ang_z, _ = max(
+            violation_samples, key=lambda sample: sample[3])
+        errs.append(
+            "TB4 cmd_vel timeout violated: robot still moving "
+            f"{stale_by:.3f}s after timeout "
+            f"(odom linear.x={lin_x:.3f}, angular.z={ang_z:.3f})"
+        )
+
+
+def _wheel_velocity_samples(wheel_list):
+    samples = []
+    for ts, msg in wheel_list:
+        try:
+            left = float(msg.velocity_left)
+            right = float(msg.velocity_right)
+            ts_sec = _ts_to_sec(ts)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if math.isfinite(ts_sec) and math.isfinite(left) and math.isfinite(right):
+            samples.append((ts_sec, left, right))
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
+def _check_tb4_wheel_odom_consistency(state_dict, odom_list, errs,
+                                      feedback_list):
+    wheel_samples = _wheel_velocity_samples(state_dict.get("/wheel_vels", []))
+    odom_samples = _odom_velocity_samples(odom_list)
+    if not wheel_samples or not odom_samples:
+        _update_feedback(
+            feedback_list, "tb4_wheel_odom_consistency_error", 0.0
+        )
+        return
+
+    mean_wheel_forward = _mean([(left + right) / 2.0
+                                for _, left, right in wheel_samples])
+    mean_odom_linear = _mean([lin_x for _, lin_x, _ in odom_samples])
+    wheel_sign = _consistent_sign(
+        [(left + right) / 2.0 for _, left, right in wheel_samples],
+        TB4_WHEEL_SIGN_THRESH,
+    )
+    odom_sign = _consistent_sign(
+        [lin_x for _, lin_x, _ in odom_samples], TB4_ODOM_SIGN_THRESH
+    )
+
+    conflict = (
+        wheel_sign is not None
+        and odom_sign is not None
+        and wheel_sign != 0
+        and odom_sign != 0
+        and wheel_sign != odom_sign
+    )
+    error_value = abs(mean_wheel_forward) + abs(mean_odom_linear) if conflict else 0.0
+    _update_feedback(
+        feedback_list, "tb4_wheel_odom_consistency_error", error_value
+    )
+
+    if conflict:
+        errs.append(
+            "TB4 wheel/odom direction conflict: "
+            f"mean wheel velocity={mean_wheel_forward:.3f} rad/s, "
+            f"mean odom linear.x={mean_odom_linear:.3f} m/s"
+        )
+
+
 def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
     errs = []
     odom_list = state_dict.get("/odom", [])
@@ -210,12 +612,22 @@ def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
 
     if not odom_list:
         errs.append("missing required TurtleBot4 topic /odom")
-    if not scan_list:
-        errs.append("missing required TurtleBot4 topic /scan")
+    # A missing scan is a sensor/readiness or recording-quality issue, not a
+    # TurtleBot4 motion-control logic bug. Scan content is checked when present.
 
     _check_scan_sanity(scan_list, errs, feedback_list)
     _check_odom_sanity(odom_list, errs)
     _check_cmd_odom_consistency(msg_list, odom_list, errs, feedback_list)
+    _check_tb4_command_velocity_envelope(msg_list, state_dict, errs,
+                                         feedback_list)
+    _check_tb4_velocity_envelope(odom_list, errs, feedback_list)
+    _check_tb4_acceleration_envelope(odom_list, errs, feedback_list)
+    _check_tb4_publish_gap(odom_list, errs, feedback_list)
+    _check_tb4_cmd_timeout(
+        state_dict, odom_list, errs, feedback_list, len(msg_list)
+    )
+    _check_tb4_wheel_odom_consistency(state_dict, odom_list, errs,
+                                      feedback_list)
 
     # Optional Create3 topics: only sanity-check if present. Missing
     # optional topics are NOT treated as bugs (recorded as optional elsewhere).

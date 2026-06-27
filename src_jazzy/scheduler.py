@@ -1532,6 +1532,195 @@ class Scheduler:
                 setattr(obj, attr_leaf, data_val)
             self.msg_list[idx] = msg_mutated
 
+    def mutate_sequence_tb4(self, config, fbk_list=None):
+        """Feedback-adaptive sequence mutation for TurtleBot4 velocity commands.
+
+        This is intentionally separate from the generic sequence mutator:
+        TurtleBot4 has only two whitelisted command dimensions
+        (linear.x/angular.z), and the useful bug pressure comes from temporal
+        shapes such as boundary pushes, reversals, and stale-command tails.
+        """
+        if not hasattr(self, "_tb4_profile"):
+            self._tb4_profile = MutationProfile.turtlebot4_velocity()
+        profile = self._tb4_profile
+
+        frame = str(time.time())
+        meta_file = os.path.join(config.meta_dir, "meta-{}".format(frame))
+        with open(meta_file, "w") as fp:
+            fp.write(
+                self.subscriber_node + "\t"
+                + self.topic_name + "\t"
+                + str(self.msg_type_class) + "\t"
+                + str(self.cycle_cnt) + "\t"
+                + str(self.round_cnt)
+            )
+
+        print(
+            "\n\x1b[92mCYCLE:", self.cycle_cnt,
+            "ROUND:", self.round_cnt, "\x1b[0m", frame,
+        )
+        print("QUEUE LEN:", len(self.fuzzer.queue))
+
+        if self.is_new_cycle:
+            self._tb4_init_cycle(profile)
+        else:
+            self._tb4_mutate_round(profile, fbk_list)
+
+        self.round_cnt += 1
+        return (self.msg_list, frame)
+
+    def _tb4_init_cycle(self, profile):
+        if len(self.fuzzer.queue) > 0:
+            try:
+                queued = self.fuzzer.queue.popleft()
+            except IndexError:
+                queued = None
+            if queued is not None:
+                if isinstance(queued, list):
+                    self.msg_list = queued
+                else:
+                    self.msg_list = [
+                        deepcopy(queued) for _ in range(self.num_msgs)
+                    ]
+                self.from_queue = True
+                self.num_msgs = len(self.msg_list)
+                self.is_new_cycle = False
+                print("seed from queue")
+                return
+
+        self.msg_list = []
+        for _ in range(self.num_msgs):
+            msg = self.msg_type_class()
+            self._tb4_set_velocity(
+                msg,
+                profile.get_range("linear.x").sample(),
+                profile.get_range("angular.z").sample(),
+            )
+            self.msg_list.append(msg)
+        self.from_queue = False
+        self.is_new_cycle = False
+        print("generate fresh TB4 velocity seed")
+
+    def _tb4_recent_feedback(self, fbk_list):
+        if not fbk_list:
+            return None
+        for fbk in fbk_list:
+            if fbk.value is not None and fbk.interesting_value is not None:
+                feed_type = getattr(fbk, "feed_type", None)
+                feed_type_name = getattr(feed_type, "name", "INC")
+                if feed_type_name == "DEC":
+                    is_recent = fbk.value <= fbk.interesting_value
+                elif feed_type_name == "ZERO":
+                    is_recent = abs(fbk.value) <= abs(fbk.interesting_value)
+                elif feed_type_name == "TARGET":
+                    target = getattr(fbk, "target_value", 0.0)
+                    is_recent = (
+                        abs(fbk.value - target)
+                        <= abs(fbk.interesting_value - target)
+                    )
+                else:
+                    is_recent = fbk.value >= fbk.interesting_value
+                if is_recent:
+                    return fbk.name
+        return None
+
+    def _tb4_mutate_round(self, profile, fbk_list):
+        recent_feedback = self._tb4_recent_feedback(fbk_list)
+        if not hasattr(self, "_no_interesting_rounds"):
+            self._no_interesting_rounds = 0
+        self._no_interesting_rounds += 1
+
+        if self._no_interesting_rounds >= 10:
+            strategy = STRATEGY_RANDOM
+        elif recent_feedback in profile.feedback_strategy_map:
+            strategy = profile.feedback_strategy_map[recent_feedback]
+        else:
+            strategy = profile.select_strategy(recent_feedback)
+
+        print(f"[tb4] semantic strategy={strategy}"
+              f" feedback={recent_feedback}")
+
+        if strategy == STRATEGY_BOUNDARY_PUSH:
+            self._tb4_boundary_push(profile, recent_feedback)
+        elif strategy == STRATEGY_REVERSAL:
+            self._tb4_reversal(profile, recent_feedback)
+        elif strategy == STRATEGY_SINGLE_BLOCK:
+            self._tb4_single_block(profile, recent_feedback)
+        else:
+            self._tb4_random_fresh(profile)
+
+    @staticmethod
+    def _tb4_twist(msg):
+        return msg.twist if hasattr(msg, "twist") else msg
+
+    def _tb4_set_velocity(self, msg, lin_x, ang_z):
+        target = self._tb4_twist(msg)
+        target.linear.x = self._tb4_clamp(lin_x, -0.15, 0.15)
+        target.linear.y = 0.0
+        target.linear.z = 0.0
+        target.angular.x = 0.0
+        target.angular.y = 0.0
+        target.angular.z = self._tb4_clamp(ang_z, -0.8, 0.8)
+        return msg
+
+    @staticmethod
+    def _tb4_clamp(value, low, high):
+        return max(low, min(high, value))
+
+    def _tb4_preferred_axis(self, recent_feedback):
+        if recent_feedback and "angular" in recent_feedback:
+            return "angular"
+        return "linear"
+
+    def _tb4_boundary_push(self, profile, recent_feedback):
+        axis = self._tb4_preferred_axis(recent_feedback)
+        sign = random.choice([-1.0, 1.0])
+        for idx, msg in enumerate(self.msg_list):
+            phase = idx / max(len(self.msg_list) - 1, 1)
+            if axis == "angular":
+                lin_x = random.choice([-0.05, 0.05])
+                ang_z = sign * (0.45 + 0.35 * phase)
+            else:
+                lin_x = sign * (0.08 + 0.07 * phase)
+                ang_z = random.choice([-0.25, 0.25])
+            self._tb4_set_velocity(msg, lin_x, ang_z)
+
+    def _tb4_reversal(self, profile, recent_feedback):
+        axis = self._tb4_preferred_axis(recent_feedback)
+        half = max(1, len(self.msg_list) // 2)
+        for idx, msg in enumerate(self.msg_list):
+            sign = 1.0 if idx < half else -1.0
+            if axis == "angular":
+                lin_x = 0.08 * sign
+                ang_z = 0.70 * sign
+            else:
+                lin_x = 0.13 * sign
+                ang_z = 0.45 * sign
+            self._tb4_set_velocity(msg, lin_x, ang_z)
+
+    def _tb4_single_block(self, profile, recent_feedback):
+        # Keep the tail nonzero so cmd_vel timeout behavior can be observed
+        # after publication stops.
+        start = max(0, len(self.msg_list) // 3)
+        axis = self._tb4_preferred_axis(recent_feedback)
+        for idx, msg in enumerate(self.msg_list):
+            if idx < start:
+                self._tb4_set_velocity(msg, 0.0, 0.0)
+            elif axis == "angular":
+                self._tb4_set_velocity(msg, 0.0, random.choice([-0.65, 0.65]))
+            else:
+                self._tb4_set_velocity(msg, random.choice([-0.12, 0.12]), 0.0)
+
+    def _tb4_random_fresh(self, profile):
+        for msg in self.msg_list:
+            lin_x = profile.get_range("linear.x").sample()
+            ang_z = profile.get_range("angular.z").sample()
+            if random.random() < 0.25:
+                lin_x = random.choice([-0.05, -0.03, 0.03, 0.05])
+            if random.random() < 0.25:
+                ang_z = random.choice([-0.25, 0.25, -0.65, 0.65])
+            self._tb4_set_velocity(msg, lin_x, ang_z)
+
     def mutate_sequence(self, config):
         frame = str(time.time())
 

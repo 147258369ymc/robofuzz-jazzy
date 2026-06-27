@@ -105,6 +105,27 @@ _MOVEIT_FEEDBACK_STRATEGY_MAP = {
     "smoothness_violation_ratio": STRATEGY_REVERSAL,
 }
 
+# TurtleBot4 feedback-to-strategy mappings. These mirror the semantic meaning
+# of the executable TB4 oracle: velocity ratios push toward controller
+# boundaries, acceleration and wheel/odom disagreements favor reversal-style
+# sequences, stale-command motion favors sustained single-block commands, and
+# scan proximity keeps exploring obstacle/safety boundaries.
+_TB4_FEEDBACK_STRATEGY_MAP = {
+    "scan_min_range": STRATEGY_BOUNDARY_PUSH,
+    "scan_invalid_ratio": STRATEGY_RANDOM,
+    "cmd_odom_linear_agreement": STRATEGY_BOUNDARY_PUSH,
+    "cmd_odom_angular_agreement": STRATEGY_BOUNDARY_PUSH,
+    "tb4_cmd_linear_velocity_ratio": STRATEGY_BOUNDARY_PUSH,
+    "tb4_cmd_angular_velocity_ratio": STRATEGY_BOUNDARY_PUSH,
+    "tb4_odom_linear_velocity_ratio": STRATEGY_BOUNDARY_PUSH,
+    "tb4_odom_angular_velocity_ratio": STRATEGY_BOUNDARY_PUSH,
+    "tb4_linear_accel_ratio": STRATEGY_REVERSAL,
+    "tb4_angular_accel_ratio": STRATEGY_REVERSAL,
+    "tb4_cmd_timeout_motion": STRATEGY_SINGLE_BLOCK,
+    "tb4_odom_publish_gap": STRATEGY_RANDOM,
+    "tb4_wheel_odom_consistency_error": STRATEGY_REVERSAL,
+}
+
 
 @dataclass
 class MutationProfile:
@@ -229,4 +250,29 @@ class MutationProfile:
             },
             block_len_range=(3, 8),
             feedback_strategy_map=_MOVEIT_FEEDBACK_STRATEGY_MAP,
+        )
+
+    @classmethod
+    def turtlebot4_velocity(cls) -> "MutationProfile":
+        """Profile for TurtleBot4 diff-drive velocity-command fuzzing.
+
+        Ranges use the conservative Phase-1 command envelope currently used
+        by seed_generator/fuzzer. Runtime oracle thresholds remain the wider
+        TurtleBot4 diffdrive_controller limits derived from OracleIR.
+        """
+        return cls(
+            field_ranges={
+                "linear.x": FieldRange("linear.x", -0.15, 0.15,
+                                       extreme_prob=0.0),
+                "angular.z": FieldRange("angular.z", -0.8, 0.8,
+                                        extreme_prob=0.0),
+            },
+            strategy_weights={
+                STRATEGY_BOUNDARY_PUSH: 0.30,
+                STRATEGY_REVERSAL: 0.30,
+                STRATEGY_SINGLE_BLOCK: 0.25,
+                STRATEGY_RANDOM: 0.15,
+            },
+            block_len_range=(3, 10),
+            feedback_strategy_map=_TB4_FEEDBACK_STRATEGY_MAP,
         )
