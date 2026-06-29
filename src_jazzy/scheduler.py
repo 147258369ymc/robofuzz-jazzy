@@ -1606,6 +1606,15 @@ class Scheduler:
             return None
         for fbk in fbk_list:
             if fbk.value is not None and fbk.interesting_value is not None:
+                prev_interesting = getattr(
+                    fbk, "prev_interesting_value", None
+                )
+                if prev_interesting is None:
+                    continue
+                if prev_interesting == fbk.interesting_value:
+                    continue
+                if fbk.value != fbk.interesting_value:
+                    continue
                 feed_type = getattr(fbk, "feed_type", None)
                 feed_type_name = getattr(feed_type, "name", "INC")
                 if feed_type_name == "DEC":
@@ -1688,14 +1697,30 @@ class Scheduler:
     def _tb4_reversal(self, profile, recent_feedback):
         axis = self._tb4_preferred_axis(recent_feedback)
         half = max(1, len(self.msg_list) // 2)
+        variant = getattr(self, "_tb4_reversal_variant", 0)
+        self._tb4_reversal_variant = (variant + 1) % 3
+
+        if axis == "angular":
+            lin_mag, ang_mag = [
+                (0.08, 0.70),
+                (0.00, 0.80),
+                (0.05, -0.65),
+            ][variant]
+        else:
+            lin_mag, ang_mag = [
+                (0.13, 0.45),
+                (0.15, 0.00),
+                (0.10, -0.25),
+            ][variant]
+
         for idx, msg in enumerate(self.msg_list):
             sign = 1.0 if idx < half else -1.0
             if axis == "angular":
-                lin_x = 0.08 * sign
-                ang_z = 0.70 * sign
+                lin_x = lin_mag * sign
+                ang_z = ang_mag * sign
             else:
-                lin_x = 0.13 * sign
-                ang_z = 0.45 * sign
+                lin_x = lin_mag * sign
+                ang_z = ang_mag * sign
             self._tb4_set_velocity(msg, lin_x, ang_z)
 
     def _tb4_single_block(self, profile, recent_feedback):

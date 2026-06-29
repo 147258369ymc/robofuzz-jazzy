@@ -26,11 +26,12 @@ class FakeTwistStamped:
 
 class FeedbackProbe:
     def __init__(self, name, value=1.0, interesting_value=0.0,
-                 feed_type=None):
+                 feed_type=None, prev_interesting_value=None):
         self.name = name
         self.value = value
         self.interesting_value = interesting_value
         self.feed_type = feed_type
+        self.prev_interesting_value = prev_interesting_value
 
 
 def import_scheduler_with_fakes():
@@ -79,6 +80,29 @@ def load_seedqueue_class():
     return ns["SeedQueue"]
 
 
+def load_fuzzer_function(function_name):
+    fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+    with open(fuzzer_path, encoding="utf-8") as fp:
+        text = fp.read()
+
+    start = text.index(f"def {function_name}(")
+    end = text.index("\n\nclass SeedQueue:", start)
+    source = text[start:end]
+    ns = {}
+    exec(compile(source, fuzzer_path, "exec"), ns)
+    return ns[function_name]
+
+
+def fuzzer_source_block(start_marker, end_marker):
+    fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+    with open(fuzzer_path, encoding="utf-8") as fp:
+        text = fp.read()
+
+    start = text.index(start_marker)
+    end = text.index(end_marker, start)
+    return text[start:end]
+
+
 class TurtleBot4SchedulerTests(unittest.TestCase):
     def test_seedqueue_compares_twiststamped_velocity_fields(self):
         SeedQueue = load_seedqueue_class()
@@ -122,6 +146,30 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
         self.assertTrue(any(value < 0.0 for value in lin_values), lin_values)
         self.assertEqual(8, len(msg_list))
 
+    def test_tb4_reversal_rotates_variants_to_avoid_one_signature(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        sched.msg_type_class = FakeTwistStamped
+        sched.msg_list = [FakeTwistStamped() for _ in range(8)]
+
+        sched._tb4_reversal(None, "tb4_linear_accel_ratio")
+        first = [
+            (msg.twist.linear.x, msg.twist.angular.z)
+            for msg in sched.msg_list
+        ]
+        sched._tb4_reversal(None, "tb4_linear_accel_ratio")
+        second = [
+            (msg.twist.linear.x, msg.twist.angular.z)
+            for msg in sched.msg_list
+        ]
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(
+            any(abs(ang_z) < 1e-9 for _lin_x, ang_z in second)
+            or any(abs(ang_z) != 0.45 for _lin_x, ang_z in second),
+            second,
+        )
+
     def test_tb4_recent_feedback_respects_decreasing_scan_metric(self):
         scheduler = import_scheduler_with_fakes()
         sched = object.__new__(scheduler.Scheduler)
@@ -129,7 +177,8 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
         feedback = FeedbackProbe(
             "scan_min_range",
             value=0.4,
-            interesting_value=1.5,
+            interesting_value=0.4,
+            prev_interesting_value=1.5,
             feed_type=types.SimpleNamespace(name="DEC"),
         )
 
@@ -137,6 +186,41 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
             "scan_min_range",
             sched._tb4_recent_feedback([feedback]),
         )
+
+    def test_tb4_recent_feedback_ignores_initial_dec_baseline(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+
+        feedback = FeedbackProbe(
+            "scan_min_range",
+            value=0.0,
+            interesting_value=0.0,
+            prev_interesting_value=0.0,
+            feed_type=types.SimpleNamespace(name="DEC"),
+        )
+
+        self.assertIsNone(sched._tb4_recent_feedback([feedback]))
+
+    def test_tb4_error_signature_buckets_duplicate_accel_errors(self):
+        tb4_error_signature = load_fuzzer_function("tb4_error_signature")
+
+        sigs = tb4_error_signature([
+            "TB4 linear acceleration envelope violated: "
+            "accel=2.000 m/s^2 ratio=2.21 limit=0.900",
+            "TB4 angular acceleration envelope violated: "
+            "accel=12.0 rad/s^2 ratio=1.55 limit=[-7.725, 7.725]",
+        ])
+
+        self.assertIn(("tb4_linear_accel", "", 4), sigs)
+        self.assertIn(("tb4_angular_accel", "", 3), sigs)
+
+    def test_tb4_feedback_is_not_reset_after_error(self):
+        block = fuzzer_source_block(
+            "# Do not reset feedback on error",
+            "if fuzzer.config.px4_sitl and errs:",
+        )
+
+        self.assertIn("fuzzer.config.tb4_sitl", block)
 
 
 if __name__ == "__main__":

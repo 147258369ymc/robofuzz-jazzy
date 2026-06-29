@@ -367,6 +367,22 @@ def _odom_velocity_samples(odom_list, prefer_header_stamp=False):
     return bag_samples
 
 
+def _twist_record_velocity_samples(records):
+    samples = []
+    for ts, msg in records:
+        try:
+            ts_sec = _ts_to_sec(ts)
+            cmd = _cmd_twist(msg)
+            lin_x = float(getattr(cmd.linear, "x", 0.0))
+            ang_z = float(getattr(cmd.angular, "z", 0.0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if math.isfinite(ts_sec) and math.isfinite(lin_x) and math.isfinite(ang_z):
+            samples.append((ts_sec, lin_x, ang_z))
+    samples.sort(key=lambda item: item[0])
+    return samples
+
+
 def _limit_ratio(value, positive_limit, negative_limit):
     limit = positive_limit if value >= 0.0 else abs(negative_limit)
     if limit <= 0.0:
@@ -414,8 +430,7 @@ def _check_tb4_velocity_envelope(odom_list, errs, feedback_list):
         )
 
 
-def _check_tb4_acceleration_envelope(odom_list, errs, feedback_list):
-    samples = _odom_velocity_samples(odom_list, prefer_header_stamp=True)
+def _acceleration_metrics(samples):
     max_lin_ratio = 0.0
     max_ang_ratio = 0.0
     max_lin_acc = 0.0
@@ -458,6 +473,26 @@ def _check_tb4_acceleration_envelope(odom_list, errs, feedback_list):
         else:
             ang_run = 0
 
+    return {
+        "max_lin_ratio": max_lin_ratio,
+        "max_ang_ratio": max_ang_ratio,
+        "max_lin_acc": max_lin_acc,
+        "max_ang_acc": max_ang_acc,
+        "max_lin_run": max_lin_run,
+        "max_ang_run": max_ang_run,
+    }
+
+
+def _check_tb4_acceleration_envelope(odom_list, errs, feedback_list):
+    samples = _odom_velocity_samples(odom_list, prefer_header_stamp=True)
+    metrics = _acceleration_metrics(samples)
+    max_lin_ratio = metrics["max_lin_ratio"]
+    max_ang_ratio = metrics["max_ang_ratio"]
+    max_lin_acc = metrics["max_lin_acc"]
+    max_ang_acc = metrics["max_ang_acc"]
+    max_lin_run = metrics["max_lin_run"]
+    max_ang_run = metrics["max_ang_run"]
+
     _update_feedback(feedback_list, "tb4_linear_accel_ratio", max_lin_ratio)
     _update_feedback(feedback_list, "tb4_angular_accel_ratio", max_ang_ratio)
 
@@ -482,6 +517,24 @@ def _check_tb4_acceleration_envelope(odom_list, errs, feedback_list):
             f"accel={max_ang_acc:.3f} rad/s^2 ratio={max_ang_ratio:.2f} "
             f"limit=[{TB4_MIN_ANG_ACCEL:.3f}, {TB4_MAX_ANG_ACCEL:.3f}]"
         )
+
+    return max_lin_ratio, max_ang_ratio
+
+
+def _check_tb4_command_path_acceleration(state_dict, feedback_list):
+    records = state_dict.get("/diffdrive_controller/cmd_vel", [])
+    samples = _twist_record_velocity_samples(records)
+    metrics = _acceleration_metrics(samples)
+    max_lin_ratio = metrics["max_lin_ratio"]
+    max_ang_ratio = metrics["max_ang_ratio"]
+
+    _update_feedback(
+        feedback_list, "tb4_cmd_path_linear_accel_ratio", max_lin_ratio
+    )
+    _update_feedback(
+        feedback_list, "tb4_cmd_path_angular_accel_ratio", max_ang_ratio
+    )
+    return max_lin_ratio, max_ang_ratio
 
 
 def _check_tb4_publish_gap(odom_list, errs, feedback_list):
@@ -621,7 +674,20 @@ def _check_turtlebot4_smoke(config, msg_list, state_dict, feedback_list):
     _check_tb4_command_velocity_envelope(msg_list, state_dict, errs,
                                          feedback_list)
     _check_tb4_velocity_envelope(odom_list, errs, feedback_list)
-    _check_tb4_acceleration_envelope(odom_list, errs, feedback_list)
+    odom_lin_acc_ratio, odom_ang_acc_ratio = _check_tb4_acceleration_envelope(
+        odom_list, errs, feedback_list
+    )
+    cmd_lin_acc_ratio, cmd_ang_acc_ratio = _check_tb4_command_path_acceleration(
+        state_dict, feedback_list
+    )
+    _update_feedback(
+        feedback_list,
+        "tb4_accel_cascade_score",
+        max(
+            min(odom_lin_acc_ratio, cmd_lin_acc_ratio),
+            min(odom_ang_acc_ratio, cmd_ang_acc_ratio),
+        ),
+    )
     _check_tb4_publish_gap(odom_list, errs, feedback_list)
     _check_tb4_cmd_timeout(
         state_dict, odom_list, errs, feedback_list, len(msg_list)

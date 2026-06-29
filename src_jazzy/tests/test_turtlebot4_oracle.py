@@ -269,6 +269,9 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
             "tb4_odom_angular_velocity_ratio",
             "tb4_linear_accel_ratio",
             "tb4_angular_accel_ratio",
+            "tb4_cmd_path_linear_accel_ratio",
+            "tb4_cmd_path_angular_accel_ratio",
+            "tb4_accel_cascade_score",
             "tb4_odom_publish_gap",
         ]
         feedback_list = [Feedback(n, FeedbackType.INC) for n in fbk_names]
@@ -283,6 +286,8 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
         self.assertIsNotNone(by_name["scan_invalid_ratio"].value)
         self.assertIsNotNone(by_name["tb4_cmd_linear_velocity_ratio"].value)
         self.assertIsNotNone(by_name["tb4_linear_accel_ratio"].value)
+        self.assertIsNotNone(by_name["tb4_cmd_path_linear_accel_ratio"].value)
+        self.assertIsNotNone(by_name["tb4_accel_cascade_score"].value)
         self.assertIsNotNone(by_name["tb4_odom_publish_gap"].value)
 
     # --- deeper OracleIR-derived checks ---
@@ -373,6 +378,48 @@ class TurtleBot4SmokeOracleTests(unittest.TestCase):
 
         self.assertTrue(any("linear acceleration envelope" in e
                             for e in errs), errs)
+
+    def test_command_path_acceleration_updates_feedback_only(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/diffdrive_controller/cmd_vel": [
+                (base + i * 100_000_000, make_twist(lx=value, az=0.0))
+                for i, value in enumerate([0.0, 0.12, 0.24])
+            ],
+            "/odom": odom_ns_series([0.0, 0.0, 0.0], start_ns=base),
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        feedback = [
+            FeedbackProbe("tb4_cmd_path_linear_accel_ratio"),
+            FeedbackProbe("tb4_cmd_path_angular_accel_ratio"),
+            FeedbackProbe("tb4_accel_cascade_score"),
+        ]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertFalse(any("command path acceleration" in e
+                             for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
+        self.assertEqual(feedback[1].value, 0.0)
+        self.assertEqual(feedback[2].value, 0.0)
+
+    def test_accel_cascade_feedback_requires_odom_and_command_path_pressure(self):
+        base = 1_000_000_000_000_000_000
+        state = {
+            "/diffdrive_controller/cmd_vel": [
+                (base + i * 100_000_000, make_twist(lx=value, az=0.0))
+                for i, value in enumerate([0.0, 0.12, 0.24])
+            ],
+            "/odom": odom_ns_series([0.0, 0.12, 0.24], start_ns=base),
+            "/scan": [(base, make_scan([1.0]))],
+        }
+        feedback = [FeedbackProbe("tb4_accel_cascade_score")]
+
+        errs = self.run_check([make_twist(lx=0.15)], state, feedback)
+
+        self.assertTrue(any("linear acceleration envelope" in e
+                            for e in errs), errs)
+        self.assertGreater(feedback[0].value, 1.0)
 
     def test_strong_single_acceleration_spike_still_reports_error(self):
         state = {

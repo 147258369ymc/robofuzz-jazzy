@@ -145,6 +145,50 @@ def moveit_error_signature(errs):
     return sigs
 
 
+def tb4_error_signature(errs):
+    """Coarse TurtleBot4 oracle signatures for queue-level novelty.
+
+    This does not suppress error logging. It only prevents the seed queue from
+    being dominated by already-seen TB4 bug classes such as the same sustained
+    linear acceleration violation rediscovered with tiny numeric differences.
+    """
+    import re
+    sigs = set()
+    for e in errs:
+        e = str(e)
+        ratio_m = re.search(r"ratio=([0-9.]+)", e)
+        bucket = int(float(ratio_m.group(1)) / 0.5) if ratio_m else 0
+
+        if "TB4 linear acceleration envelope" in e:
+            sigs.add(("tb4_linear_accel", "", bucket))
+        elif "TB4 angular acceleration envelope" in e:
+            sigs.add(("tb4_angular_accel", "", bucket))
+        elif "TB4 cmd_vel linear velocity envelope" in e:
+            sigs.add(("tb4_cmd_linear_velocity", "", bucket))
+        elif "TB4 cmd_vel angular velocity envelope" in e:
+            sigs.add(("tb4_cmd_angular_velocity", "", bucket))
+        elif "TB4 linear velocity envelope" in e:
+            sigs.add(("tb4_odom_linear_velocity", "", bucket))
+        elif "TB4 angular velocity envelope" in e:
+            sigs.add(("tb4_odom_angular_velocity", "", bucket))
+        elif "TB4 cmd_vel timeout" in e:
+            sigs.add(("tb4_cmd_timeout", "", 0))
+        elif "TB4 wheel/odom direction conflict" in e:
+            sigs.add(("tb4_wheel_odom_conflict", "", 0))
+        elif "cmd_vel" in e and "conflicts with mean" in e:
+            axis = "angular" if "turn" in e or "angular" in e else "linear"
+            sigs.add(("tb4_cmd_odom_conflict", axis, 0))
+        elif "scan.ranges" in e:
+            sigs.add(("tb4_scan_sanity", "", 0))
+        elif "odom quaternion" in e:
+            sigs.add(("tb4_odom_quaternion", "", 0))
+        elif "missing required TurtleBot4 topic" in e:
+            sigs.add(("tb4_missing_topic", "", 0))
+        else:
+            sigs.add(("tb4_other", "", hash(e) % 1000))
+    return sigs
+
+
 class SeedQueue:
     """Quality-aware seed queue with deduplication, staleness decay, and warmup.
 
@@ -1379,6 +1423,27 @@ def fuzz_msg(fuzzer, fuzz_targets):
             )
             fbk_list.append(fbk)
             fbk = Feedback(
+                "tb4_cmd_path_linear_accel_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_cmd_path_angular_accel_ratio",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "tb4_accel_cascade_score",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
                 "tb4_linear_accel_ratio",
                 FeedbackType.INC,
                 default_value=0.0,
@@ -2015,6 +2080,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # an already-seen bug signature is NOT worth re-queueing as
                 # interesting — it just churns the queue with duplicates.
                 moveit_error_is_novel = False
+                tb4_error_is_novel = False
                 if fuzzer.config.test_moveit and errs:
                     if not hasattr(scheduler, '_seen_error_signatures'):
                         scheduler._seen_error_signatures = set()
@@ -2027,6 +2093,21 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     else:
                         print(f"[dedup] duplicate error signature(s): {sigs} "
                               f"— will not re-queue as interesting")
+
+                if fuzzer.config.tb4_sitl and errs:
+                    if not hasattr(scheduler, '_seen_tb4_error_signatures'):
+                        scheduler._seen_tb4_error_signatures = set()
+                    sigs = tb4_error_signature(errs)
+                    new_sigs = sigs - scheduler._seen_tb4_error_signatures
+                    if new_sigs:
+                        tb4_error_is_novel = True
+                        scheduler._seen_tb4_error_signatures |= new_sigs
+                        print(f"[dedup] NEW TB4 error signature(s): {new_sigs}")
+                    else:
+                        print(
+                            f"[dedup] duplicate TB4 error signature(s): {sigs} "
+                            "— will not re-queue as interesting"
+                        )
 
                 if fuzzer.config.px4_sitl:
                     if collision_checker.found_collision():
@@ -2205,9 +2286,16 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # interesting via feedback with NO errors are still re-queued
                 # (valuable for exploration).
                 skip_dup_requeue = (
-                    fuzzer.config.test_moveit
-                    and errs
-                    and not moveit_error_is_novel
+                    (
+                        fuzzer.config.test_moveit
+                        and errs
+                        and not moveit_error_is_novel
+                    )
+                    or (
+                        fuzzer.config.tb4_sitl
+                        and errs
+                        and not tb4_error_is_novel
+                    )
                 )
 
                 if skip_dup_requeue:
@@ -2253,6 +2341,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # (attitude > 170 deg), as crash data poisons the feedback ceiling.
             if not (fuzzer.config.tb3_sitl or fuzzer.config.tb3_hitl
                     or fuzzer.config.px4_sitl
+                    or fuzzer.config.tb4_sitl
                     or fuzzer.config.test_moveit):
                 if errs:
                     for fbk in fbk_list:
