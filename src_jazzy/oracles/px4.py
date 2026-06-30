@@ -3,14 +3,15 @@ import statistics
 
 
 # =========================================================================
-# PX4 v1.12 Default Parameter Thresholds (used when not dynamically mutated)
+# PX4 Default Parameter Thresholds (used when not dynamically mutated)
 # =========================================================================
 
 PX4_DEFAULTS = {
     "MPC_XY_VEL_MAX": 12.0,       # m/s
     "MPC_Z_VEL_MAX_UP": 3.0,      # m/s
-    "MPC_Z_VEL_MAX_DN": 1.0,      # m/s
+    "MPC_Z_VEL_MAX_DN": 1.5,      # m/s
     "MPC_VEL_MANUAL": 10.0,       # m/s
+    "MPC_ACC_HOR": 3.0,           # m/s²
     "MPC_ACC_HOR_MAX": 5.0,       # m/s²
     "MPC_ACC_UP_MAX": 4.0,        # m/s²
     "MPC_ACC_DOWN_MAX": 3.0,      # m/s²
@@ -59,7 +60,7 @@ def _get_threshold(param_name, msg_list, config):
     use the mutated value as the threshold. Otherwise use the default.
     """
     default = PX4_DEFAULTS.get(param_name, 0.0)
-    if config.exp_pgfuzz and msg_list:
+    if getattr(config, "exp_pgfuzz", False) and msg_list:
         param = msg_list[0]
         if hasattr(param, 'param_name') and param.param_name == param_name:
             return param.value
@@ -169,7 +170,173 @@ def _update_feedback(feedback_list, metrics):
             feedback.update_value(metrics[feedback.name])
 
 
-def _px4_v117_ulg_metrics(config, state_dict):
+# =========================================================================
+# PX4 v1.17 Jazzy layered ULG oracle
+# =========================================================================
+
+PX4_V117_NAV_OFFBOARD = 14
+PX4_V117_ARMED = 2
+PX4_V117_COM_OF_LOSS_T = 1.0
+PX4_V117_FAILSAFE_EXPLANATORY_FLAGS = (
+    "offboard_control_signal_lost",
+    "manual_control_signal_lost",
+    "gcs_connection_lost",
+    "local_position_invalid",
+    "local_position_invalid_relaxed",
+    "local_velocity_invalid",
+    "local_altitude_invalid",
+    "attitude_invalid",
+    "angular_velocity_invalid",
+    "global_position_invalid",
+    "global_position_invalid_relaxed",
+    "home_position_invalid",
+    "battery_unhealthy",
+    "geofence_breached",
+    "fd_critical_failure",
+    "fd_esc_arming_failure",
+    "fd_imbalanced_prop",
+    "mission_failure",
+    "navigator_failure",
+)
+
+
+def _raw_finite(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return value
+
+
+def _msg_bool(msg, field_name):
+    try:
+        return bool(getattr(msg, field_name))
+    except AttributeError:
+        return False
+
+
+def _record_ts_ns(ts, msg):
+    timestamp = _msg_scalar(msg, "timestamp")
+    if timestamp is not None and timestamp > 0:
+        # PX4 message timestamps are in microseconds; parser tuple timestamps
+        # are nanoseconds. Keep both paths usable for synthetic unit tests.
+        return int(timestamp * 1000)
+    return int(ts)
+
+
+def _sample_is_armed(status):
+    return getattr(status, "arming_state", None) == PX4_V117_ARMED
+
+
+def _sample_is_offboard(status):
+    return getattr(status, "nav_state", None) == PX4_V117_NAV_OFFBOARD
+
+
+def _status_failsafe(status):
+    return bool(getattr(status, "failsafe", False))
+
+
+def _failsafe_has_explanatory_flag(flags_msg):
+    if flags_msg is None:
+        return False
+    return any(
+        _msg_bool(flags_msg, field_name)
+        for field_name in PX4_V117_FAILSAFE_EXPLANATORY_FLAGS
+    )
+
+
+def _heartbeat_fresh_at(hb_samples, ts_ns):
+    if not hb_samples:
+        return False
+    max_gap_ns = int((PX4_V117_COM_OF_LOSS_T + 0.05) * 1e9)
+    return min(abs(hb_ts - ts_ns) for hb_ts in hb_samples) <= max_gap_ns
+
+
+def _smooth_velocity_samples(velocities):
+    if len(velocities) < 3:
+        return []
+    smoothed = []
+    for idx in range(1, len(velocities) - 1):
+        prev = velocities[idx - 1]
+        curr = velocities[idx]
+        nxt = velocities[idx + 1]
+        smoothed.append((
+            curr[0],
+            (prev[1] + curr[1] + nxt[1]) / 3.0,
+            (prev[2] + curr[2] + nxt[2]) / 3.0,
+            (prev[3] + curr[3] + nxt[3]) / 3.0,
+        ))
+    return smoothed
+
+
+def _velocity_accels(velocities):
+    accels = []
+    for idx in range(1, len(velocities)):
+        prev = velocities[idx - 1]
+        curr = velocities[idx]
+        dt = (curr[0] - prev[0]) / 1e9
+        if dt <= 0.01 or dt > 0.5:
+            continue
+        accels.append((
+            curr[0],
+            (curr[1] - prev[1]) / dt,
+            (curr[2] - prev[2]) / dt,
+            (curr[3] - prev[3]) / dt,
+        ))
+    return accels
+
+
+def _has_sustained_true(values, required=2):
+    run = 0
+    for value in values:
+        if value:
+            run += 1
+            if run >= required:
+                return True
+        else:
+            run = 0
+    return False
+
+
+def collect_px4_v117_evidence(state_dict):
+    return {
+        "status": _safe_get(state_dict, "/VehicleStatus_PubSubTopic"),
+        "local_position": _safe_get(
+            state_dict, "/VehicleLocalPosition_PubSubTopic"
+        ),
+        "attitude": _safe_get(state_dict, "/VehicleAttitude_PubSubTopic"),
+        "angular_velocity": _safe_get(
+            state_dict, "/VehicleAngularVelocity_PubSubTopic"
+        ),
+        "odometry": _safe_get(state_dict, "/VehicleOdometry_PubSubTopic"),
+        "control_mode": _safe_get(
+            state_dict, "/VehicleControlMode_PubSubTopic"
+        ),
+        "command_ack": _safe_get(
+            state_dict, "/VehicleCommandAck_PubSubTopic"
+        ),
+        "offboard_heartbeat": _safe_get(
+            state_dict, "/OffboardControlMode_PubSubTopic"
+        ),
+        "failsafe_flags": _safe_get(state_dict, "/FailsafeFlags_PubSubTopic"),
+        "trajectory_setpoint": _safe_get(
+            state_dict, "/TrajectorySetpoint_PubSubTopic"
+        ),
+        "rates_setpoint": _safe_get(
+            state_dict, "/VehicleRatesSetpoint_PubSubTopic"
+        ),
+        "actuator_outputs": _safe_get(
+            state_dict, "/ActuatorOutputs_PubSubTopic"
+        ),
+        "land_detected": _safe_get(
+            state_dict, "/VehicleLandDetected_PubSubTopic"
+        ),
+    }
+
+
+def _initial_px4_v117_metrics():
     metrics = {
         "max_xy_velocity": 0.0,
         "max_tilt_angle": 0.0,
@@ -185,141 +352,356 @@ def _px4_v117_ulg_metrics(config, state_dict):
         "px4_v117_rate_tracking_error": 0.0,
         "px4_v117_setpoint_sample_count": 0.0,
         "px4_v117_state_sample_count": 0.0,
+        "px4_v117_horizontal_speed_ratio": 0.0,
+        "px4_v117_climb_speed_ratio": 0.0,
+        "px4_v117_descent_speed_ratio": 0.0,
+        "px4_v117_horizontal_accel_ratio": 0.0,
+        "px4_v117_vertical_accel_ratio": 0.0,
+        "px4_v117_jerk_ratio": 0.0,
+        "px4_v117_tilt_ratio": 0.0,
+        "px4_v117_roll_rate_ratio": 0.0,
+        "px4_v117_pitch_rate_ratio": 0.0,
+        "px4_v117_yaw_rate_ratio": 0.0,
+        "px4_v117_offboard_heartbeat_gap_ratio": 0.0,
+        "px4_v117_control_mode_cascade_pressure": 0.0,
+        "px4_v117_failsafe_pressure": 0.0,
+        "px4_v117_command_ack_anomaly_score": 0.0,
+        "px4_v117_actuator_saturation_ratio": 0.0,
+        "px4_v117_quality_score": 0.0,
+        "_armed_seen": False,
+        "_offboard_seen": False,
+        "_airborne_seen": False,
+        "_landed_seen": False,
+        "_status_failsafe_seen": False,
+        "_horizontal_velocity_over": [],
+        "_climb_velocity_over": [],
+        "_descent_velocity_over": [],
+        "_horizontal_accel_over": [],
+        "_vertical_accel_over": [],
+        "_jerk_over": [],
+        "_tilt_over": [],
+        "_rate_over": [],
+        "_control_cascade_over": [],
+        "_offboard_enabled_false_while_nav_offboard": [],
+        "_heartbeat_gap_over": [],
+        "_spurious_failsafe_over": [],
+        "_actuator_saturation_duration": 0.0,
+        "_command_ack_anomaly": False,
     }
-    errs = []
+    return metrics
 
-    local_position_list = _safe_get(
-        state_dict, "/VehicleLocalPosition_PubSubTopic"
-    )
-    attitude_list = _safe_get(state_dict, "/VehicleAttitude_PubSubTopic")
-    angular_velocity_list = _safe_get(
-        state_dict, "/VehicleAngularVelocity_PubSubTopic"
-    )
-    actuator_outputs_list = _safe_get(
-        state_dict, "/ActuatorOutputs_PubSubTopic"
-    )
-    trajectory_setpoint_list = _safe_get(
-        state_dict, "/TrajectorySetpoint_PubSubTopic"
-    )
-    rates_setpoint_list = _safe_get(
-        state_dict, "/VehicleRatesSetpoint_PubSubTopic"
-    )
 
-    metrics["px4_v117_state_sample_count"] = float(
-        len(local_position_list) + len(attitude_list)
-    )
-    metrics["px4_v117_setpoint_sample_count"] = float(
-        len(trajectory_setpoint_list) + len(rates_setpoint_list)
-    )
+def _append_state_invalid_errors(evidence, errs):
+    for _, pos in evidence["local_position"]:
+        for field_name in ("x", "y", "z", "vx", "vy", "vz", "heading"):
+            if not hasattr(pos, field_name):
+                continue
+            try:
+                value = float(getattr(pos, field_name))
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(value) or math.isinf(value):
+                errs.append(
+                    "px4_v117_state_invalid: "
+                    f"vehicle_local_position.{field_name} is NaN/INF"
+                )
+        heading = _msg_scalar(pos, "heading")
+        if heading is not None and abs(heading) > math.pi + 0.0001:
+            errs.append(
+                "px4_v117_state_invalid: "
+                f"vehicle_local_position.heading {heading:.3f} outside [-pi, pi]"
+            )
 
-    for _, pos in local_position_list:
+    for _, att in evidence["attitude"]:
+        q = getattr(att, "q", None)
+        if q is None:
+            continue
+        values = []
+        invalid = False
+        for idx in range(4):
+            try:
+                value = float(q[idx])
+            except (IndexError, TypeError, ValueError):
+                invalid = True
+                break
+            if math.isnan(value) or math.isinf(value):
+                invalid = True
+                break
+            values.append(value)
+        if invalid:
+            errs.append("px4_v117_state_invalid: vehicle_attitude.q is NaN/INF")
+            continue
+        norm = math.sqrt(sum(value * value for value in values))
+        if norm < 0.5 or norm > 1.5:
+            errs.append(
+                "px4_v117_state_invalid: "
+                f"vehicle_attitude.q has implausible norm {norm:.3f}"
+            )
+
+    for _, odom in evidence["odometry"]:
+        for field_name in ("x", "y", "z"):
+            if not hasattr(odom, field_name):
+                continue
+            try:
+                value = float(getattr(odom, field_name))
+            except (TypeError, ValueError):
+                continue
+            if math.isnan(value) or math.isinf(value):
+                errs.append(
+                    "px4_v117_state_invalid: "
+                    f"vehicle_odometry.{field_name} is NaN/INF"
+                )
+
+
+def _compute_px4_v117_local_position_metrics(evidence, metrics):
+    local_position_list = evidence["local_position"]
+    velocities = []
+    prev_ts = None
+    prev_pos = None
+    for ts, pos in local_position_list:
+        x = _msg_scalar(pos, "x")
+        y = _msg_scalar(pos, "y")
+        z = _msg_scalar(pos, "z")
         vx = _msg_scalar(pos, "vx")
         vy = _msg_scalar(pos, "vy")
-        z = _msg_scalar(pos, "z")
-        if vx is not None and vy is not None:
-            metrics["max_xy_velocity"] = max(
-                metrics["max_xy_velocity"],
-                math.sqrt(vx * vx + vy * vy),
-            )
+        vz = _msg_scalar(pos, "vz")
         if z is not None:
-            metrics["max_altitude"] = max(metrics["max_altitude"], abs(z))
-
-    if len(local_position_list) >= 2:
-        for idx in range(1, len(local_position_list)):
-            ts_prev, pos_prev = local_position_list[idx - 1]
-            ts_curr, pos_curr = local_position_list[idx]
-            dt = (ts_curr - ts_prev) / 1e9
-            if dt <= 0.0:
-                continue
-            metrics["control_loop_gap"] = max(
-                metrics["control_loop_gap"], dt
+            altitude = abs(z)
+            metrics["max_altitude"] = max(metrics["max_altitude"], altitude)
+            if altitude >= 1.0:
+                metrics["_airborne_seen"] = True
+        if vx is not None and vy is not None:
+            xy_vel = math.sqrt(vx * vx + vy * vy)
+            metrics["max_xy_velocity"] = max(
+                metrics["max_xy_velocity"], xy_vel
             )
-            if dt > 1.0:
-                continue
-
-            prev = [
-                _msg_scalar(pos_prev, "x"),
-                _msg_scalar(pos_prev, "y"),
-                _msg_scalar(pos_prev, "z"),
-                _msg_scalar(pos_prev, "vx"),
-                _msg_scalar(pos_prev, "vy"),
-                _msg_scalar(pos_prev, "vz"),
-            ]
-            curr = [
-                _msg_scalar(pos_curr, "x"),
-                _msg_scalar(pos_curr, "y"),
-                _msg_scalar(pos_curr, "z"),
-            ]
-            if any(value is None for value in prev + curr):
-                continue
-            expected = [prev[3] * dt, prev[4] * dt, prev[5] * dt]
-            actual = [
-                curr[0] - prev[0],
-                curr[1] - prev[1],
-                curr[2] - prev[2],
-            ]
-            err = math.sqrt(sum(
-                (expected[i] - actual[i]) ** 2 for i in range(3)
-            ))
-            metrics["vel_pos_inconsistency"] = max(
-                metrics["vel_pos_inconsistency"], err
+            ratio = xy_vel / PX4_DEFAULTS["MPC_XY_VEL_MAX"]
+            metrics["px4_v117_horizontal_speed_ratio"] = max(
+                metrics["px4_v117_horizontal_speed_ratio"], ratio
             )
+            metrics["_horizontal_velocity_over"].append(
+                xy_vel > PX4_DEFAULTS["MPC_XY_VEL_MAX"] + TOL_VEL
+            )
+        if vz is not None:
+            climb = max(-vz, 0.0)
+            descent = max(vz, 0.0)
+            metrics["px4_v117_climb_speed_ratio"] = max(
+                metrics["px4_v117_climb_speed_ratio"],
+                climb / PX4_DEFAULTS["MPC_Z_VEL_MAX_UP"],
+            )
+            metrics["px4_v117_descent_speed_ratio"] = max(
+                metrics["px4_v117_descent_speed_ratio"],
+                descent / PX4_DEFAULTS["MPC_Z_VEL_MAX_DN"],
+            )
+            metrics["_climb_velocity_over"].append(
+                climb > PX4_DEFAULTS["MPC_Z_VEL_MAX_UP"] + 0.5
+            )
+            metrics["_descent_velocity_over"].append(
+                descent > PX4_DEFAULTS["MPC_Z_VEL_MAX_DN"] + 0.5
+            )
+        if None not in (vx, vy, vz):
+            velocities.append((ts, vx, vy, vz))
+        if prev_ts is not None and prev_pos is not None:
+            dt = (ts - prev_ts) / 1e9
+            if 0.0 < dt <= 1.0:
+                pvx = _msg_scalar(prev_pos, "vx")
+                pvy = _msg_scalar(prev_pos, "vy")
+                pvz = _msg_scalar(prev_pos, "vz")
+                px = _msg_scalar(prev_pos, "x")
+                py = _msg_scalar(prev_pos, "y")
+                pz = _msg_scalar(prev_pos, "z")
+                if None not in (pvx, pvy, pvz, px, py, pz, x, y, z):
+                    expected = [px + pvx * dt, py + pvy * dt, pz + pvz * dt]
+                    actual = [x, y, z]
+                    err = math.sqrt(sum(
+                        (expected[i] - actual[i]) ** 2 for i in range(3)
+                    ))
+                    metrics["vel_pos_inconsistency"] = max(
+                        metrics["vel_pos_inconsistency"], err
+                    )
+            if dt > 0:
+                metrics["control_loop_gap"] = max(
+                    metrics["control_loop_gap"], dt
+                )
+        prev_ts = ts
+        prev_pos = pos
 
-    control_gap_limit = 0.5 if getattr(config, "use_ulg", False) else 0.25
-    if metrics["control_loop_gap"] > control_gap_limit:
-        errs.append(
-            "px4_v117_control_loop_gap: "
-            f"{metrics['control_loop_gap'] * 1000:.1f}ms"
+    accels = _velocity_accels(velocities)
+    for _, ax, ay, az in accels:
+        hor_acc = math.sqrt(ax * ax + ay * ay)
+        vert_acc = abs(az)
+        metrics["px4_v117_horizontal_accel_ratio"] = max(
+            metrics["px4_v117_horizontal_accel_ratio"],
+            hor_acc / PX4_DEFAULTS["MPC_ACC_HOR"],
+        )
+        metrics["px4_v117_vertical_accel_ratio"] = max(
+            metrics["px4_v117_vertical_accel_ratio"],
+            max(
+                max(-az, 0.0) / PX4_DEFAULTS["MPC_ACC_UP_MAX"],
+                max(az, 0.0) / PX4_DEFAULTS["MPC_ACC_DOWN_MAX"],
+            ),
+        )
+        metrics["_horizontal_accel_over"].append(
+            hor_acc / PX4_DEFAULTS["MPC_ACC_HOR_MAX"] > 1.10
+        )
+        metrics["_vertical_accel_over"].append(
+            vert_acc / min(
+                PX4_DEFAULTS["MPC_ACC_UP_MAX"],
+                PX4_DEFAULTS["MPC_ACC_DOWN_MAX"],
+            ) > 1.10
         )
 
-    for _, att in attitude_list:
+    for idx in range(1, len(accels)):
+        prev = accels[idx - 1]
+        curr = accels[idx]
+        dt = (curr[0] - prev[0]) / 1e9
+        if dt <= 0.01 or dt > 0.5:
+            continue
+        jerk = math.sqrt(sum(
+            ((curr[i] - prev[i]) / dt) ** 2 for i in range(1, 4)
+        ))
+        metrics["max_jerk"] = max(metrics["max_jerk"], jerk)
+        ratio = jerk / PX4_DEFAULTS["MPC_JERK_MAX"]
+        metrics["px4_v117_jerk_ratio"] = max(
+            metrics["px4_v117_jerk_ratio"], ratio
+        )
+
+    smoothed_accels = _velocity_accels(_smooth_velocity_samples(velocities))
+    for idx in range(1, len(smoothed_accels)):
+        prev = smoothed_accels[idx - 1]
+        curr = smoothed_accels[idx]
+        dt = (curr[0] - prev[0]) / 1e9
+        if dt <= 0.01 or dt > 0.5:
+            continue
+        jerk = math.sqrt(sum(
+            ((curr[i] - prev[i]) / dt) ** 2 for i in range(1, 4)
+        ))
+        ratio = jerk / PX4_DEFAULTS["MPC_JERK_MAX"]
+        metrics["_jerk_over"].append(ratio > 1.20)
+
+
+def _compute_px4_v117_attitude_metrics(evidence, metrics):
+    for _, att in evidence["attitude"]:
         q = _msg_vector(att, "q", length=4)
         if q is None:
             continue
-        metrics["max_tilt_angle"] = max(
-            metrics["max_tilt_angle"], _quat_to_tilt_deg(q)
+        tilt = _quat_to_tilt_deg(q)
+        metrics["max_tilt_angle"] = max(metrics["max_tilt_angle"], tilt)
+        ratio = tilt / PX4_DEFAULTS["MPC_TILTMAX_AIR"]
+        metrics["px4_v117_tilt_ratio"] = max(
+            metrics["px4_v117_tilt_ratio"], ratio
         )
+        metrics["_tilt_over"].append(ratio > 1.05)
 
-    for _, ang in angular_velocity_list:
+    rate_samples = []
+    for ts, ang in evidence["angular_velocity"]:
         xyz = _msg_vector(ang, "xyz", length=3)
-        if xyz is None:
-            continue
-        rate_dps = max(abs(value) for value in xyz) * 180.0 / math.pi
+        if xyz is not None:
+            rate_samples.append((ts, xyz))
+    if not rate_samples:
+        for ts, odom in evidence["odometry"]:
+            xyz = _msg_vector(odom, "angular_velocity", length=3)
+            if xyz is not None:
+                rate_samples.append((ts, xyz))
+
+    for _, xyz in rate_samples:
+        roll = abs(xyz[0]) * 180.0 / math.pi
+        pitch = abs(xyz[1]) * 180.0 / math.pi
+        yaw = abs(xyz[2]) * 180.0 / math.pi
         metrics["max_angular_rate"] = max(
-            metrics["max_angular_rate"], rate_dps
+            metrics["max_angular_rate"], roll, pitch, yaw
+        )
+        roll_ratio = roll / PX4_DEFAULTS["MC_ROLLRATE_MAX"]
+        pitch_ratio = pitch / PX4_DEFAULTS["MC_PITCHRATE_MAX"]
+        yaw_ratio = yaw / PX4_DEFAULTS["MC_YAWRATE_MAX"]
+        metrics["px4_v117_roll_rate_ratio"] = max(
+            metrics["px4_v117_roll_rate_ratio"], roll_ratio
+        )
+        metrics["px4_v117_pitch_rate_ratio"] = max(
+            metrics["px4_v117_pitch_rate_ratio"], pitch_ratio
+        )
+        metrics["px4_v117_yaw_rate_ratio"] = max(
+            metrics["px4_v117_yaw_rate_ratio"], yaw_ratio
+        )
+        metrics["_rate_over"].append(
+            roll_ratio > 1.05 or pitch_ratio > 1.05 or yaw_ratio > 1.05
         )
 
-    if len(local_position_list) >= 3:
-        velocities = []
-        for ts, pos in local_position_list:
-            vx = _msg_scalar(pos, "vx")
-            vy = _msg_scalar(pos, "vy")
-            vz = _msg_scalar(pos, "vz")
-            if None not in (vx, vy, vz):
-                velocities.append((ts, vx, vy, vz))
-        accels = []
-        for idx in range(1, len(velocities)):
-            prev = velocities[idx - 1]
-            curr = velocities[idx]
-            dt = (curr[0] - prev[0]) / 1e9
-            if dt <= 0.001 or dt > 1.0:
-                continue
-            ax = (curr[1] - prev[1]) / dt
-            ay = (curr[2] - prev[2]) / dt
-            az = (curr[3] - prev[3]) / dt
-            accels.append((curr[0], ax, ay, az))
-        for idx in range(1, len(accels)):
-            prev = accels[idx - 1]
-            curr = accels[idx]
-            dt = (curr[0] - prev[0]) / 1e9
-            if dt <= 0.001 or dt > 1.0:
-                continue
-            jerk = math.sqrt(sum(
-                ((curr[i] - prev[i]) / dt) ** 2 for i in range(1, 4)
-            ))
-            metrics["max_jerk"] = max(metrics["max_jerk"], jerk)
 
-    for ts, setpoint in trajectory_setpoint_list:
+def _compute_px4_v117_mode_metrics(evidence, metrics):
+    status_by_ts = evidence["status"]
+    hb_samples = sorted(
+        _record_ts_ns(ts, hb)
+        for ts, hb in evidence["offboard_heartbeat"]
+    )
+
+    for ts, status in status_by_ts:
+        if _sample_is_armed(status):
+            metrics["_armed_seen"] = True
+        if _sample_is_offboard(status):
+            metrics["_offboard_seen"] = True
+        if _status_failsafe(status):
+            metrics["_status_failsafe_seen"] = True
+            metrics["px4_v117_failsafe_pressure"] = 1.0
+            status_ts = _record_ts_ns(ts, status)
+            flags_msg = _nearest_msg(
+                evidence["failsafe_flags"],
+                status_ts,
+                max_gap_ns=500_000_000,
+            )
+            metrics["_spurious_failsafe_over"].append(
+                _sample_is_offboard(status)
+                and _heartbeat_fresh_at(hb_samples, status_ts)
+                and not _failsafe_has_explanatory_flag(flags_msg)
+            )
+
+    for _, landed in evidence["land_detected"]:
+        if _msg_bool(landed, "landed"):
+            metrics["_landed_seen"] = True
+
+    for ts, control in evidence["control_mode"]:
+        pos_enabled = _msg_bool(control, "flag_control_position_enabled")
+        vel_enabled = _msg_bool(control, "flag_control_velocity_enabled")
+        att_enabled = _msg_bool(control, "flag_control_attitude_enabled")
+        cascade_bad = (pos_enabled and not vel_enabled) or (
+            vel_enabled and not att_enabled
+        )
+        metrics["_control_cascade_over"].append(cascade_bad)
+        if cascade_bad:
+            metrics["px4_v117_control_mode_cascade_pressure"] = 1.0
+
+        status = _nearest_msg(status_by_ts, ts)
+        if status is not None and _sample_is_offboard(status):
+            offboard_enabled = _msg_bool(
+                control, "flag_control_offboard_enabled"
+            )
+            metrics["_offboard_enabled_false_while_nav_offboard"].append(
+                not offboard_enabled
+            )
+
+    for idx in range(1, len(hb_samples)):
+        gap = (hb_samples[idx] - hb_samples[idx - 1]) / 1e9
+        if gap <= 0:
+            continue
+        ratio = gap / PX4_V117_COM_OF_LOSS_T
+        metrics["px4_v117_offboard_heartbeat_gap_ratio"] = max(
+            metrics["px4_v117_offboard_heartbeat_gap_ratio"], ratio
+        )
+        metrics["_heartbeat_gap_over"].append(
+            gap > PX4_V117_COM_OF_LOSS_T + 0.05
+        )
+
+    for _, ack in evidence["command_ack"]:
+        result = _msg_scalar(ack, "result")
+        if result is not None and int(result) != 0:
+            metrics["_command_ack_anomaly"] = True
+            metrics["px4_v117_command_ack_anomaly_score"] = 1.0
+
+
+def _compute_px4_v117_tracking_metrics(evidence, metrics):
+    local_position_list = evidence["local_position"]
+    angular_velocity_list = evidence["angular_velocity"]
+    for ts, setpoint in evidence["trajectory_setpoint"]:
         desired = _msg_vector(setpoint, "velocity", length=3)
         if desired is None:
             continue
@@ -333,14 +715,12 @@ def _px4_v117_ulg_metrics(config, state_dict):
         ]
         if any(value is None for value in actual):
             continue
-        tracking_err = math.sqrt(sum(
-            (desired[i] - actual[i]) ** 2 for i in range(3)
-        ))
+        err = math.sqrt(sum((desired[i] - actual[i]) ** 2 for i in range(3)))
         metrics["px4_v117_velocity_tracking_error"] = max(
-            metrics["px4_v117_velocity_tracking_error"], tracking_err
+            metrics["px4_v117_velocity_tracking_error"], err
         )
 
-    for ts, setpoint in rates_setpoint_list:
+    for ts, setpoint in evidence["rates_setpoint"]:
         desired = [
             _msg_scalar(setpoint, "roll", "roll_body"),
             _msg_scalar(setpoint, "pitch", "pitch_body"),
@@ -352,41 +732,198 @@ def _px4_v117_ulg_metrics(config, state_dict):
         actual = _msg_vector(actual_msg, "xyz", length=3) if actual_msg else None
         if actual is None:
             continue
-        tracking_err = math.sqrt(sum(
-            (desired[i] - actual[i]) ** 2 for i in range(3)
-        ))
+        err = math.sqrt(sum((desired[i] - actual[i]) ** 2 for i in range(3)))
         metrics["px4_v117_rate_tracking_error"] = max(
-            metrics["px4_v117_rate_tracking_error"], tracking_err
+            metrics["px4_v117_rate_tracking_error"], err
         )
 
+
+def _compute_px4_v117_actuator_metrics(evidence, metrics):
     saturation_start_ts = None
-    for ts, act in actuator_outputs_list:
+    saturation_kind = None
+    for ts, act in evidence["actuator_outputs"]:
         outputs = _msg_vector(act, "output", length=4)
         if outputs is None:
             saturation_start_ts = None
+            saturation_kind = None
             continue
         all_max = all(output >= 1900.0 for output in outputs)
-        if not all_max:
+        all_min = all(output <= 1100.0 for output in outputs)
+        if not (all_max or all_min):
             saturation_start_ts = None
+            saturation_kind = None
             continue
-        if saturation_start_ts is None:
+        kind = "MAX" if all_max else "MIN"
+        if saturation_start_ts is None or saturation_kind != kind:
             saturation_start_ts = ts
+            saturation_kind = kind
             continue
         duration = (ts - saturation_start_ts) / 1e9
-        metrics["actuator_saturation"] = max(
-            metrics["actuator_saturation"], duration
-        )
+        if kind == "MAX":
+            metrics["actuator_saturation"] = max(
+                metrics["actuator_saturation"], duration
+            )
+            metrics["_actuator_saturation_duration"] = max(
+                metrics["_actuator_saturation_duration"], duration
+            )
+            metrics["px4_v117_actuator_saturation_ratio"] = max(
+                metrics["px4_v117_actuator_saturation_ratio"],
+                duration / 0.2,
+            )
 
-    if metrics["actuator_saturation"] >= 0.2:
-        errs.append(
-            "px4_v117_actuator_saturation: all motors saturated for "
-            f"{metrics['actuator_saturation']:.3f}s"
-        )
 
+def compute_px4_v117_metrics(config, evidence):
+    metrics = _initial_px4_v117_metrics()
+    metrics["px4_v117_state_sample_count"] = float(
+        len(evidence["local_position"]) + len(evidence["attitude"])
+    )
+    metrics["px4_v117_setpoint_sample_count"] = float(
+        len(evidence["trajectory_setpoint"]) + len(evidence["rates_setpoint"])
+    )
+    _compute_px4_v117_mode_metrics(evidence, metrics)
+    _compute_px4_v117_local_position_metrics(evidence, metrics)
+    _compute_px4_v117_attitude_metrics(evidence, metrics)
+    _compute_px4_v117_tracking_metrics(evidence, metrics)
+    _compute_px4_v117_actuator_metrics(evidence, metrics)
     metrics["combined_tilt_velocity"] = (
         metrics["max_tilt_angle"] * metrics["max_xy_velocity"]
     )
+    quality = 0.0
+    if metrics["_armed_seen"]:
+        quality += 0.25
+    if metrics["_offboard_seen"]:
+        quality += 0.25
+    if metrics["_airborne_seen"]:
+        quality += 0.25
+    if metrics["px4_v117_state_sample_count"] >= 3.0:
+        quality += 0.25
+    metrics["px4_v117_quality_score"] = quality
+    return metrics
 
+
+def classify_px4_v117_errors(config, evidence, metrics):
+    errs = []
+    _append_state_invalid_errors(evidence, errs)
+
+    offboard_airborne = (
+        metrics["_armed_seen"]
+        and metrics["_offboard_seen"]
+        and metrics["_airborne_seen"]
+    )
+    if not offboard_airborne:
+        return errs
+
+    if _has_sustained_true(metrics["_horizontal_velocity_over"]):
+        errs.append(
+            "px4_v117_velocity_bound_violation: horizontal "
+            f"ratio={metrics['px4_v117_horizontal_speed_ratio']:.2f}"
+        )
+    if _has_sustained_true(metrics["_climb_velocity_over"]):
+        errs.append(
+            "px4_v117_velocity_bound_violation: climb "
+            f"ratio={metrics['px4_v117_climb_speed_ratio']:.2f}"
+        )
+    if _has_sustained_true(metrics["_descent_velocity_over"]):
+        errs.append(
+            "px4_v117_velocity_bound_violation: descent "
+            f"ratio={metrics['px4_v117_descent_speed_ratio']:.2f}"
+        )
+
+    if (
+        len(evidence["local_position"]) >= 5
+        and _has_sustained_true(metrics["_horizontal_accel_over"])
+    ):
+        errs.append(
+            "px4_v117_accel_bound_violation: horizontal "
+            f"ratio={metrics['px4_v117_horizontal_accel_ratio']:.2f}"
+        )
+    if (
+        len(evidence["local_position"]) >= 5
+        and _has_sustained_true(metrics["_vertical_accel_over"])
+    ):
+        errs.append(
+            "px4_v117_accel_bound_violation: vertical "
+            f"ratio={metrics['px4_v117_vertical_accel_ratio']:.2f}"
+        )
+    if (
+        len(evidence["local_position"]) >= 5
+        and _has_sustained_true(metrics["_jerk_over"])
+    ):
+        errs.append(
+            "px4_v117_jerk_bound_violation: "
+            f"ratio={metrics['px4_v117_jerk_ratio']:.2f}"
+        )
+
+    if _has_sustained_true(metrics["_tilt_over"]):
+        errs.append(
+            "px4_v117_attitude_rate_violation: tilt "
+            f"ratio={metrics['px4_v117_tilt_ratio']:.2f}"
+        )
+    if _has_sustained_true(metrics["_rate_over"]):
+        max_rate_ratio = max(
+            metrics["px4_v117_roll_rate_ratio"],
+            metrics["px4_v117_pitch_rate_ratio"],
+            metrics["px4_v117_yaw_rate_ratio"],
+        )
+        errs.append(
+            "px4_v117_attitude_rate_violation: angular_rate "
+            f"ratio={max_rate_ratio:.2f}"
+        )
+
+    if any(metrics["_control_cascade_over"]):
+        errs.append(
+            "px4_v117_control_mode_cascade_violation: "
+            "higher-level control enabled without lower-level cascade"
+        )
+
+    heartbeat_observed = bool(evidence["offboard_heartbeat"])
+    if (
+        heartbeat_observed
+        and _has_sustained_true(metrics["_heartbeat_gap_over"], required=1)
+        and not metrics["_status_failsafe_seen"]
+    ):
+        errs.append(
+            "px4_v117_offboard_state_contradiction: heartbeat gap "
+            f"ratio={metrics['px4_v117_offboard_heartbeat_gap_ratio']:.2f} "
+            "while nav_state remained OFFBOARD"
+        )
+    if _has_sustained_true(
+        metrics["_offboard_enabled_false_while_nav_offboard"], required=1
+    ):
+        errs.append(
+            "px4_v117_offboard_state_contradiction: nav_state OFFBOARD but "
+            "flag_control_offboard_enabled is false"
+        )
+
+    if _has_sustained_true(metrics["_spurious_failsafe_over"], required=1):
+        errs.append(
+            "px4_v117_failsafe_anomaly: spurious failsafe in healthy "
+            "Offboard evidence window"
+        )
+
+    if metrics["_command_ack_anomaly"]:
+        errs.append(
+            "px4_v117_command_ack_anomaly: command ack rejected during "
+            "Offboard evidence window"
+        )
+
+    if (
+        metrics["_actuator_saturation_duration"] >= 0.2
+        and not metrics["_landed_seen"]
+    ):
+        errs.append(
+            "px4_v117_actuator_saturation: all motors saturated for "
+            f"{metrics['_actuator_saturation_duration']:.3f}s "
+            f"ratio={metrics['px4_v117_actuator_saturation_ratio']:.2f}"
+        )
+
+    return errs
+
+
+def _px4_v117_ulg_metrics(config, state_dict):
+    evidence = collect_px4_v117_evidence(state_dict)
+    metrics = compute_px4_v117_metrics(config, evidence)
+    errs = classify_px4_v117_errors(config, evidence, metrics)
     return metrics, errs
 
 

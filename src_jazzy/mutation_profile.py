@@ -81,6 +81,22 @@ _PX4_FEEDBACK_STRATEGY_MAP = {
     "px4_v117_rate_tracking_error": STRATEGY_FLIP,
     "px4_v117_setpoint_sample_count": STRATEGY_SINGLE_BLOCK,
     "px4_v117_state_sample_count": STRATEGY_RANDOM,
+    "px4_v117_horizontal_speed_ratio": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_climb_speed_ratio": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_descent_speed_ratio": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_horizontal_accel_ratio": STRATEGY_FLIP,
+    "px4_v117_vertical_accel_ratio": STRATEGY_FLIP,
+    "px4_v117_jerk_ratio": STRATEGY_FLIP,
+    "px4_v117_tilt_ratio": STRATEGY_MULTI_AXIS,
+    "px4_v117_roll_rate_ratio": STRATEGY_FLIP,
+    "px4_v117_pitch_rate_ratio": STRATEGY_FLIP,
+    "px4_v117_yaw_rate_ratio": STRATEGY_FLIP,
+    "px4_v117_offboard_heartbeat_gap_ratio": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_control_mode_cascade_pressure": STRATEGY_RANDOM,
+    "px4_v117_failsafe_pressure": STRATEGY_RANDOM,
+    "px4_v117_command_ack_anomaly_score": STRATEGY_RANDOM,
+    "px4_v117_actuator_saturation_ratio": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_quality_score": STRATEGY_RANDOM,
 }
 
 # MoveIt feedback-to-strategy mappings
@@ -214,13 +230,13 @@ class MutationProfile:
         """
         return cls(
             field_ranges={
-                "vx": FieldRange("vx", -2.0, 2.0, extreme_prob=0.0),
-                "vy": FieldRange("vy", -2.0, 2.0, extreme_prob=0.0),
-                "vz": FieldRange("vz", -1.0, 1.0, extreme_prob=0.0),
+                "vx": FieldRange("vx", -3.0, 3.0, extreme_prob=0.0),
+                "vy": FieldRange("vy", -3.0, 3.0, extreme_prob=0.0),
+                "vz": FieldRange("vz", -1.2, 1.2, extreme_prob=0.0),
                 "yaw": FieldRange(
                     "yaw", -math.pi, math.pi, extreme_prob=0.0),
                 "yawspeed": FieldRange(
-                    "yawspeed", -1.2, 1.2, extreme_prob=0.0),
+                    "yawspeed", -1.8, 1.8, extreme_prob=0.0),
             },
             strategy_weights={
                 STRATEGY_MULTI_AXIS: 0.30,
@@ -228,7 +244,7 @@ class MutationProfile:
                 STRATEGY_SINGLE_BLOCK: 0.30,
                 STRATEGY_RANDOM: 0.15,
             },
-            block_len_range=(3, 8),
+            block_len_range=(8, 40),
             feedback_strategy_map=_PX4_FEEDBACK_STRATEGY_MAP,
         )
 

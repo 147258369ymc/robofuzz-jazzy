@@ -124,6 +124,8 @@ class IndexBuilder:
 
             # 实体索引
             index.entity_index.setdefault(block.name, []).append(bid)
+            for alias in self._entity_aliases(block):
+                index.entity_index.setdefault(alias, []).append(bid)
 
             # 类型索引
             index.type_index.setdefault(block.block_type, []).append(bid)
@@ -156,3 +158,27 @@ class IndexBuilder:
             if pattern.search(text):
                 tags.add(tag)
         return sorted(tags)
+
+    def _entity_aliases(self, block: SpecBlock) -> list[str]:
+        """生成便于 agent 精确查询的跨格式实体别名。"""
+        aliases: set[str] = set()
+
+        # ROS 接口分块默认命名为 Foo.Message / Foo.Request 等；agent
+        # 通常会查询 Foo，因此保留原名同时增加接口短名。
+        interface = block.structured_fields.get("interface")
+        if isinstance(interface, str) and interface:
+            aliases.add(interface)
+
+        if "." in block.name:
+            prefix, suffix = block.name.split(".", 1)
+            if suffix in {"Message", "Request", "Response", "Goal", "Result", "Feedback"}:
+                aliases.add(prefix)
+
+        # PX4 docs 使用 "Foo (UORB message)"，MoveIt docs 也常有
+        # "Foo (message/action)" 这种标题；去掉括号说明作为实体别名。
+        clean = re.sub(r"\s*\([^)]*\)\s*$", "", block.name).strip()
+        if clean and clean != block.name:
+            aliases.add(clean)
+
+        aliases.discard(block.name)
+        return sorted(aliases)

@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import pickle
+import math
 
 import rclpy
 from px4_msgs.msg import VehicleCommand, TrajectorySetpoint, OffboardControlMode
@@ -907,7 +908,6 @@ def generate_v117_offboard_velocity_seeds(msg_class=TrajectorySetpoint, seqlen=8
             seq.append(fn(idx, phase))
         seeds.append(seq)
 
-    append_sequence(lambda _idx, _phase: make_msg())
     append_sequence(lambda _idx, _phase: make_msg(vx=1.5))
     append_sequence(lambda _idx, _phase: make_msg(vy=1.5))
     append_sequence(lambda _idx, _phase: make_msg(vz=-0.5))
@@ -938,6 +938,47 @@ def generate_v117_offboard_velocity_seeds(msg_class=TrajectorySetpoint, seqlen=8
             vx=1.2 * phase,
             vy=0.8 * phase,
             yawspeed=0.6,
+        )
+    )
+    append_sequence(
+        lambda _idx, phase: make_msg(
+            vx=2.0 * min(phase * 2.0, 1.0),
+            vy=0.4,
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vx=1.8 if idx < seqlen // 2 else -1.8,
+            yawspeed=0.9 if idx < seqlen // 2 else -0.9,
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vz=-0.9 if idx < seqlen // 3 else (
+                0.9 if idx < (2 * seqlen) // 3 else 0.0
+            )
+        )
+    )
+    append_sequence(
+        lambda _idx, phase: make_msg(
+            vx=1.6 * phase,
+            vy=1.2 * phase,
+            yawspeed=1.1,
+        )
+    )
+    append_sequence(lambda _idx, _phase: make_msg(yawspeed=1.2))
+    append_sequence(
+        lambda _idx, phase: make_msg(
+            vx=1.4 * math.cos(2.0 * math.pi * phase),
+            vy=1.4 * math.sin(2.0 * math.pi * phase),
+            yawspeed=1.0,
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vx=1.0,
+            vy=0.8,
+            vz=-0.8 if idx % 4 < 2 else 0.8,
         )
     )
 

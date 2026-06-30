@@ -104,6 +104,38 @@ TURTLEBOT4_JAZZY_CONFIG = TargetConfig(
 )
 
 
+PX4_V117_JAZZY_CONFIG = TargetConfig(
+    name="px4_v117_jazzy",
+    version="px4-v1.17.0_jazzy_gz_x500_uxrce_dds",
+    doc_root="system_doc/px4_v117_jazzy",
+    # PX4 v1.17 的 corpus 会保留完整官方文档和源约束，但默认预处理
+    # 使用 oracleIR-focused 文件集，避免同一接口在 px4_msgs、
+    # PX4 source、ros2 interface show 三处重复进入索引。
+    file_configs=[
+        FileConfig("extracted_specs/*.md"),
+        FileConfig("known_issues.md"),
+        FileConfig("versioned_runtime_sources.md"),
+        FileConfig("official_specs/offboard.md"),
+        FileConfig("official_specs/ros2_offboard_control.md"),
+        FileConfig("official_specs/uxrce_dds.md"),
+        FileConfig("official_specs/sim_gazebo_gz_index.md"),
+        FileConfig("official_specs/sim_gazebo_gz_vehicles.md"),
+        FileConfig("official_specs/msg_docs/*.md"),
+        FileConfig("msg_definitions/px4_msgs/*.msg"),
+        FileConfig(
+            "params/parameter_reference_v1.17_compact.md",
+            chunker_override="tabular_markdown",
+            chunker_params={"row_level_chunking": True},
+        ),
+        FileConfig("params/selected_parameter_blocks.md"),
+        FileConfig("source_constraints/bridge/dds_topics.yaml"),
+        FileConfig("source_constraints/airframes/4001_gz_x500"),
+        FileConfig("source_constraints/profile/px4_v117_jazzy.yaml"),
+        FileConfig("runtime_metadata/container_versions.tsv"),
+    ],
+)
+
+
 def get_config(target_name: str) -> TargetConfig:
     """获取目标系统配置"""
     configs = {
@@ -111,6 +143,7 @@ def get_config(target_name: str) -> TargetConfig:
         "turtlebot3": TURTLEBOT3_CONFIG,
         "moveit2_panda": MOVEIT2_PANDA_CONFIG,
         "turtlebot4_jazzy": TURTLEBOT4_JAZZY_CONFIG,
+        "px4_v117_jazzy": PX4_V117_JAZZY_CONFIG,
     }
     if target_name not in configs:
         raise ValueError(

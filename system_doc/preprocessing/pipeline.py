@@ -5,6 +5,7 @@
 from __future__ import annotations
 import json
 import logging
+import glob
 from pathlib import Path
 from dataclasses import asdict
 
@@ -127,8 +128,18 @@ class PreprocessingPipeline:
             for fc in self.config.file_configs:
                 if fc.skip:
                     continue
+                if glob.has_magic(fc.path):
+                    matches = sorted(
+                        fp for fp in doc_root.glob(fc.path) if fp.is_file()
+                    )
+                    if matches:
+                        results.extend((fp, fc) for fp in matches)
+                    else:
+                        logger.warning(f"File glob matched nothing: {doc_root / fc.path}")
+                    continue
+
                 fp = doc_root / fc.path
-                if fp.exists():
+                if fp.exists() and fp.is_file():
                     results.append((fp, fc))
                 else:
                     logger.warning(f"File not found: {fp}")

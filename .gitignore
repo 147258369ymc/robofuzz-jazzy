@@ -51,3 +51,4 @@ src_jazzy/requirements
 system_doc/
 api切换/
 src_jazzy/oracle_ir/specs
+src_jazzy/oracle_ir/agent/api_config.yaml

@@ -214,6 +214,104 @@ def import_scheduler_with_fakes():
 
 
 class Px4JazzyAdaptationTests(unittest.TestCase):
+    @staticmethod
+    def _msg(**kwargs):
+        return types.SimpleNamespace(**kwargs)
+
+    @staticmethod
+    def _px4_v117_config():
+        return types.SimpleNamespace(
+            oracle_mode="px4_v117_jazzy",
+            use_ulg=True,
+            flight_mode="OFFBOARD",
+            exp_pgfuzz=False,
+        )
+
+    def _normal_px4_v117_state(self):
+        msg = self._msg
+        return {
+            "/VehicleStatus_PubSubTopic": [
+                (1_000_000_000, msg(
+                    nav_state=14,
+                    arming_state=2,
+                    failsafe=False,
+                )),
+                (1_200_000_000, msg(
+                    nav_state=14,
+                    arming_state=2,
+                    failsafe=False,
+                )),
+            ],
+            "/VehicleControlMode_PubSubTopic": [
+                (1_000_000_000, msg(
+                    flag_armed=True,
+                    flag_control_offboard_enabled=True,
+                    flag_control_position_enabled=False,
+                    flag_control_velocity_enabled=True,
+                    flag_control_attitude_enabled=True,
+                )),
+                (1_200_000_000, msg(
+                    flag_armed=True,
+                    flag_control_offboard_enabled=True,
+                    flag_control_position_enabled=False,
+                    flag_control_velocity_enabled=True,
+                    flag_control_attitude_enabled=True,
+                )),
+            ],
+            "/VehicleLocalPosition_PubSubTopic": [
+                (1_000_000_000, msg(
+                    x=0.0, y=0.0, z=-1.2,
+                    vx=0.0, vy=0.0, vz=0.0,
+                    heading=0.0,
+                )),
+                (1_100_000_000, msg(
+                    x=0.02, y=0.0, z=-1.25,
+                    vx=0.2, vy=0.0, vz=-0.1,
+                    heading=0.05,
+                )),
+                (1_200_000_000, msg(
+                    x=0.06, y=0.0, z=-1.3,
+                    vx=0.3, vy=0.0, vz=-0.1,
+                    heading=0.1,
+                )),
+            ],
+            "/VehicleAttitude_PubSubTopic": [
+                (1_000_000_000, msg(q=[1.0, 0.0, 0.0, 0.0])),
+                (1_100_000_000, msg(q=[0.999, 0.02, 0.0, 0.0])),
+                (1_200_000_000, msg(q=[0.999, 0.02, 0.0, 0.0])),
+            ],
+            "/VehicleAngularVelocity_PubSubTopic": [
+                (1_000_000_000, msg(xyz=[0.0, 0.0, 0.0])),
+                (1_100_000_000, msg(xyz=[0.1, 0.0, 0.0])),
+                (1_200_000_000, msg(xyz=[0.1, 0.0, 0.0])),
+            ],
+            "/VehicleOdometry_PubSubTopic": [
+                (1_100_000_000, msg(
+                    x=0.02, y=0.0, z=-1.25,
+                    angular_velocity=[0.1, 0.0, 0.0],
+                )),
+            ],
+            "/OffboardControlMode_PubSubTopic": [
+                (1_000_000_000, msg(timestamp=1_000_000)),
+                (1_100_000_000, msg(timestamp=1_100_000)),
+                (1_200_000_000, msg(timestamp=1_200_000)),
+            ],
+            "/TrajectorySetpoint_PubSubTopic": [
+                (1_050_000_000, msg(velocity=[0.2, 0.0, 0.0])),
+                (1_150_000_000, msg(velocity=[0.3, 0.0, -0.1])),
+            ],
+            "/VehicleRatesSetpoint_PubSubTopic": [
+                (1_100_000_000, msg(roll=0.1, pitch=0.0, yaw=0.0)),
+            ],
+            "/VehicleLandDetected_PubSubTopic": [
+                (1_000_000_000, msg(landed=False)),
+            ],
+            "/ActuatorOutputs_PubSubTopic": [
+                (1_000_000_000, msg(output=[1200.0, 1200.0,
+                                            1200.0, 1200.0])),
+            ],
+        }
+
     def test_find_latest_ulg_discovers_px4_sitl_default_logs(self):
         ulg_parser = import_ulg_parser_with_fake_pyulog()
 
@@ -401,6 +499,30 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
             for msg in seq:
                 self.assertTrue(all(math.isnan(v) for v in msg.position))
 
+    def test_px4_v117_velocity_seed_sequences_do_not_duplicate_hover_baseline(self):
+        px4_utils = import_px4_utils_with_fakes()
+
+        seeds = px4_utils.generate_v117_offboard_velocity_seeds(
+            px4_utils.TrajectorySetpoint,
+            seqlen=120,
+        )
+
+        self.assertTrue(seeds)
+        self.assertTrue(all(len(seq) == 120 for seq in seeds))
+        for seq in seeds:
+            active = sum(
+                any(abs(v) > 1e-6 for v in msg.velocity)
+                or abs(msg.yaw) > 1e-6
+                or abs(msg.yawspeed) > 1e-6
+                for msg in seq
+            )
+            self.assertGreater(
+                active,
+                0,
+                "v1.17-specific seeds should not repeat the generic hover "
+                "baseline already inserted by Fuzzer.init_queue",
+            )
+
     def test_px4_v117_ros_mutation_writes_velocity_array(self):
         px4_utils = import_px4_utils_with_fakes()
         with mock.patch.dict(sys.modules, {"px4_utils": px4_utils}):
@@ -436,30 +558,31 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
             msg.velocity[0] == 1.25 for msg in sched.msg_list
         ))
 
-    def test_px4_v117_mutation_profile_uses_smoke_safe_ranges(self):
+    def test_px4_v117_mutation_profile_uses_deep_conservative_ranges(self):
         import mutation_profile
 
         profile = mutation_profile.MutationProfile.px4_v117_offboard_velocity()
 
-        self.assertEqual((-2.0, 2.0), (
+        self.assertEqual((-3.0, 3.0), (
             profile.get_range("vx").low,
             profile.get_range("vx").high,
         ))
-        self.assertEqual((-2.0, 2.0), (
+        self.assertEqual((-3.0, 3.0), (
             profile.get_range("vy").low,
             profile.get_range("vy").high,
         ))
-        self.assertEqual((-1.0, 1.0), (
+        self.assertEqual((-1.2, 1.2), (
             profile.get_range("vz").low,
             profile.get_range("vz").high,
         ))
-        self.assertEqual((-1.2, 1.2), (
+        self.assertEqual((-1.8, 1.8), (
             profile.get_range("yawspeed").low,
             profile.get_range("yawspeed").high,
         ))
         self.assertEqual(0.0, profile.get_range("vx").extreme_prob)
+        self.assertEqual((8, 40), profile.block_len_range)
 
-    def test_px4_v117_sequence_mutation_stays_in_safe_velocity_envelope(self):
+    def test_px4_v117_sequence_mutation_stays_in_deep_velocity_envelope(self):
         px4_utils = import_px4_utils_with_fakes()
         with mock.patch.dict(sys.modules, {"px4_utils": px4_utils}):
             scheduler = import_scheduler_with_fakes()
@@ -495,10 +618,10 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
 
         self.assertTrue(msg_list)
         for msg in msg_list:
-            self.assertLessEqual(abs(msg.velocity[0]), 2.0)
-            self.assertLessEqual(abs(msg.velocity[1]), 2.0)
-            self.assertLessEqual(abs(msg.velocity[2]), 1.0)
-            self.assertLessEqual(abs(msg.yawspeed), 1.2)
+            self.assertLessEqual(abs(msg.velocity[0]), 3.0)
+            self.assertLessEqual(abs(msg.velocity[1]), 3.0)
+            self.assertLessEqual(abs(msg.velocity[2]), 1.2)
+            self.assertLessEqual(abs(msg.yawspeed), 1.8)
 
     def test_px4_v117_restart_refuses_legacy_rtps_path(self):
         px4_utils = import_px4_utils_with_fakes()
@@ -680,6 +803,338 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
 
         self.assertEqual([], errs)
         self.assertEqual(0.0, feedback_list[0].value)
+
+    def test_px4_v117_defaults_match_generated_oracleir(self):
+        from oracles import px4
+
+        self.assertEqual(12.0, px4.PX4_DEFAULTS["MPC_XY_VEL_MAX"])
+        self.assertEqual(3.0, px4.PX4_DEFAULTS["MPC_ACC_HOR"])
+        self.assertEqual(5.0, px4.PX4_DEFAULTS["MPC_ACC_HOR_MAX"])
+        self.assertEqual(1.5, px4.PX4_DEFAULTS["MPC_Z_VEL_MAX_DN"])
+        self.assertEqual(8.0, px4.PX4_DEFAULTS["MPC_JERK_MAX"])
+        self.assertEqual(45.0, px4.PX4_DEFAULTS["MPC_TILTMAX_AIR"])
+
+    def test_px4_v117_normal_offboard_flight_has_no_deep_oracle_errors(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        feedback_names = [
+            "px4_v117_horizontal_speed_ratio",
+            "px4_v117_climb_speed_ratio",
+            "px4_v117_descent_speed_ratio",
+            "px4_v117_horizontal_accel_ratio",
+            "px4_v117_vertical_accel_ratio",
+            "px4_v117_jerk_ratio",
+            "px4_v117_tilt_ratio",
+            "px4_v117_roll_rate_ratio",
+            "px4_v117_offboard_heartbeat_gap_ratio",
+            "px4_v117_control_mode_cascade_pressure",
+            "px4_v117_quality_score",
+        ]
+        feedback_list = [
+            Feedback(name, FeedbackType.INC) for name in feedback_names
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(),
+            [],
+            self._normal_px4_v117_state(),
+            feedback_list,
+        )
+        values = {fbk.name: fbk.value for fbk in feedback_list}
+
+        self.assertEqual([], errs)
+        self.assertGreater(values["px4_v117_quality_score"], 0.0)
+        self.assertLess(values["px4_v117_horizontal_speed_ratio"], 0.1)
+        self.assertEqual(0.0, values["px4_v117_control_mode_cascade_pressure"])
+
+    def test_px4_v117_horizontal_velocity_violation_is_classified(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleLocalPosition_PubSubTopic"] = [
+            (1_000_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=13.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_100_000_000, self._msg(x=1.3, y=0.0, z=-2.0,
+                                      vx=13.2, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any(
+            "px4_v117_velocity_bound_violation" in err for err in errs
+        ))
+
+    def test_px4_v117_vertical_velocity_violation_uses_ned_sign(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleLocalPosition_PubSubTopic"] = [
+            (1_000_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=-3.8,
+                                      heading=0.0)),
+            (1_100_000_000, self._msg(x=0.0, y=0.0, z=-2.4,
+                                      vx=0.0, vy=0.0, vz=-3.7,
+                                      heading=0.0)),
+            (1_200_000_000, self._msg(x=0.0, y=0.0, z=-2.1,
+                                      vx=0.0, vy=0.0, vz=2.2,
+                                      heading=0.0)),
+            (1_300_000_000, self._msg(x=0.0, y=0.0, z=-1.9,
+                                      vx=0.0, vy=0.0, vz=2.3,
+                                      heading=0.0)),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any("climb" in err for err in errs))
+        self.assertTrue(any("descent" in err for err in errs))
+
+    def test_px4_v117_accel_and_jerk_violation_require_sustained_samples(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleLocalPosition_PubSubTopic"] = [
+            (1_000_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_100_000_000, self._msg(x=0.2, y=0.0, z=-2.0,
+                                      vx=0.2, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_200_000_000, self._msg(x=1.0, y=0.0, z=-2.0,
+                                      vx=1.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_300_000_000, self._msg(x=2.5, y=0.0, z=-2.0,
+                                      vx=2.5, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_400_000_000, self._msg(x=5.0, y=0.0, z=-2.0,
+                                      vx=5.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_500_000_000, self._msg(x=8.5, y=0.0, z=-2.0,
+                                      vx=8.5, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any(
+            "px4_v117_accel_bound_violation" in err for err in errs
+        ))
+        self.assertTrue(any(
+            "px4_v117_jerk_bound_violation" in err for err in errs
+        ))
+
+    def test_px4_v117_jerk_oracle_ignores_single_sample_velocity_spike(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleLocalPosition_PubSubTopic"] = [
+            (1_000_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_100_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_200_000_000, self._msg(x=0.01, y=0.0, z=-2.0,
+                                      vx=0.1, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_300_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+            (1_400_000_000, self._msg(x=0.0, y=0.0, z=-2.0,
+                                      vx=0.0, vy=0.0, vz=0.0,
+                                      heading=0.0)),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_jerk_ratio", FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertFalse(any(
+            "px4_v117_jerk_bound_violation" in err for err in errs
+        ))
+        self.assertGreater(feedback_list[0].value, 0.0)
+
+    def test_px4_v117_control_mode_cascade_violation(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                flag_armed=True,
+                flag_control_offboard_enabled=True,
+                flag_control_position_enabled=True,
+                flag_control_velocity_enabled=False,
+                flag_control_attitude_enabled=True,
+            )),
+            (1_100_000_000, self._msg(
+                flag_armed=True,
+                flag_control_offboard_enabled=True,
+                flag_control_position_enabled=False,
+                flag_control_velocity_enabled=True,
+                flag_control_attitude_enabled=False,
+            )),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any(
+            "px4_v117_control_mode_cascade_violation" in err
+            for err in errs
+        ))
+
+    def test_px4_v117_offboard_heartbeat_gap_is_quality_or_state_error(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/OffboardControlMode_PubSubTopic"] = []
+
+        no_heartbeat_errs = px4.check(
+            self._px4_v117_config(), [], state_dict, []
+        )
+        self.assertFalse(any(
+            "px4_v117_offboard_state_contradiction" in err
+            for err in no_heartbeat_errs
+        ))
+
+        state_dict["/OffboardControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(timestamp=1_000_000)),
+            (2_200_000_000, self._msg(timestamp=2_200_000)),
+        ]
+        state_dict["/VehicleStatus_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                nav_state=14, arming_state=2, failsafe=False)),
+            (2_200_000_000, self._msg(
+                nav_state=14, arming_state=2, failsafe=False)),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any(
+            "px4_v117_offboard_state_contradiction" in err for err in errs
+        ))
+
+    def test_px4_v117_failsafe_anomaly(self):
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleStatus_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                nav_state=14, arming_state=2, failsafe=True)),
+            (1_100_000_000, self._msg(
+                nav_state=14, arming_state=2, failsafe=True)),
+        ]
+
+        errs = px4.check(self._px4_v117_config(), [], state_dict, [])
+
+        self.assertTrue(any(
+            "px4_v117_failsafe_anomaly" in err for err in errs
+        ))
+
+    def test_px4_v117_failsafe_with_explanatory_signal_loss_is_not_bug(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/VehicleStatus_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                nav_state=14,
+                arming_state=2,
+                failsafe=False,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                nav_state=5,
+                arming_state=2,
+                failsafe=True,
+            )),
+        ]
+        state_dict["/FailsafeFlags_PubSubTopic"] = [
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                offboard_control_signal_lost=True,
+                manual_control_signal_lost=True,
+                gcs_connection_lost=True,
+            )),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_failsafe_pressure", FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertFalse(any(
+            "px4_v117_failsafe_anomaly" in err for err in errs
+        ))
+        self.assertEqual(1.0, feedback_list[0].value)
+
+    def test_px4_v117_feedback_registration_and_mapping(self):
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        mutation_profile_path = os.path.join(SRC_DIR, "mutation_profile.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            fuzzer_text = fp.read()
+        with open(mutation_profile_path, "r", encoding="utf-8") as fp:
+            profile_text = fp.read()
+
+        feedback_names = [
+            "px4_v117_horizontal_speed_ratio",
+            "px4_v117_climb_speed_ratio",
+            "px4_v117_descent_speed_ratio",
+            "px4_v117_horizontal_accel_ratio",
+            "px4_v117_vertical_accel_ratio",
+            "px4_v117_jerk_ratio",
+            "px4_v117_tilt_ratio",
+            "px4_v117_roll_rate_ratio",
+            "px4_v117_pitch_rate_ratio",
+            "px4_v117_yaw_rate_ratio",
+            "px4_v117_offboard_heartbeat_gap_ratio",
+            "px4_v117_control_mode_cascade_pressure",
+            "px4_v117_failsafe_pressure",
+            "px4_v117_command_ack_anomaly_score",
+            "px4_v117_actuator_saturation_ratio",
+            "px4_v117_quality_score",
+        ]
+        for name in feedback_names:
+            self.assertIn(name, fuzzer_text)
+            self.assertIn(name, profile_text)
+
+    def test_px4_v117_error_signature_dedup(self):
+        import ast
+
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            module = ast.parse(fp.read(), filename=fuzzer_path)
+        func = next(
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "px4_error_signature"
+        )
+        compiled = compile(
+            ast.Module(body=[func], type_ignores=[]),
+            fuzzer_path,
+            "exec",
+        )
+        namespace = {}
+        exec(compiled, namespace)
+        px4_error_signature = namespace["px4_error_signature"]
+
+        sigs = px4_error_signature([
+            "px4_v117_velocity_bound_violation: horizontal ratio=1.2",
+            "px4_v117_accel_bound_violation: horizontal ratio=2.0",
+            "px4_v117_failsafe_anomaly: spurious failsafe",
+        ])
+
+        self.assertIn(("velocity_bound", "", 2), sigs)
+        self.assertIn(("accel_bound", "", 4), sigs)
+        self.assertIn(("failsafe", "", 0), sigs)
 
 
 if __name__ == "__main__":

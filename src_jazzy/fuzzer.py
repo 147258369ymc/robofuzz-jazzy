@@ -189,6 +189,45 @@ def tb4_error_signature(errs):
     return sigs
 
 
+def px4_error_signature(errs):
+    """Coarse PX4 v1.17 oracle signatures for queue-level novelty.
+
+    Error logging and ULG preservation remain unchanged. The signature is only
+    used to avoid re-queueing seeds that rediscover an already-seen semantic
+    bug class with slightly different numeric values.
+    """
+    import re
+    sigs = set()
+    for e in errs:
+        e = str(e)
+        ratio_m = re.search(r"ratio=([0-9.]+)", e)
+        bucket = int(float(ratio_m.group(1)) / 0.5) if ratio_m else 0
+
+        if "px4_v117_velocity_bound_violation" in e:
+            sigs.add(("velocity_bound", "", bucket))
+        elif "px4_v117_accel_bound_violation" in e:
+            sigs.add(("accel_bound", "", bucket))
+        elif "px4_v117_jerk_bound_violation" in e:
+            sigs.add(("jerk_bound", "", bucket))
+        elif "px4_v117_attitude_rate_violation" in e:
+            sigs.add(("attitude_rate", "", bucket))
+        elif "px4_v117_control_mode_cascade_violation" in e:
+            sigs.add(("control_mode_cascade", "", 0))
+        elif "px4_v117_offboard_state_contradiction" in e:
+            sigs.add(("offboard_state", "", 0))
+        elif "px4_v117_failsafe_anomaly" in e:
+            sigs.add(("failsafe", "", 0))
+        elif "px4_v117_command_ack_anomaly" in e:
+            sigs.add(("command_ack", "", 0))
+        elif "px4_v117_actuator_saturation" in e:
+            sigs.add(("actuator_saturation", "", bucket))
+        elif "px4_v117_state_invalid" in e:
+            sigs.add(("state_invalid", "", 0))
+        else:
+            sigs.add(("px4_other", "", hash(e) % 1000))
+    return sigs
+
+
 class SeedQueue:
     """Quality-aware seed queue with deduplication, staleness decay, and warmup.
 
@@ -1386,6 +1425,102 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # New: guides fuzzer toward control loop stalls
             fbk = Feedback("control_loop_gap", FeedbackType.INC)
             fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_horizontal_speed_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_climb_speed_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_descent_speed_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_horizontal_accel_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_vertical_accel_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_jerk_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_tilt_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_roll_rate_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_pitch_rate_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_yaw_rate_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_offboard_heartbeat_gap_ratio",
+                FeedbackType.INC,
+                min_threshold=0.2,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_control_mode_cascade_pressure",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_failsafe_pressure",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_command_ack_anomaly_score",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_actuator_saturation_ratio",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_quality_score",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
             # PX4 v1.17 ULG-backed setpoint/state consistency metrics.
             # They are feedback-first in phase 2: useful for steering
             # mutation without immediately turning normal settling lag into
@@ -2133,6 +2268,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # interesting — it just churns the queue with duplicates.
                 moveit_error_is_novel = False
                 tb4_error_is_novel = False
+                px4_error_is_novel = False
                 if fuzzer.config.test_moveit and errs:
                     if not hasattr(scheduler, '_seen_error_signatures'):
                         scheduler._seen_error_signatures = set()
@@ -2158,6 +2294,21 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     else:
                         print(
                             f"[dedup] duplicate TB4 error signature(s): {sigs} "
+                            "— will not re-queue as interesting"
+                        )
+
+                if fuzzer.config.px4_sitl and errs:
+                    if not hasattr(scheduler, '_seen_px4_error_signatures'):
+                        scheduler._seen_px4_error_signatures = set()
+                    sigs = px4_error_signature(errs)
+                    new_sigs = sigs - scheduler._seen_px4_error_signatures
+                    if new_sigs:
+                        px4_error_is_novel = True
+                        scheduler._seen_px4_error_signatures |= new_sigs
+                        print(f"[dedup] NEW PX4 error signature(s): {new_sigs}")
+                    else:
+                        print(
+                            f"[dedup] duplicate PX4 error signature(s): {sigs} "
                             "— will not re-queue as interesting"
                         )
 
@@ -2369,6 +2520,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         and errs
                         and not tb4_error_is_novel
                     )
+                    or (
+                        fuzzer.config.px4_sitl
+                        and errs
+                        and not px4_error_is_novel
+                    )
                 )
 
                 if skip_dup_requeue:
@@ -2550,8 +2706,7 @@ def _find_rosbag_db(exec_cnt):
 
 def main(config):
     print(
-        """\
-                          ____
+        r"""                          ____
    _________  _____      / __/_  __________
   / ___/ __ \/ ___/_____/ /_/ / / /_  /_  /
  / /  / /_/ (__  )_____/ __/ /_/ / / /_/ /_

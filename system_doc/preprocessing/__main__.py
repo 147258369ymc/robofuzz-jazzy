@@ -6,12 +6,20 @@ import logging
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 
 from system_doc.preprocessing.pipeline import PreprocessingPipeline
-from system_doc.preprocessing.config import PX4_CONFIG, TURTLEBOT3_CONFIG, MOVEIT2_PANDA_CONFIG
+from system_doc.preprocessing.config import (
+    MOVEIT2_PANDA_CONFIG,
+    PX4_CONFIG,
+    PX4_V117_JAZZY_CONFIG,
+    TURTLEBOT3_CONFIG,
+    TURTLEBOT4_JAZZY_CONFIG,
+)
 
 TARGETS = {
     "px4": PX4_CONFIG,
     "turtlebot3": TURTLEBOT3_CONFIG,
     "moveit2_panda": MOVEIT2_PANDA_CONFIG,
+    "turtlebot4_jazzy": TURTLEBOT4_JAZZY_CONFIG,
+    "px4_v117_jazzy": PX4_V117_JAZZY_CONFIG,
 }
 
 

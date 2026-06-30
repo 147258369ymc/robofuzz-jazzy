@@ -1,0 +1,216 @@
+# PX4 v1.17 Jazzy target descriptor for OracleIR agent generation.
+name: px4_v117_jazzy
+display_name: "PX4 v1.17.0 Jazzy SITL x500"
+version: "px4-v1.17.0_jazzy_gz_x500_uxrce_dds"
+middleware: ros2
+description: "PX4 v1.17.0 Gazebo Harmonic x500 SITL controlled through ROS 2 Offboard over uXRCE-DDS, with ULG preferred for deep oracle evidence."
+
+topic_suffix: ""
+
+topics:
+  - name: /fmu/in/offboard_control_mode
+    msg_type: px4_msgs/msg/OffboardControlMode
+    fields: [timestamp, position, velocity, acceleration, attitude, body_rate, actuator]
+    field_units: {}
+    frequency_hz: 10.0
+    description: "Offboard heartbeat and control-level selector. Must continue during fuzzing."
+
+  - name: /fmu/in/trajectory_setpoint
+    msg_type: px4_msgs/msg/TrajectorySetpoint
+    fields: [timestamp, position, velocity, acceleration, jerk, yaw, yawspeed]
+    field_units:
+      position: m
+      velocity: m/s
+      acceleration: m/s2
+      jerk: m/s3
+      yaw: rad
+      yawspeed: rad/s
+    frequency_hz: 10.0
+    description: "RoboFuzz fuzz input. In the current velocity profile, position and acceleration fields are NaN during fuzzing."
+
+  - name: /fmu/in/vehicle_command
+    msg_type: px4_msgs/msg/VehicleCommand
+    fields: [timestamp, command, param1, param2, target_system, target_component, source_system, source_component, from_external]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Mode, arm/disarm and other command requests."
+
+  - name: /fmu/out/vehicle_status_v1
+    msg_type: px4_msgs/msg/VehicleStatus
+    fields: [timestamp, arming_state, nav_state, failsafe, failure_detector_status, vehicle_type]
+    field_units: {}
+    frequency_hz: 5.0
+    description: "Versioned ROS 2 bridge topic for commander state."
+
+  - name: /fmu/out/vehicle_local_position_v1
+    msg_type: px4_msgs/msg/VehicleLocalPosition
+    fields: [timestamp, xy_valid, z_valid, v_xy_valid, v_z_valid, x, y, z, vx, vy, vz, ax, ay, az, heading, dist_bottom]
+    field_units:
+      x: m
+      y: m
+      z: m
+      vx: m/s
+      vy: m/s
+      vz: m/s
+      ax: m/s2
+      ay: m/s2
+      az: m/s2
+      heading: rad
+      dist_bottom: m
+    frequency_hz: 50.0
+    description: "Primary ROS 2 state topic for position, velocity and local-position validity."
+
+  - name: /fmu/out/vehicle_attitude
+    msg_type: px4_msgs/msg/VehicleAttitude
+    fields: [timestamp, q, delta_q_reset, quat_reset_counter]
+    field_units:
+      q: quaternion
+    frequency_hz: 50.0
+    description: "Attitude quaternion state."
+
+  - name: /fmu/out/vehicle_odometry
+    msg_type: px4_msgs/msg/VehicleOdometry
+    fields: [timestamp, pose_frame, position, q, velocity_frame, velocity, angular_velocity, position_variance, orientation_variance, velocity_variance]
+    field_units:
+      position: m
+      q: quaternion
+      velocity: m/s
+      angular_velocity: rad/s
+    frequency_hz: 50.0
+    description: "Bridge candidate for combined state when available."
+
+  - name: /fmu/out/vehicle_control_mode
+    msg_type: px4_msgs/msg/VehicleControlMode
+    fields: [timestamp, flag_armed, flag_control_offboard_enabled, flag_control_position_enabled, flag_control_velocity_enabled, flag_control_attitude_enabled]
+    field_units: {}
+    frequency_hz: 5.0
+    description: "Control-mode consistency evidence."
+
+  - name: /fmu/out/battery_status_v1
+    msg_type: px4_msgs/msg/BatteryStatus
+    fields: [timestamp, voltage_v, current_a, remaining, warning]
+    field_units:
+      voltage_v: V
+      current_a: A
+    frequency_hz: 1.0
+    description: "Power sanity and failsafe context."
+
+  - name: /fmu/out/sensor_combined
+    msg_type: px4_msgs/msg/SensorCombined
+    fields: [timestamp, gyro_rad, accelerometer_m_s2]
+    field_units:
+      gyro_rad: rad/s
+      accelerometer_m_s2: m/s2
+    frequency_hz: 250.0
+    description: "IMU sanity and NaN/Inf checks when bridged."
+
+operating_modes:
+  - name: preflight_ready
+    description: "PX4 booted, uXRCE-DDS graph is live, local position is valid, but vehicle is not yet fuzzing."
+    active_topics: [/fmu/out/vehicle_status_v1, /fmu/out/vehicle_local_position_v1, /fmu/out/vehicle_attitude]
+  - name: offboard_armed_velocity
+    description: "Vehicle is armed, airborne and receiving velocity TrajectorySetpoint messages plus OffboardControlMode heartbeat."
+    active_topics: [/fmu/in/offboard_control_mode, /fmu/in/trajectory_setpoint, /fmu/out/vehicle_status_v1, /fmu/out/vehicle_local_position_v1]
+  - name: offboard_loss_or_failsafe
+    description: "Offboard heartbeat/setpoint loss or commander failsafe is active."
+    active_topics: [/fmu/out/vehicle_status_v1, /fmu/out/vehicle_control_mode]
+
+constraint_types:
+  - category: offboard_heartbeat
+    description: "OffboardControlMode continuity and mode-state consistency."
+    relevant_topics: [/fmu/in/offboard_control_mode, /fmu/out/vehicle_status_v1, /fmu/out/vehicle_control_mode]
+    param_patterns: [COM_OF_LOSS_T, COM_OBL_RC_ACT, COM_DLL_EXCEPT, COM_RCL_EXCEPT]
+  - category: trajectory_setpoint
+    description: "TrajectorySetpoint field validity, NaN semantics, velocity/yaw/yawspeed envelope and temporal consistency."
+    relevant_topics: [/fmu/in/trajectory_setpoint]
+    param_patterns: [MPC_XY_VEL_MAX, MPC_Z_VEL_MAX_UP, MPC_Z_VEL_MAX_DN, MC_YAWRATE_MAX]
+  - category: local_position_velocity
+    description: "Observed local-position velocity, acceleration and jerk response."
+    relevant_topics: [/fmu/out/vehicle_local_position_v1, /fmu/out/vehicle_odometry]
+    param_patterns: [MPC_XY_VEL_MAX, MPC_ACC_HOR, MPC_ACC_HOR_MAX, MPC_ACC_UP_MAX, MPC_ACC_DOWN_MAX, MPC_JERK_MAX]
+  - category: attitude_rate
+    description: "Attitude quaternion validity, tilt envelope and body-rate limits."
+    relevant_topics: [/fmu/out/vehicle_attitude, /fmu/out/vehicle_odometry]
+    param_patterns: [MPC_TILTMAX_AIR, MC_ROLLRATE_MAX, MC_PITCHRATE_MAX, MC_YAWRATE_MAX]
+  - category: command_ack_state
+    description: "VehicleCommand, VehicleCommandAck, arming state and nav-state consistency."
+    relevant_topics: [/fmu/in/vehicle_command, /fmu/out/vehicle_status_v1]
+    param_patterns: [COM_.*, CBRK_.*]
+  - category: actuator_saturation
+    description: "Actuator output saturation or oscillation under bounded setpoints."
+    relevant_topics: []
+    param_patterns: [MPC_THR_MIN, MPC_THR_MAX, MPC_THR_HOVER]
+  - category: sensor_validity
+    description: "NaN/Inf and plausibility checks for IMU/local-position/attitude streams."
+    relevant_topics: [/fmu/out/sensor_combined, /fmu/out/vehicle_attitude, /fmu/out/vehicle_local_position_v1]
+    param_patterns: [.*EKF.*, .*IMU.*, .*GYRO.*, .*ACC.*]
+
+safety_conditions:
+  - name: local_position_ready
+    description: "Local position and velocity are valid before Offboard fuzz inputs are interpreted as target behavior."
+    check_expr: "xy_valid and z_valid and v_xy_valid and v_z_valid"
+    required_topics: [/fmu/out/vehicle_local_position_v1]
+  - name: offboard_heartbeat_active
+    description: "OffboardControlMode heartbeat is present at a rate safely above the Offboard loss threshold."
+    check_expr: "offboard_control_mode_sample_rate > 2Hz"
+    required_topics: [/fmu/in/offboard_control_mode]
+  - name: offboard_armed
+    description: "Vehicle is armed and in Offboard before trajectory response oracle checks run."
+    check_expr: "armed and nav_state == OFFBOARD"
+    required_topics: [/fmu/out/vehicle_status_v1]
+  - name: state_is_fresh
+    description: "ULG or ROS samples used for oracle checks are inside the current fuzz window."
+    check_expr: "sample_timestamp >= cycle_start_timestamp"
+    required_topics: []
+
+param_naming:
+  offboard_constraint:
+    - "COM_OF_LOSS_T"
+    - "COM_OBL_RC_ACT"
+    - "COM_.*EXCEPT"
+    - "OFFBOARD"
+  velocity_constraint:
+    - "MPC_.*VEL.*"
+    - "MPC_XY_.*"
+    - "MPC_Z_VEL.*"
+    - ".*SPEED.*"
+  acceleration_constraint:
+    - "MPC_ACC.*"
+    - "MPC_JERK.*"
+    - ".*ACCEL.*"
+  attitude_constraint:
+    - "MPC_TILT.*"
+    - "MC_ROLL.*"
+    - "MC_PITCH.*"
+    - "MC_YAW.*"
+    - ".*RATE.*"
+  actuator_constraint:
+    - "MPC_THR.*"
+    - "PWM_.*"
+    - "ACT_.*"
+  failsafe_constraint:
+    - "COM_.*LOSS.*"
+    - "NAV_.*ACT"
+    - "FAILSAFE"
+    - "CBRK_.*"
+  logging_constraint:
+    - "SDLOG_.*"
+    - "ULOG"
+  sensor_validity:
+    - "IMU"
+    - "GYRO"
+    - "ACCEL"
+    - "MAG"
+    - "EKF2"
+
+generation_rules:
+  - "Use px4_v117_jazzy topics from /fmu/in/* and /fmu/out/*. Do not generate legacy *_PubSubTopic or micrortps_agent assumptions."
+  - "Prefer ULG topic evidence for deep oracle rules. ROS 2 bridge topics are acceptable for readiness, smoke, and command-path checks but can be incomplete."
+  - "High-value ULG topics are vehicle_local_position, vehicle_attitude, vehicle_status, vehicle_control_mode, trajectory_setpoint, offboard_control_mode, vehicle_rates_setpoint, vehicle_angular_velocity, actuator_outputs, vehicle_command, vehicle_command_ack, and failsafe_flags."
+  - "Treat /fmu/out/vehicle_status_v1 and /fmu/out/vehicle_local_position_v1 as versioned topic names whose msg types remain VehicleStatus and VehicleLocalPosition."
+  - "For TrajectorySetpoint velocity fuzzing, position and acceleration fields may intentionally be NaN. Do not generate NaN-invalid specs for fields that PX4 defines as intentionally uncontrolled."
+  - "Offboard checks must include the OffboardControlMode heartbeat. A missing heartbeat is usually a harness/readiness failure unless the spec explicitly targets Offboard loss failsafe behavior."
+  - "Velocity and acceleration constraints should compare accepted setpoints and observed ULG response against v1.17 parameters such as MPC_XY_VEL_MAX, MPC_Z_VEL_MAX_UP, MPC_Z_VEL_MAX_DN, MPC_ACC_HOR, MPC_ACC_HOR_MAX, MPC_ACC_UP_MAX, MPC_ACC_DOWN_MAX, and MPC_JERK_MAX."
+  - "Attitude/rate constraints should derive quaternion norm, tilt angle, and body-rate ratios from vehicle_attitude, vehicle_odometry, or vehicle_angular_velocity rather than from command messages alone."
+  - "Do not classify arming/takeoff setup failures as target logic bugs unless local_position_ready, offboard_heartbeat_active, and offboard_armed conditions were satisfied."
+  - "Feedback-oriented specs should produce ratios or margins, e.g. abs(v_xy)/MPC_XY_VEL_MAX, abs(vz)/MPC_Z_VEL_MAX_UP, tilt/MPC_TILTMAX_AIR, and actuator_output saturation ratio."

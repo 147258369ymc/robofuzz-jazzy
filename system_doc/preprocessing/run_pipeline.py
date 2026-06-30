@@ -4,6 +4,7 @@
 
 用法:
     python -m system_doc.preprocessing.run_pipeline --target px4
+    python -m system_doc.preprocessing.run_pipeline --target px4_v117_jazzy
     python -m system_doc.preprocessing.run_pipeline --target px4 --output system_doc/preprocessed
 """
 
@@ -24,7 +25,7 @@ def main():
     parser = argparse.ArgumentParser(description="多源规约预处理流水线")
     parser.add_argument(
         "--target", required=True,
-        help="目标系统名称 (px4, turtlebot3, moveit2_panda)",
+        help="目标系统名称 (px4, turtlebot3, moveit2_panda, turtlebot4_jazzy, px4_v117_jazzy)",
     )
     parser.add_argument(
         "--output", default=None,
@@ -52,10 +53,14 @@ def main():
     if args.descriptor:
         descriptor_path = Path(args.descriptor)
     else:
-        # 自动查找: src/oracle_ir/targets/{target}.yaml
-        auto_path = PROJECT_ROOT / "src" / "oracle_ir" / "targets" / f"{args.target}.yaml"
-        if auto_path.exists():
-            descriptor_path = auto_path
+        # 自动查找：Jazzy 目标优先使用 src_jazzy，旧目标保留 src fallback。
+        for auto_path in (
+            PROJECT_ROOT / "src_jazzy" / "oracle_ir" / "targets" / f"{args.target}.yaml",
+            PROJECT_ROOT / "src" / "oracle_ir" / "targets" / f"{args.target}.yaml",
+        ):
+            if auto_path.exists():
+                descriptor_path = auto_path
+                break
 
     pipeline = PreprocessingPipeline(config, project_root=PROJECT_ROOT,
                                      descriptor_path=descriptor_path)
