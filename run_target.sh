@@ -23,6 +23,7 @@ Environment overrides:
   TURTLEBOT4_WORLD=warehouse|simple
   TURTLEBOT4_GUI_WORLD=simple
   QT_QPA_PLATFORM=offscreen
+  PX4_HEADLESS=1|0
   PX4_ROOT=/robofuzz/targets/PX4-Autopilot
   START_UXRCE_AGENT=1
   PX4_UXRCE_PORT=8888
@@ -163,6 +164,7 @@ run_turtlebot4() {
 
 run_px4() {
   local px4_root="${PX4_ROOT:-/robofuzz/targets/PX4-Autopilot}"
+  local headless="${PX4_HEADLESS:-1}"
   local agent_pid=""
   local uxrce_port="${PX4_UXRCE_PORT:-8888}"
 
@@ -182,7 +184,13 @@ run_px4() {
   fi
 
   cd "${px4_root}"
-  env HEADLESS=1 make px4_sitl_default gz_x500
+  if [[ "${headless}" == "1" ]]; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+    env HEADLESS=1 make px4_sitl_default gz_x500
+  else
+    unset QT_QPA_PLATFORM
+    env -u HEADLESS make px4_sitl_default gz_x500
+  fi
 }
 
 run_moveit2() {

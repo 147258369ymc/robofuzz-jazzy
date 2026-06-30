@@ -7,6 +7,20 @@ import pickle
 import rclpy
 from px4_msgs.msg import VehicleCommand, TrajectorySetpoint, OffboardControlMode
 try:
+    from px4_msgs.msg import (
+        VehicleStatus,
+        VehicleControlMode,
+        VehicleLandDetected,
+        VehicleLocalPosition,
+        VehicleCommandAck,
+    )
+except ImportError:
+    VehicleStatus = None
+    VehicleControlMode = None
+    VehicleLandDetected = None
+    VehicleLocalPosition = None
+    VehicleCommandAck = None
+try:
     from px4_msgs.msg import Timesync
 except ImportError:
     Timesync = None
@@ -21,6 +35,14 @@ import rosidl_parser.definition
 os.environ["MAVLINK20"] = "1"
 
 from pymavlink import mavutil
+
+PX4_V117_OFFBOARD_EXCEPTION_MASK = 1 << 2
+PX4_V117_SITL_PARAM_OVERRIDES = (
+    ("NAV_DLL_ACT", 0, "INT32"),
+    ("COM_DLL_EXCEPT", PX4_V117_OFFBOARD_EXCEPTION_MASK, "INT32"),
+    ("COM_RCL_EXCEPT", PX4_V117_OFFBOARD_EXCEPTION_MASK, "INT32"),
+    ("COM_RC_LOSS_T", 30.0, "FLOAT"),
+)
 
 
 # TODO: add all parameters and their metadata.
@@ -67,10 +89,26 @@ class Parameter:
 
 
 class Px4BridgeNode:
-    def __init__(self, name="px4_bridge", use_mavlink=True, debug=False):
+    def __init__(
+        self,
+        name="px4_bridge",
+        use_mavlink=True,
+        debug=False,
+        target_profile_name=None,
+    ):
         self.use_mavlink = use_mavlink
         self.debug = debug
         self.ts = int(time.time() * 1_000_000)
+        self.target_profile_name = (
+            target_profile_name
+            or os.environ.get("ROBOFUZZ_TARGET_PROFILE", "")
+        )
+        self._v117_vehicle_status = None
+        self._v117_vehicle_control_mode = None
+        self._v117_vehicle_land_detected = None
+        self._v117_vehicle_local_position = None
+        self._v117_last_command_ack = None
+        self._v117_param_master = None
 
         if not self.use_mavlink:
             self.node_handle = rclpy.create_node(name)
@@ -92,6 +130,75 @@ class Px4BridgeNode:
             self.pub_trajectory = self.node_handle.create_publisher(
                 TrajectorySetpoint, "/fmu/in/trajectory_setpoint", 10
             )
+            self._create_v117_state_subscriptions()
+
+    def _is_v117_profile(self):
+        return self.target_profile_name == "px4_v117_jazzy"
+
+    def _create_subscription_if_available(self, msg_type, topic, callback):
+        if msg_type is None:
+            return None
+        create_subscription = getattr(
+            getattr(self, "node_handle", None),
+            "create_subscription",
+            None,
+        )
+        if create_subscription is None:
+            return None
+        try:
+            return create_subscription(
+                msg_type,
+                topic,
+                callback,
+                _px4_v117_state_qos(),
+            )
+        except Exception as exc:
+            print(f"[px4 v1.17] could not subscribe to {topic}: {exc}")
+            return None
+
+    def _create_v117_state_subscriptions(self):
+        if not self._is_v117_profile():
+            return
+        self._create_subscription_if_available(
+            VehicleStatus,
+            "/fmu/out/vehicle_status_v1",
+            self.vehicle_status_callback,
+        )
+        self._create_subscription_if_available(
+            VehicleControlMode,
+            "/fmu/out/vehicle_control_mode",
+            self.vehicle_control_mode_callback,
+        )
+        self._create_subscription_if_available(
+            VehicleLandDetected,
+            "/fmu/out/vehicle_land_detected",
+            self.vehicle_land_detected_callback,
+        )
+        self._create_subscription_if_available(
+            VehicleLocalPosition,
+            "/fmu/out/vehicle_local_position_v1",
+            self.vehicle_local_position_callback,
+        )
+        self._create_subscription_if_available(
+            VehicleCommandAck,
+            "/fmu/out/vehicle_command_ack",
+            self.vehicle_command_ack_callback,
+        )
+
+    def vehicle_status_callback(self, msg):
+        self._v117_vehicle_status = msg
+
+    def vehicle_control_mode_callback(self, msg):
+        self._v117_vehicle_control_mode = msg
+
+    def vehicle_land_detected_callback(self, msg):
+        self._v117_vehicle_land_detected = msg
+
+    def vehicle_local_position_callback(self, msg):
+        self._v117_vehicle_local_position = msg
+
+    def vehicle_command_ack_callback(self, msg):
+        self._v117_last_command_ack = msg
 
     def init_mavlink(self):
         self.use_mavlink = True
@@ -105,6 +212,60 @@ class Px4BridgeNode:
         self.master.wait_heartbeat(timeout=30)
         if self.master.target_system == 0:
             raise RuntimeError("MAVLink heartbeat timeout")
+
+    def _mavlink_param_connection(self):
+        """Create a MAVLink side-channel for parameter setup only.
+
+        PX4 v1.17 Jazzy fuzzing keeps ROS 2 as the command path. This
+        connection is deliberately separate from self.master so parameter
+        setup does not flip send_command() into MAVLink/manual-control mode.
+        """
+        if self._v117_param_master is not None:
+            return self._v117_param_master
+
+        url = os.environ.get("PX4_MAVLINK_PARAM_URL", "udpin:127.0.0.1:14550")
+        master = mavutil.mavlink_connection(url)
+        if master is None:
+            raise RuntimeError(f"MAVLink parameter connection failed: {url}")
+        master.wait_heartbeat(timeout=15)
+        if getattr(master, "target_system", 0) == 0:
+            raise RuntimeError("MAVLink parameter heartbeat timeout")
+        self._v117_param_master = master
+        return master
+
+    @staticmethod
+    def _mav_param_type(param_type):
+        if param_type == "INT32":
+            return mavutil.mavlink.MAV_PARAM_TYPE_INT32
+        if param_type == "FLOAT":
+            return mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+        return param_type
+
+    @staticmethod
+    def _send_mavlink_param(master, param_name, param_value, param_type):
+        master.mav.param_set_send(
+            master.target_system,
+            master.target_component,
+            param_name.encode(),
+            param_value,
+            Px4BridgeNode._mav_param_type(param_type),
+        )
+
+    def apply_v117_sitl_param_overrides(self):
+        """Prepare PX4 v1.17 x500 SITL for ROS 2 Offboard fuzzing.
+
+        The x500 airframe enables datalink-loss arming checks by default,
+        which rejects arming when no GCS is attached. RoboFuzz runs a
+        companion-computer Offboard campaign, so we explicitly disable the
+        GCS arming requirement and exempt Offboard from data-link/manual
+        control loss failsafes. The actual fuzz inputs still go through ROS 2.
+        """
+        master = self._mavlink_param_connection()
+        print("[px4 v1.17] applying SITL Offboard arming parameter overrides")
+        for param_name, value, param_type in PX4_V117_SITL_PARAM_OVERRIDES:
+            print(f"[*] (MAVLink param) set {param_name} := {value}")
+            self._send_mavlink_param(master, param_name, value, param_type)
+            time.sleep(0.05)
 
     def timesync_callback(self, msg):
         self.ts = msg.timestamp
@@ -224,7 +385,237 @@ class Px4BridgeNode:
 
         self.mav_set_param(param_name, value, param_type)
 
+    def _v117_spin_once(self):
+        rclpy.spin_once(self.node_handle, timeout_sec=0.0)
+
+    def _v117_local_position_ready(self):
+        pos = self._v117_vehicle_local_position
+        if pos is None:
+            return False
+        return bool(
+            getattr(pos, "xy_valid", False)
+            and getattr(pos, "z_valid", False)
+            and getattr(pos, "v_xy_valid", False)
+            and getattr(pos, "v_z_valid", False)
+        )
+
+    def _v117_is_offboard(self):
+        status = self._v117_vehicle_status
+        control = self._v117_vehicle_control_mode
+        nav_offboard = False
+        if status is not None:
+            nav_offboard_value = getattr(
+                VehicleStatus,
+                "NAVIGATION_STATE_OFFBOARD",
+                14,
+            )
+            nav_offboard = getattr(status, "nav_state", None) == nav_offboard_value
+        control_offboard = bool(
+            control is not None
+            and getattr(control, "flag_control_offboard_enabled", False)
+        )
+        return nav_offboard or control_offboard
+
+    def _v117_is_armed(self):
+        status = self._v117_vehicle_status
+        control = self._v117_vehicle_control_mode
+        status_armed = False
+        if status is not None:
+            armed_value = getattr(VehicleStatus, "ARMING_STATE_ARMED", 2)
+            status_armed = getattr(status, "arming_state", None) == armed_value
+        control_armed = bool(
+            control is not None and getattr(control, "flag_armed", False)
+        )
+        return status_armed or control_armed
+
+    def _v117_is_airborne(self):
+        pos = self._v117_vehicle_local_position
+        z = getattr(pos, "z", 0.0) if pos is not None else 0.0
+        landed = self._v117_vehicle_land_detected
+        try:
+            altitude_ready = float(z) < -1.0
+        except (TypeError, ValueError):
+            return False
+        if landed is not None and getattr(landed, "landed", True):
+            return False
+        return self._v117_is_armed() and altitude_ready
+
+    def _v117_last_ack_summary(self):
+        ack = self._v117_last_command_ack
+        if ack is None:
+            return "no command ack observed"
+        return (
+            f"last ack command={getattr(ack, 'command', '?')} "
+            f"result={getattr(ack, 'result', '?')}"
+        )
+
+    def v117_flight_quality_summary(self):
+        status = self._v117_vehicle_status
+        reasons = []
+        ready = self._v117_local_position_ready()
+        offboard = self._v117_is_offboard()
+        armed = self._v117_is_armed()
+        airborne = self._v117_is_airborne()
+
+        if not ready:
+            reasons.append("local position not ready")
+        if not offboard:
+            reasons.append("not in offboard")
+        if not armed:
+            reasons.append("not armed")
+        if self._v117_vehicle_land_detected is not None:
+            if getattr(self._v117_vehicle_land_detected, "landed", True):
+                reasons.append("landed")
+            elif not airborne:
+                reasons.append("below takeoff altitude")
+        elif not airborne:
+            reasons.append("airborne state unavailable")
+        if status is not None:
+            if getattr(status, "gcs_connection_lost", False):
+                reasons.append("gcs lost")
+            if getattr(status, "pre_flight_checks_pass", True) is False:
+                reasons.append("preflight checks not passing")
+        reasons.append(self._v117_last_ack_summary())
+
+        return {
+            "local_position_ready": ready,
+            "offboard": offboard,
+            "armed": armed,
+            "airborne": airborne,
+            "reason": "; ".join(reasons),
+        }
+
+    def _v117_stream_until(
+        self,
+        predicate,
+        timeout,
+        setpoint,
+        use_velocity=False,
+        period=0.1,
+    ):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self._v117_spin_once()
+            self.publish_offboard_control_mode(use_velocity=use_velocity)
+            self.publish_trajectory(setpoint)
+            self._v117_spin_once()
+            if predicate():
+                return True
+            time.sleep(period)
+        return predicate()
+
+    def prepare_v117_offboard_flight(self, mode_str="OFFBOARD"):
+        if self.use_mavlink:
+            raise RuntimeError(
+                "px4_v117_jazzy Offboard quality chain requires ROS 2 "
+                "publishing mode"
+            )
+        if mode_str != "OFFBOARD":
+            print(
+                f"[px4 v1.17] requested mode {mode_str}; "
+                "using OFFBOARD for v1.17 ROS 2 fuzzing"
+            )
+
+        self.apply_v117_sitl_param_overrides()
+
+        takeoff_setpoint = TrajectorySetpoint()
+        _set_position(takeoff_setpoint, 0.0, 0.0, -5.0)
+        _set_velocity(takeoff_setpoint, 0.0, 0.0, 0.0)
+        _set_acceleration(takeoff_setpoint, float("nan"), float("nan"), float("nan"))
+        if hasattr(takeoff_setpoint, "yaw"):
+            takeoff_setpoint.yaw = 0.0
+        if hasattr(takeoff_setpoint, "yawspeed"):
+            takeoff_setpoint.yawspeed = 0.0
+
+        print("[px4 v1.17] waiting for local position estimate")
+        if not self._v117_stream_until(
+            self._v117_local_position_ready,
+            timeout=10.0,
+            setpoint=takeoff_setpoint,
+            use_velocity=False,
+        ):
+            summary = self.v117_flight_quality_summary()
+            raise RuntimeError(
+                "PX4 v1.17 local position never became ready: "
+                f"{summary['reason']}"
+            )
+
+        print("[px4 v1.17] engaging OFFBOARD")
+        for _ in range(5):
+            self._v117_spin_once()
+            self.publish_offboard_control_mode(use_velocity=False)
+            self.publish_trajectory(takeoff_setpoint)
+            self.publish_offboard_mode()
+            time.sleep(0.1)
+
+        if not self._v117_stream_until(
+            self._v117_is_offboard,
+            timeout=5.0,
+            setpoint=takeoff_setpoint,
+            use_velocity=False,
+        ):
+            summary = self.v117_flight_quality_summary()
+            raise RuntimeError(
+                "PX4 v1.17 did not enter OFFBOARD: "
+                f"{summary['reason']}"
+            )
+
+        print("[px4 v1.17] arming")
+        for attempt in range(1, 6):
+            self._v117_spin_once()
+            self.publish_arm_command()
+            if self._v117_stream_until(
+                self._v117_is_armed,
+                timeout=1.5,
+                setpoint=takeoff_setpoint,
+                use_velocity=False,
+            ):
+                break
+            print(
+                "[px4 v1.17] arm attempt "
+                f"{attempt} did not arm ({self._v117_last_ack_summary()})"
+            )
+
+        if not self._v117_is_armed():
+            summary = self.v117_flight_quality_summary()
+            raise RuntimeError(
+                "PX4 v1.17 arming failed: "
+                f"{summary['reason']}"
+            )
+
+        print("[px4 v1.17] waiting for takeoff")
+        if not self._v117_stream_until(
+            self._v117_is_airborne,
+            timeout=12.0,
+            setpoint=takeoff_setpoint,
+            use_velocity=False,
+        ):
+            summary = self.v117_flight_quality_summary()
+            raise RuntimeError(
+                "PX4 v1.17 did not become airborne: "
+                f"{summary['reason']}"
+            )
+
+        hover_setpoint = get_init_trajectory_msg()
+        self._v117_stream_until(
+            lambda: True,
+            timeout=0.5,
+            setpoint=hover_setpoint,
+            use_velocity=True,
+        )
+        summary = self.v117_flight_quality_summary()
+        print(
+            "[px4 v1.17] flight ready: "
+            f"offboard={summary['offboard']} "
+            f"armed={summary['armed']} "
+            f"airborne={summary['airborne']}"
+        )
+
     def prepare_flight(self, mode_str="MANUAL"):
+
+        if not self.use_mavlink and self._is_v117_profile():
+            self.prepare_v117_offboard_flight(mode_str=mode_str)
+            return
 
         if self.use_mavlink:
             # Set COM_RC_LOSS_T = 30 to avoid engaging failsafe
@@ -310,6 +701,17 @@ class Px4BridgeNode:
 
     def _restart_px4_stack(self):
         """Kill PX4 and restart (keep Gazebo alive for reuse)."""
+        profile_name = (
+            getattr(self, "target_profile_name", "")
+            or os.environ.get("ROBOFUZZ_TARGET_PROFILE", "")
+        )
+        if profile_name == "px4_v117_jazzy":
+            raise RuntimeError(
+                "px4_v117_jazzy must be restarted through run_target.sh "
+                "and its process group; legacy px4_sitl_rtps restart is "
+                "disabled for this profile"
+            )
+
         import subprocess as sp
         print("[!] Restarting PX4...")
         sp.run("pkill -9 px4", shell=True, timeout=5,
@@ -445,6 +847,103 @@ def get_init_trajectory_msg():
     return msg
 
 
+def set_v117_offboard_velocity(
+    msg,
+    vx,
+    vy,
+    vz,
+    yaw=0.0,
+    yawspeed=0.0,
+):
+    """Prepare a PX4 v1.17 TrajectorySetpoint for velocity Offboard fuzzing."""
+    _set_position(msg, float("nan"), float("nan"), float("nan"))
+    _set_velocity(msg, vx, vy, vz)
+    _set_acceleration(msg, float("nan"), float("nan"), float("nan"))
+    if hasattr(msg, "jerk"):
+        _set_vector_field(msg, "jerk", (
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        ))
+    if hasattr(msg, "yaw"):
+        msg.yaw = yaw
+    if hasattr(msg, "yawspeed"):
+        msg.yawspeed = yawspeed
+    return msg
+
+
+def set_v117_velocity_component(msg, field_name, value):
+    velocity_index = {"vx": 0, "vy": 1, "vz": 2}
+    if field_name in velocity_index:
+        values = list(getattr(msg, "velocity", [0.0, 0.0, 0.0]))
+        values[velocity_index[field_name]] = value
+        _set_velocity(msg, values[0], values[1], values[2])
+        _set_position(msg, float("nan"), float("nan"), float("nan"))
+        return True
+    if field_name in ("yaw", "yawspeed") and hasattr(msg, field_name):
+        setattr(msg, field_name, value)
+        return True
+    return False
+
+
+def generate_v117_offboard_velocity_seeds(msg_class=TrajectorySetpoint, seqlen=8):
+    """Conservative PX4 v1.17 x500 Offboard velocity seed sequences."""
+    seeds = []
+
+    def make_msg(vx=0.0, vy=0.0, vz=0.0, yaw=0.0, yawspeed=0.0):
+        return set_v117_offboard_velocity(
+            msg_class(),
+            vx,
+            vy,
+            vz,
+            yaw=yaw,
+            yawspeed=yawspeed,
+        )
+
+    def append_sequence(fn):
+        seq = []
+        for idx in range(seqlen):
+            phase = idx / max(seqlen - 1, 1)
+            seq.append(fn(idx, phase))
+        seeds.append(seq)
+
+    append_sequence(lambda _idx, _phase: make_msg())
+    append_sequence(lambda _idx, _phase: make_msg(vx=1.5))
+    append_sequence(lambda _idx, _phase: make_msg(vy=1.5))
+    append_sequence(lambda _idx, _phase: make_msg(vz=-0.5))
+    append_sequence(lambda _idx, _phase: make_msg(vx=1.0, vy=1.0))
+    append_sequence(lambda _idx, _phase: make_msg(vx=1.0, yawspeed=0.8))
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vx=1.2 if idx < seqlen // 2 else -1.2
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vy=1.2 if idx < seqlen // 2 else -1.2
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            vz=-0.45 if idx < seqlen // 2 else 0.45
+        )
+    )
+    append_sequence(
+        lambda idx, _phase: make_msg(
+            yawspeed=0.8 if idx < seqlen // 2 else -0.8
+        )
+    )
+    append_sequence(
+        lambda _idx, phase: make_msg(
+            vx=1.2 * phase,
+            vy=0.8 * phase,
+            yawspeed=0.6,
+        )
+    )
+
+    return seeds
+
+
 def get_init_manual_control_msg():
     if ManualControlSetpoint is None:
         raise RuntimeError("px4_msgs/msg/ManualControlSetpoint is unavailable")
@@ -492,6 +991,24 @@ def _set_vector_field(msg, field_name, values):
 def _set_if_present(msg, field_name, value):
     if hasattr(msg, field_name):
         setattr(msg, field_name, value)
+
+
+def _px4_v117_state_qos():
+    try:
+        from rclpy.qos import (
+            QoSProfile,
+            QoSReliabilityPolicy,
+            QoSHistoryPolicy,
+            QoSDurabilityPolicy,
+        )
+    except ImportError:
+        return 10
+    return QoSProfile(
+        history=QoSHistoryPolicy.KEEP_LAST,
+        depth=10,
+        reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        durability=QoSDurabilityPolicy.VOLATILE,
+    )
 
 
 def _set_position(msg, x, y, z):

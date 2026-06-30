@@ -34,14 +34,25 @@ ULG_TO_ROSTOPIC = {
     "actuator_outputs": "/ActuatorOutputs_PubSubTopic",
     "actuator_armed": "/ActuatorArmed_PubSubTopic",
     "vehicle_status": "/VehicleStatus_PubSubTopic",
+    "vehicle_control_mode": "/VehicleControlMode_PubSubTopic",
+    "vehicle_land_detected": "/VehicleLandDetected_PubSubTopic",
+    "vehicle_command_ack": "/VehicleCommandAck_PubSubTopic",
+    "vehicle_command": "/VehicleCommand_PubSubTopic",
+    "offboard_control_mode": "/OffboardControlMode_PubSubTopic",
+    "failsafe_flags": "/FailsafeFlags_PubSubTopic",
+    "vehicle_rates_setpoint": "/VehicleRatesSetpoint_PubSubTopic",
+    "vehicle_attitude_setpoint": "/VehicleAttitudeSetpoint_PubSubTopic",
+    "trajectory_setpoint": "/TrajectorySetpoint_PubSubTopic",
     "manual_control_setpoint": "/ManualControlSetpoint_PubSubTopic",
 }
 
-# PX4 log root inside the container
-PX4_LOG_ROOT = (
+# Legacy PX4 v1.12 log root inside the original RoboFuzz container.
+LEGACY_PX4_LOG_ROOT = (
     "/robofuzz/targets/PX4-Autopilot/build/px4_sitl_rtps"
     "/tmp/rootfs/log"
 )
+PX4_LOG_ROOT = LEGACY_PX4_LOG_ROOT
+DEFAULT_PX4_ROOT = "/robofuzz/targets/PX4-Autopilot"
 
 
 class UlgArrayProxy:
@@ -237,28 +248,70 @@ class UlgStateParser:
 # Utility functions for .ulg file management
 # ===================================================================
 
-def find_latest_ulg(log_root=PX4_LOG_ROOT):
+def _candidate_log_roots(log_root=None, px4_root=None):
+    if log_root:
+        return [log_root]
+
+    roots = []
+    env_log_root = os.environ.get("PX4_LOG_ROOT")
+    if env_log_root:
+        roots.append(env_log_root)
+
+    px4_root = px4_root or os.environ.get("PX4_ROOT", DEFAULT_PX4_ROOT)
+    roots.extend([
+        os.path.join(px4_root, "build", "px4_sitl_default", "tmp",
+                     "rootfs", "log"),
+        os.path.join(px4_root, "build", "px4_sitl_default", "log"),
+        os.path.join(px4_root, "build", "px4_sitl_default"),
+        LEGACY_PX4_LOG_ROOT,
+        os.path.join(px4_root, "build"),
+    ])
+
+    deduped = []
+    for root in roots:
+        if root and root not in deduped:
+            deduped.append(root)
+    return deduped
+
+
+def _find_ulg_files(log_root=None, px4_root=None, since_time=None):
+    files = []
+    for root in _candidate_log_roots(log_root=log_root, px4_root=px4_root):
+        pattern = os.path.join(root, "**", "*.ulg")
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if since_time is not None and mtime < since_time:
+                continue
+            files.append(path)
+    return sorted(set(files), key=os.path.getmtime, reverse=True)
+
+
+def find_latest_ulg(log_root=None, px4_root=None, since_time=None):
     """
     Find the most recently modified .ulg file under the PX4 log root.
     Returns the file path, or None if no .ulg files exist.
     """
-    pattern = os.path.join(log_root, "**", "*.ulg")
-    files = glob.glob(pattern, recursive=True)
+    files = _find_ulg_files(
+        log_root=log_root,
+        px4_root=px4_root,
+        since_time=since_time,
+    )
     if not files:
         return None
-    return max(files, key=os.path.getmtime)
+    return files[0]
 
 
-def cleanup_ulg_files(log_root=PX4_LOG_ROOT, keep_latest=1):
+def cleanup_ulg_files(log_root=None, keep_latest=1, px4_root=None):
     """
     Remove old .ulg files, keeping only the N most recent ones.
     Call this after each oracle check to prevent disk fill.
     """
-    pattern = os.path.join(log_root, "**", "*.ulg")
-    files = glob.glob(pattern, recursive=True)
+    files = _find_ulg_files(log_root=log_root, px4_root=px4_root)
     if len(files) <= keep_latest:
         return
-    files.sort(key=os.path.getmtime, reverse=True)
     for f in files[keep_latest:]:
         try:
             os.remove(f)

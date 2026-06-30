@@ -467,6 +467,16 @@ class Fuzzer:
 
             elif (
                 self.config.px4_ros
+                and self.config.target_profile_name == "px4_v117_jazzy"
+            ):
+                for seed_list in px4_utils.generate_v117_offboard_velocity_seeds(
+                    type(msg),
+                    seqlen=self.config.seqlen,
+                ):
+                    self.queue.append(seed_list)
+
+            elif (
+                self.config.px4_ros
                 and self.config.target_profile_name != "px4_v117_jazzy"
             ):
                 # --- ROS velocity mode boundary seeds ---
@@ -649,8 +659,11 @@ class Fuzzer:
     def init_px4_bridge(self):
         print("[*] Target: PX4 SITL")
         print("[*] Initializing PX4-ROS bridge")
+        if self.config.target_profile_name:
+            os.environ["ROBOFUZZ_TARGET_PROFILE"] = self.config.target_profile_name
         self.px4_bridge = px4_utils.Px4BridgeNode(
-            use_mavlink=self.config.use_mavlink
+            use_mavlink=self.config.use_mavlink,
+            target_profile_name=self.config.target_profile_name,
         )
 
     def init_state_monitor(self, watchlist_file):
@@ -686,6 +699,8 @@ class Fuzzer:
                 stdout_log_offset = os.path.getsize(stdout_log_path)
             except OSError:
                 stdout_log_offset = 0
+            if profile.family == "px4":
+                self.config.px4_launch_started_at = time.time()
             self.ros_pgrp = harness.run_target_profile(
                 profile,
                 self.config.proj_root,
@@ -1317,6 +1332,9 @@ def fuzz_msg(fuzzer, fuzz_targets):
             else:
                 if fuzzer.config.target_profile_name == "px4_v117_jazzy":
                     field_whitelist = [
+                        ["vx", np.dtype("float32")],
+                        ["vy", np.dtype("float32")],
+                        ["vz", np.dtype("float32")],
                         ["yaw", np.dtype("float32")],
                         ["yawspeed", np.dtype("float32")],
                     ]
@@ -1367,6 +1385,34 @@ def fuzz_msg(fuzzer, fuzz_targets):
             fbk_list.append(fbk)
             # New: guides fuzzer toward control loop stalls
             fbk = Feedback("control_loop_gap", FeedbackType.INC)
+            fbk_list.append(fbk)
+            # PX4 v1.17 ULG-backed setpoint/state consistency metrics.
+            # They are feedback-first in phase 2: useful for steering
+            # mutation without immediately turning normal settling lag into
+            # bug reports.
+            fbk = Feedback(
+                "px4_v117_velocity_tracking_error",
+                FeedbackType.INC,
+                min_threshold=0.2,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_rate_tracking_error",
+                FeedbackType.INC,
+                min_threshold=0.1,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_setpoint_sample_count",
+                FeedbackType.INC,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_state_sample_count",
+                FeedbackType.INC,
+                min_threshold=1.0,
+            )
             fbk_list.append(fbk)
 
         elif fuzzer.config.tb4_sitl:
@@ -1989,7 +2035,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
                 if fuzzer.config.use_ulg and fuzzer.config.px4_sitl:
                     # --- ULG path: read PX4 internal log (bypasses bridge) ---
-                    ulg_path = find_latest_ulg()
+                    ulg_path = find_latest_ulg(
+                        since_time=getattr(
+                            fuzzer.config,
+                            "px4_launch_started_at",
+                            None,
+                        )
+                    )
                     if ulg_path is None:
                         print("[-] no ULG file found. Skipping oracle.")
                         continue
@@ -2231,15 +2283,36 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # Only applies to PX4 targets; other targets skip this check.
                 flight_quality_ok = True
                 if fuzzer.config.px4_sitl:
-                    for fbk in fbk_list:
-                        if fbk.name == "max_tilt_angle":
-                            if fbk.value is None or fbk.value < 2.0:
-                                flight_quality_ok = False
-                                break
-                        if fbk.name == "max_xy_velocity":
-                            if fbk.value is None or fbk.value < 0.3:
-                                flight_quality_ok = False
-                                break
+                    px4_metrics = {
+                        fbk.name: fbk.value for fbk in fbk_list
+                    }
+                    if (
+                        fuzzer.config.target_profile_name
+                        == "px4_v117_jazzy"
+                    ):
+                        # v1.17 ROS 2 Offboard campaigns include yaw-only and
+                        # hover-like seeds. They can be valid airborne fuzz
+                        # inputs even when XY velocity stays low, so gate on
+                        # ULG-backed flight altitude/state quality instead of
+                        # the legacy horizontal-motion heuristic.
+                        if (
+                            px4_metrics.get("max_altitude") is None
+                            or px4_metrics.get("max_altitude") < 1.0
+                            or px4_metrics.get(
+                                "px4_v117_state_sample_count", 0.0
+                            ) < 50.0
+                        ):
+                            flight_quality_ok = False
+                    else:
+                        for fbk in fbk_list:
+                            if fbk.name == "max_tilt_angle":
+                                if fbk.value is None or fbk.value < 2.0:
+                                    flight_quality_ok = False
+                                    break
+                            if fbk.name == "max_xy_velocity":
+                                if fbk.value is None or fbk.value < 0.3:
+                                    flight_quality_ok = False
+                                    break
 
                 # MoveIt quality gate: require at least 1 successful goal
                 if fuzzer.config.test_moveit:

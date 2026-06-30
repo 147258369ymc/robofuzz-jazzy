@@ -1,8 +1,6 @@
 import math
 import statistics
 
-import numpy as np
-
 
 # =========================================================================
 # PX4 v1.12 Default Parameter Thresholds (used when not dynamically mutated)
@@ -112,6 +110,286 @@ def _safe_get(state_dict, topic):
         return []
 
 
+def _finite_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(value) or math.isinf(value):
+        return None
+    return value
+
+
+def _msg_scalar(msg, *field_names):
+    for field_name in field_names:
+        try:
+            value = getattr(msg, field_name)
+        except AttributeError:
+            continue
+        value = _finite_float(value)
+        if value is not None:
+            return value
+    return None
+
+
+def _msg_vector(msg, field_name, length=3):
+    try:
+        vector = getattr(msg, field_name)
+    except AttributeError:
+        return None
+
+    values = []
+    for idx in range(length):
+        try:
+            value = _finite_float(vector[idx])
+        except (IndexError, KeyError, TypeError):
+            return None
+        if value is None:
+            return None
+        values.append(value)
+    return values
+
+
+def _nearest_msg(samples, ts, max_gap_ns=250_000_000):
+    best = None
+    best_gap = None
+    for sample_ts, msg in samples:
+        gap = abs(sample_ts - ts)
+        if best_gap is None or gap < best_gap:
+            best_gap = gap
+            best = msg
+    if best_gap is None or best_gap > max_gap_ns:
+        return None
+    return best
+
+
+def _update_feedback(feedback_list, metrics):
+    for feedback in feedback_list:
+        if feedback.name in metrics and metrics[feedback.name] is not None:
+            feedback.update_value(metrics[feedback.name])
+
+
+def _px4_v117_ulg_metrics(config, state_dict):
+    metrics = {
+        "max_xy_velocity": 0.0,
+        "max_tilt_angle": 0.0,
+        "max_angular_rate": 0.0,
+        "max_jerk": 0.0,
+        "vel_pos_inconsistency": 0.0,
+        "max_altitude": 0.0,
+        "combined_tilt_velocity": 0.0,
+        "actuator_saturation": 0.0,
+        "odom_pos_divergence": 0.0,
+        "control_loop_gap": 0.0,
+        "px4_v117_velocity_tracking_error": 0.0,
+        "px4_v117_rate_tracking_error": 0.0,
+        "px4_v117_setpoint_sample_count": 0.0,
+        "px4_v117_state_sample_count": 0.0,
+    }
+    errs = []
+
+    local_position_list = _safe_get(
+        state_dict, "/VehicleLocalPosition_PubSubTopic"
+    )
+    attitude_list = _safe_get(state_dict, "/VehicleAttitude_PubSubTopic")
+    angular_velocity_list = _safe_get(
+        state_dict, "/VehicleAngularVelocity_PubSubTopic"
+    )
+    actuator_outputs_list = _safe_get(
+        state_dict, "/ActuatorOutputs_PubSubTopic"
+    )
+    trajectory_setpoint_list = _safe_get(
+        state_dict, "/TrajectorySetpoint_PubSubTopic"
+    )
+    rates_setpoint_list = _safe_get(
+        state_dict, "/VehicleRatesSetpoint_PubSubTopic"
+    )
+
+    metrics["px4_v117_state_sample_count"] = float(
+        len(local_position_list) + len(attitude_list)
+    )
+    metrics["px4_v117_setpoint_sample_count"] = float(
+        len(trajectory_setpoint_list) + len(rates_setpoint_list)
+    )
+
+    for _, pos in local_position_list:
+        vx = _msg_scalar(pos, "vx")
+        vy = _msg_scalar(pos, "vy")
+        z = _msg_scalar(pos, "z")
+        if vx is not None and vy is not None:
+            metrics["max_xy_velocity"] = max(
+                metrics["max_xy_velocity"],
+                math.sqrt(vx * vx + vy * vy),
+            )
+        if z is not None:
+            metrics["max_altitude"] = max(metrics["max_altitude"], abs(z))
+
+    if len(local_position_list) >= 2:
+        for idx in range(1, len(local_position_list)):
+            ts_prev, pos_prev = local_position_list[idx - 1]
+            ts_curr, pos_curr = local_position_list[idx]
+            dt = (ts_curr - ts_prev) / 1e9
+            if dt <= 0.0:
+                continue
+            metrics["control_loop_gap"] = max(
+                metrics["control_loop_gap"], dt
+            )
+            if dt > 1.0:
+                continue
+
+            prev = [
+                _msg_scalar(pos_prev, "x"),
+                _msg_scalar(pos_prev, "y"),
+                _msg_scalar(pos_prev, "z"),
+                _msg_scalar(pos_prev, "vx"),
+                _msg_scalar(pos_prev, "vy"),
+                _msg_scalar(pos_prev, "vz"),
+            ]
+            curr = [
+                _msg_scalar(pos_curr, "x"),
+                _msg_scalar(pos_curr, "y"),
+                _msg_scalar(pos_curr, "z"),
+            ]
+            if any(value is None for value in prev + curr):
+                continue
+            expected = [prev[3] * dt, prev[4] * dt, prev[5] * dt]
+            actual = [
+                curr[0] - prev[0],
+                curr[1] - prev[1],
+                curr[2] - prev[2],
+            ]
+            err = math.sqrt(sum(
+                (expected[i] - actual[i]) ** 2 for i in range(3)
+            ))
+            metrics["vel_pos_inconsistency"] = max(
+                metrics["vel_pos_inconsistency"], err
+            )
+
+    control_gap_limit = 0.5 if getattr(config, "use_ulg", False) else 0.25
+    if metrics["control_loop_gap"] > control_gap_limit:
+        errs.append(
+            "px4_v117_control_loop_gap: "
+            f"{metrics['control_loop_gap'] * 1000:.1f}ms"
+        )
+
+    for _, att in attitude_list:
+        q = _msg_vector(att, "q", length=4)
+        if q is None:
+            continue
+        metrics["max_tilt_angle"] = max(
+            metrics["max_tilt_angle"], _quat_to_tilt_deg(q)
+        )
+
+    for _, ang in angular_velocity_list:
+        xyz = _msg_vector(ang, "xyz", length=3)
+        if xyz is None:
+            continue
+        rate_dps = max(abs(value) for value in xyz) * 180.0 / math.pi
+        metrics["max_angular_rate"] = max(
+            metrics["max_angular_rate"], rate_dps
+        )
+
+    if len(local_position_list) >= 3:
+        velocities = []
+        for ts, pos in local_position_list:
+            vx = _msg_scalar(pos, "vx")
+            vy = _msg_scalar(pos, "vy")
+            vz = _msg_scalar(pos, "vz")
+            if None not in (vx, vy, vz):
+                velocities.append((ts, vx, vy, vz))
+        accels = []
+        for idx in range(1, len(velocities)):
+            prev = velocities[idx - 1]
+            curr = velocities[idx]
+            dt = (curr[0] - prev[0]) / 1e9
+            if dt <= 0.001 or dt > 1.0:
+                continue
+            ax = (curr[1] - prev[1]) / dt
+            ay = (curr[2] - prev[2]) / dt
+            az = (curr[3] - prev[3]) / dt
+            accels.append((curr[0], ax, ay, az))
+        for idx in range(1, len(accels)):
+            prev = accels[idx - 1]
+            curr = accels[idx]
+            dt = (curr[0] - prev[0]) / 1e9
+            if dt <= 0.001 or dt > 1.0:
+                continue
+            jerk = math.sqrt(sum(
+                ((curr[i] - prev[i]) / dt) ** 2 for i in range(1, 4)
+            ))
+            metrics["max_jerk"] = max(metrics["max_jerk"], jerk)
+
+    for ts, setpoint in trajectory_setpoint_list:
+        desired = _msg_vector(setpoint, "velocity", length=3)
+        if desired is None:
+            continue
+        actual_msg = _nearest_msg(local_position_list, ts)
+        if actual_msg is None:
+            continue
+        actual = [
+            _msg_scalar(actual_msg, "vx"),
+            _msg_scalar(actual_msg, "vy"),
+            _msg_scalar(actual_msg, "vz"),
+        ]
+        if any(value is None for value in actual):
+            continue
+        tracking_err = math.sqrt(sum(
+            (desired[i] - actual[i]) ** 2 for i in range(3)
+        ))
+        metrics["px4_v117_velocity_tracking_error"] = max(
+            metrics["px4_v117_velocity_tracking_error"], tracking_err
+        )
+
+    for ts, setpoint in rates_setpoint_list:
+        desired = [
+            _msg_scalar(setpoint, "roll", "roll_body"),
+            _msg_scalar(setpoint, "pitch", "pitch_body"),
+            _msg_scalar(setpoint, "yaw", "yaw_body"),
+        ]
+        if any(value is None for value in desired):
+            continue
+        actual_msg = _nearest_msg(angular_velocity_list, ts)
+        actual = _msg_vector(actual_msg, "xyz", length=3) if actual_msg else None
+        if actual is None:
+            continue
+        tracking_err = math.sqrt(sum(
+            (desired[i] - actual[i]) ** 2 for i in range(3)
+        ))
+        metrics["px4_v117_rate_tracking_error"] = max(
+            metrics["px4_v117_rate_tracking_error"], tracking_err
+        )
+
+    saturation_start_ts = None
+    for ts, act in actuator_outputs_list:
+        outputs = _msg_vector(act, "output", length=4)
+        if outputs is None:
+            saturation_start_ts = None
+            continue
+        all_max = all(output >= 1900.0 for output in outputs)
+        if not all_max:
+            saturation_start_ts = None
+            continue
+        if saturation_start_ts is None:
+            saturation_start_ts = ts
+            continue
+        duration = (ts - saturation_start_ts) / 1e9
+        metrics["actuator_saturation"] = max(
+            metrics["actuator_saturation"], duration
+        )
+
+    if metrics["actuator_saturation"] >= 0.2:
+        errs.append(
+            "px4_v117_actuator_saturation: all motors saturated for "
+            f"{metrics['actuator_saturation']:.3f}s"
+        )
+
+    metrics["combined_tilt_velocity"] = (
+        metrics["max_tilt_angle"] * metrics["max_xy_velocity"]
+    )
+
+    return metrics, errs
+
+
 def _check_px4_v117_smoke(config, msg_list, state_dict, feedback_list):
     errs = []
     status_list = _safe_get(state_dict, "/VehicleStatus_PubSubTopic")
@@ -121,13 +399,18 @@ def _check_px4_v117_smoke(config, msg_list, state_dict, feedback_list):
     attitude_list = _safe_get(state_dict, "/VehicleAttitude_PubSubTopic")
 
     if not status_list:
-        errs.append("missing required PX4 topic /fmu/out/vehicle_status_v1")
+        errs.append(
+            "px4_v117_transport_missing: /fmu/out/vehicle_status_v1"
+        )
     if not local_position_list:
         errs.append(
-            "missing required PX4 topic /fmu/out/vehicle_local_position_v1"
+            "px4_v117_transport_missing: "
+            "/fmu/out/vehicle_local_position_v1"
         )
     if not attitude_list:
-        errs.append("missing required PX4 topic /fmu/out/vehicle_attitude")
+        errs.append(
+            "px4_v117_transport_missing: /fmu/out/vehicle_attitude"
+        )
 
     finite_position_seen = False
     for _, msg in local_position_list:
@@ -136,24 +419,39 @@ def _check_px4_v117_smoke(config, msg_list, state_dict, feedback_list):
             if hasattr(msg, attr):
                 values.append(getattr(msg, attr))
         if values and any(math.isinf(v) for v in values):
-            errs.append("vehicle_local_position contains INF")
+            errs.append(
+                "px4_v117_state_invalid: vehicle_local_position contains INF"
+            )
             break
         if values and any(not math.isnan(v) for v in values):
             finite_position_seen = True
     if local_position_list and not finite_position_seen:
-        errs.append("vehicle_local_position never produced a finite value")
+        errs.append(
+            "px4_v117_state_invalid: "
+            "vehicle_local_position never produced a finite value"
+        )
 
     for _, msg in attitude_list:
         q = getattr(msg, "q", None)
         if q is None:
             continue
         if any(math.isnan(v) or math.isinf(v) for v in q):
-            errs.append("vehicle_attitude.q contains NaN/INF")
+            errs.append(
+                "px4_v117_state_invalid: "
+                "vehicle_attitude.q contains NaN/INF"
+            )
             break
         norm = math.sqrt(sum(v * v for v in q))
         if norm < 0.5 or norm > 1.5:
-            errs.append(f"vehicle_attitude.q has implausible norm {norm}")
+            errs.append(
+                "px4_v117_state_invalid: "
+                f"vehicle_attitude.q has implausible norm {norm}"
+            )
             break
+
+    metrics, semantic_errs = _px4_v117_ulg_metrics(config, state_dict)
+    _update_feedback(feedback_list, metrics)
+    errs.extend(semantic_errs)
 
     return errs
 

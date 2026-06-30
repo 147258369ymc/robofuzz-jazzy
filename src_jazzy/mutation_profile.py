@@ -77,6 +77,10 @@ _PX4_FEEDBACK_STRATEGY_MAP = {
     "actuator_saturation": STRATEGY_SINGLE_BLOCK,
     "vel_pos_inconsistency": STRATEGY_FLIP,
     "max_altitude": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_velocity_tracking_error": STRATEGY_MULTI_AXIS,
+    "px4_v117_rate_tracking_error": STRATEGY_FLIP,
+    "px4_v117_setpoint_sample_count": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_state_sample_count": STRATEGY_RANDOM,
 }
 
 # MoveIt feedback-to-strategy mappings
@@ -196,6 +200,35 @@ class MutationProfile:
                 STRATEGY_RANDOM: 0.15,
             },
             block_len_range=(5, 30),
+            feedback_strategy_map=_PX4_FEEDBACK_STRATEGY_MAP,
+        )
+
+    @classmethod
+    def px4_v117_offboard_velocity(cls) -> "MutationProfile":
+        """Conservative PX4 v1.17 x500 OFFBOARD velocity smoke profile.
+
+        This keeps first-phase Jazzy fuzzing inside realistic velocity
+        setpoints while the deeper PX4 oracle is still being rebuilt around
+        v1.17 ULG evidence. Legacy PX4 campaigns keep the wider pre-Jazzy
+        px4_ros_velocity profile above.
+        """
+        return cls(
+            field_ranges={
+                "vx": FieldRange("vx", -2.0, 2.0, extreme_prob=0.0),
+                "vy": FieldRange("vy", -2.0, 2.0, extreme_prob=0.0),
+                "vz": FieldRange("vz", -1.0, 1.0, extreme_prob=0.0),
+                "yaw": FieldRange(
+                    "yaw", -math.pi, math.pi, extreme_prob=0.0),
+                "yawspeed": FieldRange(
+                    "yawspeed", -1.2, 1.2, extreme_prob=0.0),
+            },
+            strategy_weights={
+                STRATEGY_MULTI_AXIS: 0.30,
+                STRATEGY_FLIP: 0.25,
+                STRATEGY_SINGLE_BLOCK: 0.30,
+                STRATEGY_RANDOM: 0.15,
+            },
+            block_len_range=(3, 8),
             feedback_strategy_map=_PX4_FEEDBACK_STRATEGY_MAP,
         )
 

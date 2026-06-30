@@ -179,6 +179,53 @@ class TargetProfileTests(unittest.TestCase):
             cfg.required_topics_with_data_for_readiness,
         )
 
+    def test_px4_v117_profile_declares_bridge_readiness(self):
+        import config as config_module
+        import target_profiles
+
+        profile = target_profiles.load_profile("px4_v117_jazzy", REPO_ROOT)
+
+        # PX4 can spend a long time in the first build/boot path before the
+        # uXRCE-DDS graph is meaningful. Wait for current-launch PX4 markers
+        # before using the ROS graph as the fuzzing readiness gate.
+        self.assertIn(
+            "INFO  [uxrce_dds_client] init UDP agent IP:127.0.0.1, port:8888",
+            profile.required_log_patterns_for_readiness,
+        )
+        self.assertIn(
+            "INFO  [px4] Startup script returned successfully",
+            profile.required_log_patterns_for_readiness,
+        )
+        self.assertEqual(
+            "px4_msgs/msg/VehicleStatus",
+            profile.required_topics_with_data_for_readiness[
+                "/fmu/out/vehicle_status_v1"
+            ],
+        )
+        self.assertEqual(
+            "px4_msgs/msg/VehicleLocalPosition",
+            profile.required_topics_with_data_for_readiness[
+                "/fmu/out/vehicle_local_position_v1"
+            ],
+        )
+        self.assertEqual(
+            "px4_msgs/msg/VehicleAttitude",
+            profile.required_topics_with_data_for_readiness[
+                "/fmu/out/vehicle_attitude"
+            ],
+        )
+
+        cfg = config_module.RuntimeConfig()
+        target_profiles.attach_profile_to_config(cfg, profile)
+        self.assertEqual(
+            profile.required_log_patterns_for_readiness,
+            cfg.required_log_patterns_for_readiness,
+        )
+        self.assertEqual(
+            profile.required_topics_with_data_for_readiness,
+            cfg.required_topics_with_data_for_readiness,
+        )
+
     def test_tb4_profile_records_limited_command_observation_chain(self):
         import target_profiles
 
@@ -216,7 +263,7 @@ class TargetProfileTests(unittest.TestCase):
     def test_profiles_without_data_readiness_default_empty(self):
         import target_profiles
 
-        profile = target_profiles.load_profile("px4_v117_jazzy", REPO_ROOT)
+        profile = target_profiles.load_profile("moveit2_jazzy", REPO_ROOT)
         self.assertEqual(
             {}, profile.required_topics_with_data_for_readiness
         )
@@ -387,6 +434,26 @@ class TargetProfileTests(unittest.TestCase):
         self.assertIn("qos_candidates", text)
         self.assertIn("QoSDurabilityPolicy.TRANSIENT_LOCAL", text)
 
+    def test_px4_topic_data_readiness_uses_best_effort_only(self):
+        harness_path = os.path.join(SRC_DIR, "harness.py")
+        with open(harness_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn('topic.startswith("/fmu/out/")', text)
+        self.assertIn("return [best_effort_qos]", text)
+
+    def test_run_target_exposes_px4_headless_toggle(self):
+        run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
+        with open(run_target_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("PX4_HEADLESS=1|0", text)
+        self.assertIn('local headless="${PX4_HEADLESS:-1}"', text)
+        self.assertIn('if [[ "${headless}" == "1" ]]; then', text)
+        self.assertIn("env HEADLESS=1 make px4_sitl_default gz_x500", text)
+        self.assertIn("env -u HEADLESS make px4_sitl_default gz_x500", text)
+        self.assertNotIn('env HEADLESS="${headless}" make px4_sitl_default gz_x500', text)
+
     def test_fuzzer_clamps_tb4_velocity_before_execution(self):
         fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
         with open(fuzzer_path, encoding="utf-8") as fp:
@@ -496,6 +563,37 @@ class TargetProfileTests(unittest.TestCase):
         self.assertIn("px4_v117_jazzy", cmd)
         self.assertNotIn("make px4_sitl", cmd)
         self.assertEqual(kwargs["cwd"], REPO_ROOT)
+        self.assertIs(kwargs["stdin"], harness.sp.DEVNULL)
+
+    def test_px4_log_filter_removes_prompt_spam_without_losing_info(self):
+        rosidl_runtime_py = types.ModuleType("rosidl_runtime_py")
+        rosidl_runtime_py.message_to_ordereddict = lambda msg: {}
+        rosidl_runtime_py.set_message_fields = lambda msg, fields: None
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "rclpy": types.ModuleType("rclpy"),
+                "rosidl_runtime_py": rosidl_runtime_py,
+            },
+        ):
+            sys.modules.pop("harness", None)
+            harness = importlib.import_module("harness")
+
+        filt = harness._Px4PromptFilter()
+        first = filt.filter(
+            b"INFO  [px4] Startup script returned successfully\npxh> \x1b"
+        )
+        second = filt.filter(b"[2K\rpxh> \x1b[2K\rINFO  [logger] ok\n")
+        out = first + second + filt.flush()
+
+        self.assertIn(
+            b"INFO  [px4] Startup script returned successfully\n",
+            out,
+        )
+        self.assertIn(b"INFO  [logger] ok\n", out)
+        self.assertNotIn(b"pxh>", out)
+        self.assertNotIn(b"\x1b[2K", out)
 
     def test_px4_ros_prepare_flight_uses_nonblocking_spin_once(self):
         fake_modules, fake_rclpy = self._fake_px4_utils_modules()

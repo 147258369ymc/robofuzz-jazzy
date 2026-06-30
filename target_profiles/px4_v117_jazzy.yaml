@@ -61,6 +61,20 @@ bridge:
     - Legacy micrortps_agent and px4_sitl_rtps paths are not valid for this profile.
     - Micro XRCE-DDS Agent v2.4.3 is built without SuperBuild/logger/P2P to install cleanly on Noble/Jazzy system FastDDS/Fast-CDR; validate UDP agent behavior in PX4 smoke testing.
 
+readiness:
+  required_log_patterns:
+    - "INFO  [uxrce_dds_client] init UDP agent IP:127.0.0.1, port:8888"
+    - "INFO  [px4] Startup script returned successfully"
+  required_topics_with_data:
+    /fmu/out/vehicle_status_v1: px4_msgs/msg/VehicleStatus
+    /fmu/out/vehicle_local_position_v1: px4_msgs/msg/VehicleLocalPosition
+    /fmu/out/vehicle_attitude: px4_msgs/msg/VehicleAttitude
+  compatibility_note: >
+    The first PX4 v1.17 SITL launch may spend significant time compiling and
+    booting before the uXRCE-DDS graph is meaningful. Wait for fresh PX4 boot
+    markers, then require live state samples on the core /fmu/out topics before
+    publishing fuzz inputs or running the smoke oracle.
+
 input:
   mode: offboard_ros2
   topics:

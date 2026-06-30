@@ -5,9 +5,66 @@ import subprocess as sp
 import time
 import json
 import shlex
+import threading
 
 import rclpy
 from rosidl_runtime_py import message_to_ordereddict, set_message_fields
+
+
+class _Px4PromptFilter:
+    """Remove PX4 shell prompt redraw spam while preserving normal log lines."""
+
+    _PROMPTS = (
+        b"pxh> \x1b[2K\r",
+        b"\x1b[2K\rpxh> ",
+        b"\x1b[2K\r",
+        b"pxh> ",
+        b"pxh>",
+    )
+
+    def __init__(self):
+        self._carry = b""
+
+    @classmethod
+    def _strip(cls, data):
+        for prompt in cls._PROMPTS:
+            data = data.replace(prompt, b"")
+        return data
+
+    def filter(self, chunk):
+        data = self._carry + (chunk or b"")
+        keep = max(len(prompt) for prompt in self._PROMPTS) - 1
+        if len(data) <= keep:
+            self._carry = data
+            return b""
+        body = data[:-keep]
+        self._carry = data[-keep:]
+        return self._strip(body)
+
+    def flush(self):
+        tail = self._strip(self._carry)
+        self._carry = b""
+        return tail
+
+
+def _pump_stream_to_file(stream, fp, log_filter=None):
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                break
+            if log_filter is not None:
+                chunk = log_filter.filter(chunk)
+            if chunk:
+                fp.write(chunk)
+                fp.flush()
+        if log_filter is not None:
+            chunk = log_filter.flush()
+            if chunk:
+                fp.write(chunk)
+                fp.flush()
+    except (OSError, ValueError):
+        pass
 
 
 def run_target_profile(profile, proj_dir, log_dir=None):
@@ -27,12 +84,19 @@ def run_target_profile(profile, proj_dir, log_dir=None):
     stdout = sys.stdout
     stderr = sys.stderr
     log_handles = None
+    log_threads = ()
+    stdout_filter = None
     if log_dir:
         try:
             os.makedirs(log_dir, exist_ok=True)
-            stdout = open(os.path.join(log_dir, "target.stdout.log"), "ab")
+            stdout_file = open(os.path.join(log_dir, "target.stdout.log"), "ab")
             stderr = open(os.path.join(log_dir, "target.stderr.log"), "ab")
-            log_handles = (stdout, stderr)
+            log_handles = (stdout_file, stderr)
+            if getattr(profile, "family", "") == "px4":
+                stdout = sp.PIPE
+                stdout_filter = _Px4PromptFilter()
+            else:
+                stdout = stdout_file
         except OSError:
             stdout = sys.stdout
             stderr = sys.stderr
@@ -43,10 +107,20 @@ def run_target_profile(profile, proj_dir, log_dir=None):
         shell=True,
         cwd=proj_dir,
         preexec_fn=os.setpgrp,
+        stdin=sp.DEVNULL,
         stdout=stdout,
         stderr=stderr,
     )
+    if stdout_filter is not None and proc.stdout is not None:
+        thread = threading.Thread(
+            target=_pump_stream_to_file,
+            args=(proc.stdout, log_handles[0], stdout_filter),
+            daemon=True,
+        )
+        thread.start()
+        log_threads = (thread,)
     proc._robofuzz_log_handles = log_handles
+    proc._robofuzz_log_threads = log_threads
     return proc
 
 
@@ -250,31 +324,37 @@ def wait_for_topic_data(topic_map, timeout_sec=120, min_msgs=1):
             QoSDurabilityPolicy,
         )
 
-        # Readiness topics come from different ROS 2 QoS worlds. TurtleBot4
-        # /odom is reliable + transient-local, while laser/sensor streams are
-        # often best-effort. Create a small set of compatible subscriptions so
-        # readiness depends on real samples rather than one brittle QoS choice.
-        qos_candidates = [
-            QoSProfile(depth=10),
-            QoSProfile(
-                reliability=QoSReliabilityPolicy.BEST_EFFORT,
-                history=QoSHistoryPolicy.KEEP_LAST,
-                depth=10,
-            ),
-            QoSProfile(
-                reliability=QoSReliabilityPolicy.RELIABLE,
-                durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-                history=QoSHistoryPolicy.KEEP_LAST,
-                depth=10,
-            ),
-        ]
+        default_qos = QoSProfile(depth=10)
+        best_effort_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+        transient_local_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
+
+        def qos_candidates(topic):
+            # PX4 v1.17 uXRCE-DDS state streams publish best-effort. Creating
+            # reliable readiness subscriptions for /fmu/out/* receives no data
+            # and spams reliability-incompatible warnings every fuzz round.
+            if topic.startswith("/fmu/out/"):
+                return [best_effort_qos]
+            # Other readiness topics come from different ROS 2 QoS worlds.
+            # TurtleBot4 /odom can be reliable + transient-local, while sensor
+            # streams are often best-effort. Try a compact compatibility set.
+            return [default_qos, best_effort_qos, transient_local_qos]
+
         for topic, type_name in expected.items():
             try:
                 msg_class = get_message(type_name)
             except Exception as exc:
                 graph["errors"][topic] = str(exc)
                 return False, graph
-            for qos in qos_candidates:
+            for qos in qos_candidates(topic):
                 subs.append(
                     node.create_subscription(
                         msg_class, topic, _make_cb(topic), qos

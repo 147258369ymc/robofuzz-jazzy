@@ -137,7 +137,12 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
 
         config = types.SimpleNamespace(meta_dir=tempfile.gettempdir(),
                                        seqlen=8)
-        fbk_list = [FeedbackProbe("tb4_linear_accel_ratio")]
+        fbk_list = [
+            FeedbackProbe(
+                "tb4_linear_accel_ratio",
+                prev_interesting_value=-1.0,
+            )
+        ]
 
         msg_list, _frame = sched.mutate_sequence_tb4(config, fbk_list)
 

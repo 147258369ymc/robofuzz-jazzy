@@ -14,10 +14,12 @@ import ros_utils
 from ros2_fuzzer import ros_commons
 try:
     import px4_utils
+except ImportError:
+    px4_utils = None
+try:
     from px4_prep.blacklist import blacklist as param_blacklist
     from px4_prep.blacklist import tested as param_tested
 except ImportError:
-    px4_utils = None
     param_blacklist = set()
     param_tested = set()
 from mutation_profile import (
@@ -1338,9 +1340,16 @@ class Scheduler:
             profile: Optional MutationProfile override. Defaults to px4_ros_velocity.
         """
         if profile is None:
-            if not hasattr(self, '_ros_profile'):
-                self._ros_profile = MutationProfile.px4_ros_velocity()
-            profile = self._ros_profile
+            if getattr(config, "target_profile_name", "") == "px4_v117_jazzy":
+                if not hasattr(self, '_ros_profile_v117'):
+                    self._ros_profile_v117 = (
+                        MutationProfile.px4_v117_offboard_velocity()
+                    )
+                profile = self._ros_profile_v117
+            else:
+                if not hasattr(self, '_ros_profile'):
+                    self._ros_profile = MutationProfile.px4_ros_velocity()
+                profile = self._ros_profile
 
         frame = str(time.time())
 
@@ -1369,6 +1378,24 @@ class Scheduler:
         return (self.msg_list, frame)
 
     # --- ROS mutation internals ---
+
+    def _ros_field_name(self, field):
+        return field[-2] if len(field) > 2 else field[0]
+
+    def _ros_set_field_value(self, msg, field, value):
+        field_name = self._ros_field_name(field)
+        config = getattr(self.fuzzer, "config", None)
+        if (
+            getattr(config, "target_profile_name", "") == "px4_v117_jazzy"
+            and px4_utils is not None
+            and px4_utils.set_v117_velocity_component(msg, field_name, value)
+        ):
+            return
+
+        attr_list = field[:-1]
+        attr_leaf = attr_list[-1]
+        obj = reduce(getattr, attr_list[:-1], msg)
+        setattr(obj, attr_leaf, value)
 
     def _ros_init_cycle(self, profile):
         """Initialize or reseed msg_list for a new ROS mutation cycle."""
@@ -1400,12 +1427,10 @@ class Scheduler:
         for msg_idx in range(self.num_msgs):
             msg = self.msg_list[msg_idx]
             for field in self.msg_field_list:
-                attr_list = field[:-1]
-                attr_leaf = attr_list[-1]
-                fr = profile.get_range(attr_leaf)
+                field_name = self._ros_field_name(field)
+                fr = profile.get_range(field_name)
                 data_val = fr.sample()
-                obj = reduce(getattr, attr_list[:-1], msg)
-                setattr(obj, attr_leaf, data_val)
+                self._ros_set_field_value(msg, field, data_val)
 
         self.is_new_cycle = False
 
@@ -1452,30 +1477,28 @@ class Scheduler:
         fields = random.sample(self.msg_field_list, num_fields)
         field_vals = []
         for f in fields:
-            attr_leaf = f[-2] if len(f) > 2 else f[0]
-            fr = profile.get_range(attr_leaf)
+            field_name = self._ros_field_name(f)
+            fr = profile.get_range(field_name)
             val = fr.sample_high_magnitude()
             field_vals.append((f, val))
 
-        desc = " + ".join(f"{f[0]}={v:.2f}" for f, v in field_vals)
+        desc = " + ".join(
+            f"{self._ros_field_name(f)}={v:.2f}" for f, v in field_vals
+        )
         print(f"[ros] multi-axis msgs[{start_idx}:{start_idx+block_len}] {desc}")
 
         for idx in range(start_idx, start_idx + block_len):
             msg_mutated = deepcopy(self.msg_list[idx])
             for f, val in field_vals:
-                attr_list = f[:-1]
-                attr_leaf = attr_list[-1]
-                obj = reduce(getattr, attr_list[:-1], msg_mutated)
-                setattr(obj, attr_leaf, val)
+                self._ros_set_field_value(msg_mutated, f, val)
             self.msg_list[idx] = msg_mutated
 
     def _ros_direction_flip(self, profile, start_idx, block_len):
         """Split block in half: first half gets +val, second half gets -val."""
         half_len = block_len // 2
         field = random.choice(self.msg_field_list)
-        attr_list = field[:-1]
-        attr_leaf = attr_list[-1]
-        fr = profile.get_range(attr_leaf)
+        field_name = self._ros_field_name(field)
+        fr = profile.get_range(field_name)
 
         # Generate a high-magnitude value for the flip
         val1 = fr.sample_high_magnitude()
@@ -1487,35 +1510,31 @@ class Scheduler:
             # Asymmetric range: sample from opposite end
             val2 = fr.low + (fr.high - val1)
 
-        print(f"[ros] flip {attr_leaf} msgs[{start_idx}:{start_idx+block_len}]"
+        print(f"[ros] flip {field_name} msgs[{start_idx}:{start_idx+block_len}]"
               f" {val1:.2f} -> {val2:.2f}")
 
         for idx in range(start_idx, start_idx + half_len):
             msg_mutated = deepcopy(self.msg_list[idx])
-            obj = reduce(getattr, attr_list[:-1], msg_mutated)
-            setattr(obj, attr_leaf, val1)
+            self._ros_set_field_value(msg_mutated, field, val1)
             self.msg_list[idx] = msg_mutated
         for idx in range(start_idx + half_len, start_idx + block_len):
             msg_mutated = deepcopy(self.msg_list[idx])
-            obj = reduce(getattr, attr_list[:-1], msg_mutated)
-            setattr(obj, attr_leaf, val2)
+            self._ros_set_field_value(msg_mutated, field, val2)
             self.msg_list[idx] = msg_mutated
 
     def _ros_single_block(self, profile, start_idx, block_len):
         """Set one field to a constant value across the entire block."""
         field = random.choice(self.msg_field_list)
-        attr_list = field[:-1]
-        attr_leaf = attr_list[-1]
-        fr = profile.get_range(attr_leaf)
+        field_name = self._ros_field_name(field)
+        fr = profile.get_range(field_name)
         data_val = fr.sample()
 
-        print(f"[ros] block {attr_leaf} msgs[{start_idx}:{start_idx+block_len}]"
+        print(f"[ros] block {field_name} msgs[{start_idx}:{start_idx+block_len}]"
               f" = {data_val:.2f}")
 
         for idx in range(start_idx, start_idx + block_len):
             msg_mutated = deepcopy(self.msg_list[idx])
-            obj = reduce(getattr, attr_list[:-1], msg_mutated)
-            setattr(obj, attr_leaf, data_val)
+            self._ros_set_field_value(msg_mutated, field, data_val)
             self.msg_list[idx] = msg_mutated
 
     def _ros_random_fresh(self, profile, start_idx, block_len):
@@ -1524,12 +1543,10 @@ class Scheduler:
         for idx in range(start_idx, start_idx + block_len):
             msg_mutated = deepcopy(self.msg_list[idx])
             for field in self.msg_field_list:
-                attr_list = field[:-1]
-                attr_leaf = attr_list[-1]
-                fr = profile.get_range(attr_leaf)
+                field_name = self._ros_field_name(field)
+                fr = profile.get_range(field_name)
                 data_val = fr.sample()
-                obj = reduce(getattr, attr_list[:-1], msg_mutated)
-                setattr(obj, attr_leaf, data_val)
+                self._ros_set_field_value(msg_mutated, field, data_val)
             self.msg_list[idx] = msg_mutated
 
     def mutate_sequence_tb4(self, config, fbk_list=None):

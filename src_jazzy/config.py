@@ -55,6 +55,7 @@ class RuntimeConfig:
         self.launch_command = []
         self.oracle_mode = ""
         self.moveit_planning_only = False
+        self.px4_launch_started_at = None
 
     def find_package_metadata(self):
         # read from provided meta file
