@@ -97,6 +97,10 @@ _PX4_FEEDBACK_STRATEGY_MAP = {
     "px4_v117_command_ack_anomaly_score": STRATEGY_RANDOM,
     "px4_v117_actuator_saturation_ratio": STRATEGY_SINGLE_BLOCK,
     "px4_v117_quality_score": STRATEGY_RANDOM,
+    "px4_v117_offboard_mode_mismatch_score": STRATEGY_RANDOM,
+    "px4_v117_setpoint_contract_pressure": STRATEGY_RANDOM,
+    "px4_v117_local_setpoint_contract_pressure": STRATEGY_SINGLE_BLOCK,
+    "px4_v117_attitude_setpoint_pressure": STRATEGY_MULTI_AXIS,
 }
 
 # MoveIt feedback-to-strategy mappings

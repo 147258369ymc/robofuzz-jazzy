@@ -110,6 +110,7 @@ class Px4BridgeNode:
         self._v117_vehicle_local_position = None
         self._v117_last_command_ack = None
         self._v117_param_master = None
+        self._offboard_send_count = 0
 
         if not self.use_mavlink:
             self.node_handle = rclpy.create_node(name)
@@ -765,7 +766,22 @@ class Px4BridgeNode:
             self.publish_offboard_control_mode(use_velocity=True)
             _set_position(msg, float("nan"), float("nan"), float("nan"))
             self.publish_trajectory(msg)
-            print("[offboard controller] sending:", msg)
+            self._offboard_send_count += 1
+            verbose_setpoints = (
+                os.environ.get("PX4_VERBOSE_SETPOINTS", "0") == "1"
+            )
+            if verbose_setpoints or self._offboard_send_count <= 3:
+                print("[offboard controller] sending:", msg)
+            elif self._offboard_send_count == 4:
+                print(
+                    "[offboard controller] setpoint logging summarized; "
+                    "set PX4_VERBOSE_SETPOINTS=1 for every command"
+                )
+            elif self._offboard_send_count % 40 == 0:
+                print(
+                    "[offboard controller] sent "
+                    f"{self._offboard_send_count} velocity setpoints"
+                )
 
     def put_in_air(self):
         # Climb with z=900 (strong throttle) for 50 iterations (5s).

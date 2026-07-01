@@ -202,17 +202,39 @@ def px4_error_signature(errs):
         e = str(e)
         ratio_m = re.search(r"ratio=([0-9.]+)", e)
         bucket = int(float(ratio_m.group(1)) / 0.5) if ratio_m else 0
+        axis_m = re.search(r"axis=([a-z_]+)", e)
+        axis = axis_m.group(1) if axis_m else ""
 
         if "px4_v117_velocity_bound_violation" in e:
-            sigs.add(("velocity_bound", "", bucket))
+            if "horizontal" in e:
+                axis = "horizontal"
+            elif "climb" in e:
+                axis = "climb"
+            elif "descent" in e:
+                axis = "descent"
+            sigs.add(("velocity_bound", axis, bucket))
         elif "px4_v117_accel_bound_violation" in e:
-            sigs.add(("accel_bound", "", bucket))
+            if "horizontal" in e:
+                axis = "horizontal"
+            elif "vertical" in e:
+                axis = "vertical"
+            sigs.add(("accel_bound", axis, bucket))
         elif "px4_v117_jerk_bound_violation" in e:
-            sigs.add(("jerk_bound", "", bucket))
+            sigs.add(("jerk_bound", axis, bucket))
         elif "px4_v117_attitude_rate_violation" in e:
-            sigs.add(("attitude_rate", "", bucket))
+            if "tilt" in e:
+                axis = "tilt"
+            elif "angular_rate" in e and not axis:
+                axis = "angular_rate"
+            sigs.add(("attitude_rate", axis, bucket))
         elif "px4_v117_control_mode_cascade_violation" in e:
             sigs.add(("control_mode_cascade", "", 0))
+        elif "px4_v117_offboard_input_contract_violation" in e:
+            sigs.add(("offboard_input_contract", "", 0))
+        elif "px4_v117_setpoint_contract_violation" in e:
+            sigs.add(("setpoint_contract", "", 0))
+        elif "px4_v117_attitude_setpoint_invalid" in e:
+            sigs.add(("attitude_setpoint", "", 0))
         elif "px4_v117_offboard_state_contradiction" in e:
             sigs.add(("offboard_state", "", 0))
         elif "px4_v117_failsafe_anomaly" in e:
@@ -226,6 +248,86 @@ def px4_error_signature(errs):
         else:
             sigs.add(("px4_other", "", hash(e) % 1000))
     return sigs
+
+
+def write_px4_error_summary(
+    config,
+    frame,
+    errs,
+    feedback_list,
+    ulg_path=None,
+    signatures=None,
+):
+    """Write a compact PX4 evidence sidecar next to the error text file."""
+    import json
+    import os
+
+    def json_safe(value):
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        if hasattr(value, "item"):
+            return json_safe(value.item())
+        if isinstance(value, (list, tuple)):
+            return [json_safe(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(key): json_safe(item)
+                for key, item in value.items()
+            }
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return str(value)
+
+    feedback = {
+        fbk.name: json_safe(fbk.value)
+        for fbk in feedback_list
+        if fbk.value is not None
+    }
+    summary = {
+        "frame": str(frame),
+        "errors": [str(err) for err in errs],
+        "signatures": [
+            json_safe(sig)
+            for sig in sorted(signatures or px4_error_signature(errs))
+        ],
+        "ulg_path": str(ulg_path) if ulg_path else None,
+        "feedback": feedback,
+        "quality": {
+            "max_altitude": feedback.get("max_altitude"),
+            "state_sample_count": feedback.get(
+                "px4_v117_state_sample_count"
+            ),
+            "setpoint_sample_count": feedback.get(
+                "px4_v117_setpoint_sample_count"
+            ),
+            "quality_score": feedback.get("px4_v117_quality_score"),
+        },
+        "key_ratios": {
+            name: feedback.get(name)
+            for name in (
+                "px4_v117_horizontal_speed_ratio",
+                "px4_v117_climb_speed_ratio",
+                "px4_v117_descent_speed_ratio",
+                "px4_v117_horizontal_accel_ratio",
+                "px4_v117_vertical_accel_ratio",
+                "px4_v117_jerk_ratio",
+                "px4_v117_tilt_ratio",
+                "px4_v117_roll_rate_ratio",
+                "px4_v117_pitch_rate_ratio",
+                "px4_v117_yaw_rate_ratio",
+                "px4_v117_failsafe_pressure",
+                "px4_v117_actuator_saturation_ratio",
+                "px4_v117_offboard_mode_mismatch_score",
+                "px4_v117_setpoint_contract_pressure",
+                "px4_v117_local_setpoint_contract_pressure",
+                "px4_v117_attitude_setpoint_pressure",
+            )
+        },
+    }
+    path = os.path.join(config.error_dir, f"error-{frame}.summary.json")
+    with open(path, "w", encoding="utf-8") as fp:
+        json.dump(summary, fp, indent=2, sort_keys=True)
 
 
 class SeedQueue:
@@ -1521,6 +1623,30 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 min_threshold=0.5,
             )
             fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_offboard_mode_mismatch_score",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_setpoint_contract_pressure",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_local_setpoint_contract_pressure",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "px4_v117_attitude_setpoint_pressure",
+                FeedbackType.INC,
+                min_threshold=0.5,
+            )
+            fbk_list.append(fbk)
             # PX4 v1.17 ULG-backed setpoint/state consistency metrics.
             # They are feedback-first in phase 2: useful for steering
             # mutation without immediately turning normal settling lag into
@@ -2269,6 +2395,7 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 moveit_error_is_novel = False
                 tb4_error_is_novel = False
                 px4_error_is_novel = False
+                px4_error_sigs = set()
                 if fuzzer.config.test_moveit and errs:
                     if not hasattr(scheduler, '_seen_error_signatures'):
                         scheduler._seen_error_signatures = set()
@@ -2300,15 +2427,19 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 if fuzzer.config.px4_sitl and errs:
                     if not hasattr(scheduler, '_seen_px4_error_signatures'):
                         scheduler._seen_px4_error_signatures = set()
-                    sigs = px4_error_signature(errs)
-                    new_sigs = sigs - scheduler._seen_px4_error_signatures
+                    px4_error_sigs = px4_error_signature(errs)
+                    new_sigs = (
+                        px4_error_sigs
+                        - scheduler._seen_px4_error_signatures
+                    )
                     if new_sigs:
                         px4_error_is_novel = True
                         scheduler._seen_px4_error_signatures |= new_sigs
                         print(f"[dedup] NEW PX4 error signature(s): {new_sigs}")
                     else:
                         print(
-                            f"[dedup] duplicate PX4 error signature(s): {sigs} "
+                            f"[dedup] duplicate PX4 error signature(s): "
+                            f"{px4_error_sigs} "
                             "— will not re-queue as interesting"
                         )
 
@@ -2363,6 +2494,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     if ulg_path:
                         preserve_ulg_on_error(
                             ulg_path, fuzzer.config.log_dir, frame)
+                    write_px4_error_summary(
+                        fuzzer.config,
+                        frame,
+                        errs,
+                        fbk_list,
+                        ulg_path=ulg_path,
+                        signatures=px4_error_sigs,
+                    )
                 else:
                     copy_repeat = 1 if fuzzer.config.test_moveit else repeat
                     for exec_cnt in range(copy_repeat):

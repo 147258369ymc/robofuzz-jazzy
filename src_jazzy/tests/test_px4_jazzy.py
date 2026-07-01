@@ -6,7 +6,9 @@ import tempfile
 import time
 import types
 import unittest
+from contextlib import redirect_stdout
 from collections import deque
+from io import StringIO
 from unittest import mock
 
 
@@ -344,6 +346,8 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
         expected = {
             "vehicle_control_mode": "/VehicleControlMode_PubSubTopic",
             "vehicle_land_detected": "/VehicleLandDetected_PubSubTopic",
+            "vehicle_local_position_setpoint":
+                "/VehicleLocalPositionSetpoint_PubSubTopic",
             "vehicle_command_ack": "/VehicleCommandAck_PubSubTopic",
             "offboard_control_mode": "/OffboardControlMode_PubSubTopic",
             "vehicle_command": "/VehicleCommand_PubSubTopic",
@@ -404,6 +408,41 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
         self.assertEqual(4, param_values["COM_DLL_EXCEPT"])
         self.assertEqual(4, param_values["COM_RCL_EXCEPT"])
         self.assertEqual(30, param_values["COM_RC_LOSS_T"])
+
+    def test_px4_v117_setpoint_logging_is_summarized_by_default(self):
+        px4_utils = import_px4_utils_with_fakes()
+        bridge = px4_utils.Px4BridgeNode(
+            use_mavlink=False,
+            target_profile_name="px4_v117_jazzy",
+        )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            output = StringIO()
+            with redirect_stdout(output):
+                for _ in range(5):
+                    bridge.send_command(px4_utils.TrajectorySetpoint())
+
+        log = output.getvalue()
+        self.assertEqual(3, log.count("[offboard controller] sending:"))
+        self.assertIn("setpoint logging summarized", log)
+
+    def test_px4_v117_setpoint_logging_can_be_verbose(self):
+        px4_utils = import_px4_utils_with_fakes()
+        bridge = px4_utils.Px4BridgeNode(
+            use_mavlink=False,
+            target_profile_name="px4_v117_jazzy",
+        )
+
+        with mock.patch.dict(os.environ, {"PX4_VERBOSE_SETPOINTS": "1"}):
+            output = StringIO()
+            with redirect_stdout(output):
+                for _ in range(5):
+                    bridge.send_command(px4_utils.TrajectorySetpoint())
+
+        self.assertEqual(
+            5,
+            output.getvalue().count("[offboard controller] sending:"),
+        )
 
     def test_px4_v117_flight_quality_summary_detects_not_armed_or_airborne(self):
         px4_utils = import_px4_utils_with_fakes()
@@ -891,7 +930,7 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
         self.assertTrue(any("climb" in err for err in errs))
         self.assertTrue(any("descent" in err for err in errs))
 
-    def test_px4_v117_accel_and_jerk_violation_require_sustained_samples(self):
+    def test_px4_v117_accel_violation_remains_error_but_jerk_is_feedback(self):
         from oracles import px4
 
         state_dict = self._normal_px4_v117_state()
@@ -921,7 +960,7 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
         self.assertTrue(any(
             "px4_v117_accel_bound_violation" in err for err in errs
         ))
-        self.assertTrue(any(
+        self.assertFalse(any(
             "px4_v117_jerk_bound_violation" in err for err in errs
         ))
 
@@ -1076,6 +1115,229 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
         ))
         self.assertEqual(1.0, feedback_list[0].value)
 
+    def test_px4_v117_offboard_velocity_mode_selector_violation(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/OffboardControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                position=True,
+                velocity=False,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_offboard_mode_mismatch_score",
+                     FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertTrue(any(
+            "px4_v117_offboard_input_contract_violation" in err
+            for err in errs
+        ))
+        self.assertEqual(1.0, feedback_list[0].value)
+
+    def test_px4_v117_velocity_mode_trajectory_setpoint_contract(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/OffboardControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+        ]
+        state_dict["/TrajectorySetpoint_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                position=[math.nan, math.nan, math.nan],
+                velocity=[0.0, 0.0, 0.0],
+                acceleration=[math.nan, math.nan, math.nan],
+                yaw=0.0,
+                yawspeed=0.0,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                position=[1.0, math.nan, math.nan],
+                velocity=[0.2, 0.0, 0.0],
+                acceleration=[math.nan, math.nan, math.nan],
+                yaw=0.0,
+                yawspeed=0.0,
+            )),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_setpoint_contract_pressure",
+                     FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertTrue(any(
+            "px4_v117_setpoint_contract_violation" in err
+            for err in errs
+        ))
+        self.assertEqual(1.0, feedback_list[0].value)
+
+    def test_px4_v117_velocity_mode_local_setpoint_contract(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/OffboardControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+        ]
+        state_dict["/VehicleLocalPositionSetpoint_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                x=math.nan,
+                y=math.nan,
+                z=math.nan,
+                vx=0.0,
+                vy=0.0,
+                vz=0.0,
+                yaw=0.0,
+                yawspeed=0.0,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                x=0.5,
+                y=math.nan,
+                z=math.nan,
+                vx=0.2,
+                vy=0.0,
+                vz=0.0,
+                yaw=0.0,
+                yawspeed=0.0,
+            )),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_local_setpoint_contract_pressure",
+                     FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertTrue(any(
+            "px4_v117_setpoint_contract_violation" in err
+            for err in errs
+        ))
+        self.assertEqual(1.0, feedback_list[0].value)
+
+    def test_px4_v117_attitude_setpoint_contract_detects_invalid_output(self):
+        from feedback import Feedback, FeedbackType
+        from oracles import px4
+
+        state_dict = self._normal_px4_v117_state()
+        state_dict["/OffboardControlMode_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                position=False,
+                velocity=True,
+                acceleration=False,
+                attitude=False,
+                body_rate=False,
+                thrust_and_torque=False,
+                direct_actuator=False,
+            )),
+        ]
+        state_dict["/VehicleAttitudeSetpoint_PubSubTopic"] = [
+            (1_000_000_000, self._msg(
+                timestamp=1_000_000,
+                q_d=[1.0, 0.0, 0.0, 0.0],
+                thrust_body=[0.0, 0.0, -0.5],
+                yaw_sp_move_rate=0.0,
+            )),
+            (1_100_000_000, self._msg(
+                timestamp=1_100_000,
+                q_d=[2.0, 0.0, 0.0, 0.0],
+                thrust_body=[0.0, 0.0, -1.2],
+                yaw_sp_move_rate=0.0,
+            )),
+        ]
+        feedback_list = [
+            Feedback("px4_v117_attitude_setpoint_pressure",
+                     FeedbackType.INC),
+        ]
+
+        errs = px4.check(
+            self._px4_v117_config(), [], state_dict, feedback_list
+        )
+
+        self.assertTrue(any(
+            "px4_v117_attitude_setpoint_invalid" in err for err in errs
+        ))
+        self.assertGreater(feedback_list[0].value, 0.0)
+
     def test_px4_v117_feedback_registration_and_mapping(self):
         fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
         mutation_profile_path = os.path.join(SRC_DIR, "mutation_profile.py")
@@ -1101,6 +1363,10 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
             "px4_v117_command_ack_anomaly_score",
             "px4_v117_actuator_saturation_ratio",
             "px4_v117_quality_score",
+            "px4_v117_offboard_mode_mismatch_score",
+            "px4_v117_setpoint_contract_pressure",
+            "px4_v117_local_setpoint_contract_pressure",
+            "px4_v117_attitude_setpoint_pressure",
         ]
         for name in feedback_names:
             self.assertIn(name, fuzzer_text)
@@ -1128,13 +1394,76 @@ class Px4JazzyAdaptationTests(unittest.TestCase):
 
         sigs = px4_error_signature([
             "px4_v117_velocity_bound_violation: horizontal ratio=1.2",
-            "px4_v117_accel_bound_violation: horizontal ratio=2.0",
+            "px4_v117_accel_bound_violation: vertical ratio=2.0",
+            "px4_v117_attitude_rate_violation: angular_rate axis=yaw ratio=5.7",
+            "px4_v117_attitude_rate_violation: tilt ratio=1.6",
             "px4_v117_failsafe_anomaly: spurious failsafe",
+            "px4_v117_offboard_input_contract_violation: expected velocity mode",
+            "px4_v117_setpoint_contract_violation: velocity mode position finite",
+            "px4_v117_attitude_setpoint_invalid: thrust_body outside [-1, 1]",
         ])
 
-        self.assertIn(("velocity_bound", "", 2), sigs)
-        self.assertIn(("accel_bound", "", 4), sigs)
+        self.assertIn(("velocity_bound", "horizontal", 2), sigs)
+        self.assertIn(("accel_bound", "vertical", 4), sigs)
+        self.assertIn(("attitude_rate", "yaw", 11), sigs)
+        self.assertIn(("attitude_rate", "tilt", 3), sigs)
         self.assertIn(("failsafe", "", 0), sigs)
+        self.assertIn(("offboard_input_contract", "", 0), sigs)
+        self.assertIn(("setpoint_contract", "", 0), sigs)
+        self.assertIn(("attitude_setpoint", "", 0), sigs)
+
+    def test_px4_v117_error_summary_writer_records_feedback_and_signatures(self):
+        import ast
+        import numpy as np
+        from feedback import Feedback, FeedbackType
+
+        fuzzer_path = os.path.join(SRC_DIR, "fuzzer.py")
+        with open(fuzzer_path, "r", encoding="utf-8") as fp:
+            module = ast.parse(fp.read(), filename=fuzzer_path)
+        funcs = [
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {
+                "px4_error_signature",
+                "write_px4_error_summary",
+            }
+        ]
+        compiled = compile(
+            ast.Module(body=funcs, type_ignores=[]),
+            fuzzer_path,
+            "exec",
+        )
+        namespace = {}
+        exec(compiled, namespace)
+
+        feedback_list = [
+            Feedback("px4_v117_vertical_accel_ratio", FeedbackType.INC),
+            Feedback("px4_v117_jerk_ratio", FeedbackType.INC),
+            Feedback("px4_v117_quality_score", FeedbackType.INC),
+        ]
+        feedback_list[0].update_value(np.float32(1.82))
+        feedback_list[1].update_value(np.float64(5.7))
+        feedback_list[2].update_value(1.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = types.SimpleNamespace(error_dir=tmpdir)
+            namespace["write_px4_error_summary"](
+                config,
+                "frame-1",
+                ["px4_v117_accel_bound_violation: vertical ratio=1.82"],
+                feedback_list,
+                "/tmp/example.ulg",
+                {("accel_bound", "vertical", 3)},
+            )
+            summary_path = os.path.join(tmpdir, "error-frame-1.summary.json")
+            self.assertTrue(os.path.exists(summary_path))
+            with open(summary_path, "r", encoding="utf-8") as fp:
+                summary = fp.read()
+
+        self.assertIn("px4_v117_accel_bound_violation", summary)
+        self.assertIn("px4_v117_vertical_accel_ratio", summary)
+        self.assertIn("accel_bound", summary)
+        self.assertIn("/tmp/example.ulg", summary)
 
 
 if __name__ == "__main__":

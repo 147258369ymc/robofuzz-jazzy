@@ -36,6 +36,8 @@ ULG_TO_ROSTOPIC = {
     "vehicle_status": "/VehicleStatus_PubSubTopic",
     "vehicle_control_mode": "/VehicleControlMode_PubSubTopic",
     "vehicle_land_detected": "/VehicleLandDetected_PubSubTopic",
+    "vehicle_local_position_setpoint":
+        "/VehicleLocalPositionSetpoint_PubSubTopic",
     "vehicle_command_ack": "/VehicleCommandAck_PubSubTopic",
     "vehicle_command": "/VehicleCommand_PubSubTopic",
     "offboard_control_mode": "/OffboardControlMode_PubSubTopic",

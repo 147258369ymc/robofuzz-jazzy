@@ -210,6 +210,42 @@ def _raw_finite(value):
     return value
 
 
+def _raw_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _raw_vector(msg, field_name, length=3):
+    try:
+        vector = getattr(msg, field_name)
+    except AttributeError:
+        return None
+
+    values = []
+    for idx in range(length):
+        try:
+            value = _raw_float(vector[idx])
+        except (IndexError, KeyError, TypeError):
+            return None
+        if value is None:
+            return None
+        values.append(value)
+    return values
+
+
+def _all_nan(values):
+    return bool(values) and all(math.isnan(value) for value in values)
+
+
+def _all_finite(values):
+    return bool(values) and all(
+        not math.isnan(value) and not math.isinf(value)
+        for value in values
+    )
+
+
 def _msg_bool(msg, field_name):
     try:
         return bool(getattr(msg, field_name))
@@ -300,6 +336,31 @@ def _has_sustained_true(values, required=2):
     return False
 
 
+def _offboard_mode_has_selector_fields(msg):
+    return hasattr(msg, "velocity") and hasattr(msg, "position")
+
+
+def _offboard_mode_is_velocity_only(msg):
+    if not _offboard_mode_has_selector_fields(msg):
+        return False
+    return (
+        _msg_bool(msg, "velocity")
+        and not _msg_bool(msg, "position")
+        and not _msg_bool(msg, "acceleration")
+        and not _msg_bool(msg, "attitude")
+        and not _msg_bool(msg, "body_rate")
+        and not _msg_bool(msg, "thrust_and_torque")
+        and not _msg_bool(msg, "direct_actuator")
+    )
+
+
+def _after_velocity_mode_start(metrics, ts, msg):
+    start_ts = metrics.get("_velocity_mode_start_ns")
+    if start_ts is None:
+        return False
+    return _record_ts_ns(ts, msg) >= start_ts
+
+
 def collect_px4_v117_evidence(state_dict):
     return {
         "status": _safe_get(state_dict, "/VehicleStatus_PubSubTopic"),
@@ -323,6 +384,12 @@ def collect_px4_v117_evidence(state_dict):
         "failsafe_flags": _safe_get(state_dict, "/FailsafeFlags_PubSubTopic"),
         "trajectory_setpoint": _safe_get(
             state_dict, "/TrajectorySetpoint_PubSubTopic"
+        ),
+        "local_position_setpoint": _safe_get(
+            state_dict, "/VehicleLocalPositionSetpoint_PubSubTopic"
+        ),
+        "attitude_setpoint": _safe_get(
+            state_dict, "/VehicleAttitudeSetpoint_PubSubTopic"
         ),
         "rates_setpoint": _safe_get(
             state_dict, "/VehicleRatesSetpoint_PubSubTopic"
@@ -367,7 +434,12 @@ def _initial_px4_v117_metrics():
         "px4_v117_failsafe_pressure": 0.0,
         "px4_v117_command_ack_anomaly_score": 0.0,
         "px4_v117_actuator_saturation_ratio": 0.0,
+        "px4_v117_offboard_mode_mismatch_score": 0.0,
+        "px4_v117_setpoint_contract_pressure": 0.0,
+        "px4_v117_local_setpoint_contract_pressure": 0.0,
+        "px4_v117_attitude_setpoint_pressure": 0.0,
         "px4_v117_quality_score": 0.0,
+        "_velocity_mode_start_ns": None,
         "_armed_seen": False,
         "_offboard_seen": False,
         "_airborne_seen": False,
@@ -385,6 +457,10 @@ def _initial_px4_v117_metrics():
         "_offboard_enabled_false_while_nav_offboard": [],
         "_heartbeat_gap_over": [],
         "_spurious_failsafe_over": [],
+        "_offboard_mode_mismatch_over": [],
+        "_trajectory_setpoint_contract_over": [],
+        "_local_setpoint_contract_over": [],
+        "_attitude_setpoint_invalid_over": [],
         "_actuator_saturation_duration": 0.0,
         "_command_ack_anomaly": False,
     }
@@ -630,10 +706,25 @@ def _compute_px4_v117_attitude_metrics(evidence, metrics):
 
 def _compute_px4_v117_mode_metrics(evidence, metrics):
     status_by_ts = evidence["status"]
-    hb_samples = sorted(
-        _record_ts_ns(ts, hb)
-        for ts, hb in evidence["offboard_heartbeat"]
+    hb_records = sorted(
+        (
+            (_record_ts_ns(ts, hb), ts, hb)
+            for ts, hb in evidence["offboard_heartbeat"]
+        ),
+        key=lambda record: record[0],
     )
+    hb_samples = [record[0] for record in hb_records]
+
+    for hb_ts, _, hb in hb_records:
+        if metrics["_velocity_mode_start_ns"] is None:
+            if _offboard_mode_is_velocity_only(hb):
+                metrics["_velocity_mode_start_ns"] = hb_ts
+            continue
+        if _offboard_mode_has_selector_fields(hb):
+            mismatch = not _offboard_mode_is_velocity_only(hb)
+            metrics["_offboard_mode_mismatch_over"].append(mismatch)
+            if mismatch:
+                metrics["px4_v117_offboard_mode_mismatch_score"] = 1.0
 
     for ts, status in status_by_ts:
         if _sample_is_armed(status):
@@ -696,6 +787,111 @@ def _compute_px4_v117_mode_metrics(evidence, metrics):
         if result is not None and int(result) != 0:
             metrics["_command_ack_anomaly"] = True
             metrics["px4_v117_command_ack_anomaly_score"] = 1.0
+
+
+def _compute_px4_v117_setpoint_contract_metrics(evidence, metrics):
+    for ts, setpoint in evidence["trajectory_setpoint"]:
+        if not _after_velocity_mode_start(metrics, ts, setpoint):
+            continue
+        violation = False
+
+        position = _raw_vector(setpoint, "position", length=3)
+        if position is not None and not _all_nan(position):
+            violation = True
+
+        acceleration = _raw_vector(setpoint, "acceleration", length=3)
+        if acceleration is not None and not _all_nan(acceleration):
+            violation = True
+
+        velocity = _raw_vector(setpoint, "velocity", length=3)
+        if velocity is not None and not _all_finite(velocity):
+            violation = True
+
+        yaw = _raw_float(getattr(setpoint, "yaw", None))
+        if yaw is not None:
+            if math.isnan(yaw) or math.isinf(yaw) or abs(yaw) > math.pi + 0.01:
+                violation = True
+
+        yawspeed = _raw_float(getattr(setpoint, "yawspeed", None))
+        if yawspeed is not None:
+            if math.isnan(yawspeed) or math.isinf(yawspeed):
+                violation = True
+
+        metrics["_trajectory_setpoint_contract_over"].append(violation)
+        if violation:
+            metrics["px4_v117_setpoint_contract_pressure"] = 1.0
+
+    for ts, setpoint in evidence["local_position_setpoint"]:
+        if not _after_velocity_mode_start(metrics, ts, setpoint):
+            continue
+        violation = False
+
+        position = [
+            _raw_float(getattr(setpoint, field_name, None))
+            for field_name in ("x", "y", "z")
+        ]
+        if all(value is not None for value in position):
+            if not _all_nan(position):
+                violation = True
+
+        velocity = [
+            _raw_float(getattr(setpoint, field_name, None))
+            for field_name in ("vx", "vy", "vz")
+        ]
+        if all(value is not None for value in velocity):
+            if not _all_finite(velocity):
+                violation = True
+
+        yaw = _raw_float(getattr(setpoint, "yaw", None))
+        if yaw is not None:
+            if math.isnan(yaw) or math.isinf(yaw) or abs(yaw) > math.pi + 0.01:
+                violation = True
+
+        yawspeed = _raw_float(getattr(setpoint, "yawspeed", None))
+        if yawspeed is not None:
+            if math.isnan(yawspeed) or math.isinf(yawspeed):
+                violation = True
+
+        metrics["_local_setpoint_contract_over"].append(violation)
+        if violation:
+            metrics["px4_v117_local_setpoint_contract_pressure"] = 1.0
+
+
+def _compute_px4_v117_attitude_setpoint_metrics(evidence, metrics):
+    yawrate_limit = math.radians(PX4_DEFAULTS["MC_YAWRATE_MAX"])
+    for ts, setpoint in evidence["attitude_setpoint"]:
+        if not _after_velocity_mode_start(metrics, ts, setpoint):
+            continue
+        violation = False
+
+        q_d = _raw_vector(setpoint, "q_d", length=4)
+        if q_d is not None:
+            if not _all_finite(q_d):
+                violation = True
+            else:
+                norm = math.sqrt(sum(value * value for value in q_d))
+                if norm < 0.8 or norm > 1.2:
+                    violation = True
+
+        thrust = _raw_vector(setpoint, "thrust_body", length=3)
+        if thrust is not None:
+            if not _all_finite(thrust):
+                violation = True
+            elif any(abs(value) > 1.0 + 1e-3 for value in thrust):
+                violation = True
+
+        yaw_sp_move_rate = _raw_float(
+            getattr(setpoint, "yaw_sp_move_rate", None)
+        )
+        if yaw_sp_move_rate is not None:
+            if math.isnan(yaw_sp_move_rate) or math.isinf(yaw_sp_move_rate):
+                violation = True
+            elif abs(yaw_sp_move_rate) > yawrate_limit * 1.05:
+                violation = True
+
+        metrics["_attitude_setpoint_invalid_over"].append(violation)
+        if violation:
+            metrics["px4_v117_attitude_setpoint_pressure"] = 1.0
 
 
 def _compute_px4_v117_tracking_metrics(evidence, metrics):
@@ -783,6 +979,8 @@ def compute_px4_v117_metrics(config, evidence):
     _compute_px4_v117_mode_metrics(evidence, metrics)
     _compute_px4_v117_local_position_metrics(evidence, metrics)
     _compute_px4_v117_attitude_metrics(evidence, metrics)
+    _compute_px4_v117_setpoint_contract_metrics(evidence, metrics)
+    _compute_px4_v117_attitude_setpoint_metrics(evidence, metrics)
     _compute_px4_v117_tracking_metrics(evidence, metrics)
     _compute_px4_v117_actuator_metrics(evidence, metrics)
     metrics["combined_tilt_velocity"] = (
@@ -845,14 +1043,11 @@ def classify_px4_v117_errors(config, evidence, metrics):
             "px4_v117_accel_bound_violation: vertical "
             f"ratio={metrics['px4_v117_vertical_accel_ratio']:.2f}"
         )
-    if (
-        len(evidence["local_position"]) >= 5
-        and _has_sustained_true(metrics["_jerk_over"])
-    ):
-        errs.append(
-            "px4_v117_jerk_bound_violation: "
-            f"ratio={metrics['px4_v117_jerk_ratio']:.2f}"
-        )
+    # MPC_JERK_MAX is mode-gated in the PX4 parameter reference. For the
+    # current Offboard velocity-setpoint profile, position/acceleration are
+    # intentionally NaN and the input can contain external velocity steps.
+    # Keep jerk as feedback pressure, but do not classify jerk-only response
+    # as a high-confidence target bug.
 
     if _has_sustained_true(metrics["_tilt_over"]):
         errs.append(
@@ -860,13 +1055,16 @@ def classify_px4_v117_errors(config, evidence, metrics):
             f"ratio={metrics['px4_v117_tilt_ratio']:.2f}"
         )
     if _has_sustained_true(metrics["_rate_over"]):
-        max_rate_ratio = max(
-            metrics["px4_v117_roll_rate_ratio"],
-            metrics["px4_v117_pitch_rate_ratio"],
-            metrics["px4_v117_yaw_rate_ratio"],
+        axis, max_rate_ratio = max(
+            (
+                ("roll", metrics["px4_v117_roll_rate_ratio"]),
+                ("pitch", metrics["px4_v117_pitch_rate_ratio"]),
+                ("yaw", metrics["px4_v117_yaw_rate_ratio"]),
+            ),
+            key=lambda item: item[1],
         )
         errs.append(
-            "px4_v117_attitude_rate_violation: angular_rate "
+            f"px4_v117_attitude_rate_violation: angular_rate axis={axis} "
             f"ratio={max_rate_ratio:.2f}"
         )
 
@@ -874,6 +1072,38 @@ def classify_px4_v117_errors(config, evidence, metrics):
         errs.append(
             "px4_v117_control_mode_cascade_violation: "
             "higher-level control enabled without lower-level cascade"
+        )
+
+    if _has_sustained_true(
+        metrics["_offboard_mode_mismatch_over"], required=1
+    ):
+        errs.append(
+            "px4_v117_offboard_input_contract_violation: "
+            "expected velocity-only OffboardControlMode during fuzz phase"
+        )
+
+    if _has_sustained_true(
+        metrics["_trajectory_setpoint_contract_over"], required=1
+    ):
+        errs.append(
+            "px4_v117_setpoint_contract_violation: velocity mode "
+            "TrajectorySetpoint position/acceleration/yaw contract broken"
+        )
+
+    if _has_sustained_true(
+        metrics["_local_setpoint_contract_over"], required=1
+    ):
+        errs.append(
+            "px4_v117_setpoint_contract_violation: velocity mode "
+            "VehicleLocalPositionSetpoint position/velocity contract broken"
+        )
+
+    if _has_sustained_true(
+        metrics["_attitude_setpoint_invalid_over"], required=1
+    ):
+        errs.append(
+            "px4_v117_attitude_setpoint_invalid: generated attitude setpoint "
+            "has invalid quaternion, thrust, or yaw-rate command"
         )
 
     heartbeat_observed = bool(evidence["offboard_heartbeat"])

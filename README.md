@@ -215,6 +215,97 @@ kept conservative:
 | `--test-moveit` | Alias for `--target-profile moveit2_jazzy`. |
 | PX4 legacy shortcuts | Kept legacy until the PX4 Jazzy adapter is fully validated. |
 
+## Specification Preprocessing and OracleIR
+
+The specification corpus under `system_doc/` is preprocessed into `SpecBlock`
+JSON files before OracleIR generation. The generated OracleIR YAML files are
+research artifacts under `src_jazzy/oracle_ir/specs/<target>/`; they guide
+human/LLM oracle design, while the executable runtime checks live in
+`src_jazzy/oracles/`.
+
+### Preprocess the corpus
+
+Run preprocessing from the repository root:
+
+```bash
+cd /home/ymc/RoboFuzz-jazzy
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m system_doc.preprocessing.run_pipeline --target moveit2_panda
+
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m system_doc.preprocessing.run_pipeline --target turtlebot4_jazzy
+
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m system_doc.preprocessing.run_pipeline --target px4_v117_jazzy
+```
+
+Outputs are written to:
+
+```text
+system_doc/preprocessed/<target>/blocks/
+system_doc/preprocessed/<target>/index.json
+```
+
+Use `-v` when debugging extraction or tag assignment:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m system_doc.preprocessing.run_pipeline --target px4_v117_jazzy -v
+```
+
+### Generate OracleIR with the agent
+
+Generate OracleIR in small batches by target and tag:
+
+```bash
+cd /home/ymc/RoboFuzz-jazzy
+ORACLE_AGENT_MAX_TURNS=10 \
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m src_jazzy.oracle_ir.agent.generate \
+  --target px4_v117_jazzy \
+  --tag velocity_constraint \
+  --mode agent
+```
+
+Common batch tags:
+
+| Target | Useful tags |
+| --- | --- |
+| `moveit2_panda` | `oracle_joint_velocity_bound_candidate`, `oracle_joint_acceleration_bound_candidate`, `oracle_joint_jerk_bound_candidate` |
+| `turtlebot4_jazzy` | `oracle_velocity_bound_candidate`, `oracle_acceleration_bound_candidate`, `cmd_odom_consistency`, `scan_range_constraint` |
+| `px4_v117_jazzy` | `velocity_constraint`, `acceleration_constraint`, `attitude_constraint`, `offboard_constraint`, `failsafe_constraint`, `actuator_constraint`, `sensor_validity` |
+
+Generate a single block when reviewing or repairing one rule:
+
+```bash
+ORACLE_AGENT_MAX_TURNS=10 \
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m src_jazzy.oracle_ir.agent.generate \
+  --target px4_v117_jazzy \
+  --block-id px4_v117_jazzy.parameter.MPC_XY_VEL_MAX \
+  --mode agent
+```
+
+Preview a prompt without calling the API:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m src_jazzy.oracle_ir.agent.generate \
+  --target px4_v117_jazzy \
+  --tag velocity_constraint \
+  --mode agent \
+  --dry-run
+```
+
+Optional OracleIR quality check:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/robofuzz_jazzy_pycache \
+python3 -m src_jazzy.oracle_ir.evaluation.run_eval \
+  --target px4_v117_jazzy \
+  --spec-dir src_jazzy/oracle_ir/specs/px4_v117_jazzy
+```
+
 ## Upstream Attribution
 
 RoboFuzz was originally published as:
