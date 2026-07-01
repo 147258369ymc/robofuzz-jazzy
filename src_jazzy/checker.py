@@ -23,6 +23,7 @@ import oracles.turtlebot
 import oracles.px4
 import oracles.moveit
 import oracles.rosidl
+import oracles.slam
 
 
 class StateMonitorNode(Node):
@@ -141,6 +142,13 @@ def run_checks(config, msg_list, state_dict, feedback_list=[]):
             return errs
 
         errs = oracles.turtlesim.check(config, msg_list, pose_list, feedback_list)
+
+    elif getattr(config, "oracle_mode", "") == "slam_toolbox_jazzy":
+        if "/pose" not in state_dict and "/sim_ground_truth_pose" not in state_dict:
+            print("[checker] no slam_toolbox state available")
+            return errs
+
+        errs = oracles.slam.check(config, msg_list, state_dict, feedback_list)
 
     elif getattr(config, "tb4_sitl", False):
         if "/odom" not in state_dict and "/scan" not in state_dict:

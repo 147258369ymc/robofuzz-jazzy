@@ -12,6 +12,7 @@ Target profiles:
   turtlebot4_jazzy
   px4_v117_jazzy
   moveit2_jazzy
+  slam_toolbox_jazzy
 
 Environment overrides:
   TURTLEBOT4_HEADLESS=1|0
@@ -224,6 +225,111 @@ run_moveit2() {
   exec ros2 launch "${launch_pkg}" "${launch_file}" "${launch_args[@]}"
 }
 
+slam_params_file() {
+  # Resolve the slam_toolbox params file: env override, else the in-repo
+  # official TurtleBot4 slam params, else empty (node built-in defaults).
+  local override="${SLAM_PARAMS_FILE:-}"
+  if [[ -n "${override}" && -f "${override}" ]]; then
+    printf '%s\n' "${override}"
+    return
+  fi
+  local repo_params="${ROOT_DIR}/system_doc/turtlebot4_clean/params/turtlebot4_navigation.slam.yaml"
+  if [[ -f "${repo_params}" ]]; then
+    printf '%s\n' "${repo_params}"
+  fi
+}
+
+start_slam_toolbox_when_ready() {
+  # Wait for the TurtleBot4 base to publish /scan, then launch slam_toolbox.
+  # Runs as a background subshell of run_slam_toolbox and exec's the node so
+  # the SLAM process is tracked by this subshell's PID for trap-based cleanup.
+  local params_file="$1"
+  local node="${SLAM_TOOLBOX_NODE:-sync_slam_toolbox_node}"
+  local waited=0
+  while [[ "${waited}" -lt 120 ]]; do
+    if ros2 topic list 2>/dev/null | grep -qx "/scan"; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  # Let the tf tree (odom->base_link) and first scans settle.
+  sleep 3
+  echo "slam_toolbox_jazzy stack: launching ${node}"
+  if [[ -n "${params_file}" ]]; then
+    exec ros2 run slam_toolbox "${node}" \
+      --ros-args --params-file "${params_file}" -p use_sim_time:=true
+  else
+    exec ros2 run slam_toolbox "${node}" \
+      --ros-args -p use_sim_time:=true -p scan_topic:=/scan \
+      -p base_frame:=base_link -p odom_frame:=odom -p map_frame:=map \
+      -p mode:=mapping
+  fi
+}
+
+run_slam_toolbox() {
+  # slam_toolbox stacked on the TurtleBot4 base. Mirrors the split-headless
+  # TurtleBot4 bring-up (see run_turtlebot4) so the verified base path is not
+  # modified, then rides slam_toolbox on top as an observer node.
+  local model="${TURTLEBOT4_MODEL:-standard}"
+  local headless="${TURTLEBOT4_HEADLESS:-1}"
+  local default_world="warehouse"
+  if [[ "${headless}" != "1" ]]; then
+    default_world="${TURTLEBOT4_GUI_WORLD:-simple}"
+  fi
+  local world="${TURTLEBOT4_WORLD:-${default_world}}"
+  local tb4_gz_share
+  local create_gz_share
+  local ros_share="/opt/ros/${ROS_DISTRO}/share"
+
+  tb4_gz_share="$(pkg_share turtlebot4_gz_bringup)"
+  create_gz_share="$(pkg_share irobot_create_gz_bringup)"
+  install_custom_tb4_world "${world}" "${tb4_gz_share}"
+  export GZ_SIM_RESOURCE_PATH="/work/worlds:${tb4_gz_share}/worlds:${create_gz_share}/worlds:${ros_share}:${GZ_SIM_RESOURCE_PATH:-}"
+
+  local world_arg
+  if [[ "${world}" == */* ]]; then
+    world_arg="${world}"
+  elif [[ -f "/work/worlds/${world}.sdf" ]]; then
+    world_arg="/work/worlds/${world}.sdf"
+  else
+    world_arg="${world}.sdf"
+  fi
+
+  local gz_args="${TURTLEBOT4_GZ_ARGS:--s -r}"
+  export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+  export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+
+  local use_xvfb="${TURTLEBOT4_USE_XVFB:-${headless}}"
+  local sim_pid="" clock_pid="" slam_pid=""
+
+  if [[ "${use_xvfb}" == "1" ]] && command -v xvfb-run >/dev/null 2>&1; then
+    xvfb-run -a -s "-screen 0 1280x1024x24" \
+      ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
+  else
+    ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
+  fi
+  sim_pid="$!"
+
+  ros2 run ros_gz_bridge parameter_bridge \
+    "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock" \
+    --ros-args -r __node:=clock_bridge &
+  clock_pid="$!"
+
+  local params_file
+  params_file="$(slam_params_file)"
+  start_slam_toolbox_when_ready "${params_file}" &
+  slam_pid="$!"
+
+  trap 'kill "${slam_pid}" "${clock_pid}" "${sim_pid}" >/dev/null 2>&1 || true' EXIT
+  sleep 5
+
+  python3 "${ROOT_DIR}/src_jazzy/launch/turtlebot4_fuzz_spawn.launch.py" \
+    "model:=${model}" \
+    "world:=${world}" \
+    rviz:=false
+}
+
 if [[ -z "${TARGET}" || "${TARGET}" == "-h" || "${TARGET}" == "--help" ]]; then
   usage
   exit 0
@@ -240,6 +346,9 @@ case "${TARGET}" in
     ;;
   moveit2_jazzy)
     run_moveit2
+    ;;
+  slam_toolbox_jazzy)
+    run_slam_toolbox
     ;;
   *)
     echo "ERROR: unknown target profile: ${TARGET}" >&2

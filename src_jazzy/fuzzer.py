@@ -1676,7 +1676,12 @@ def fuzz_msg(fuzzer, fuzz_targets):
             )
             fbk_list.append(fbk)
 
-        elif fuzzer.config.tb4_sitl:
+        elif getattr(fuzzer.config, "oracle_mode", "") == "slam_toolbox_jazzy":
+            # slam_toolbox rides on the TurtleBot4 base: same TwistStamped
+            # command surface and mutation whitelist as TB4, but SLAM-semantic
+            # feedback metrics (populated by oracles.slam.check). INC favors
+            # larger estimate-vs-truth drift, steering motion toward inputs
+            # that stress the scan matcher / loop closure.
             if fuzzer.config.input_type == "geometry_msgs/msg/TwistStamped":
                 field_whitelist = [
                     ["twist", "linear", "x", np.dtype("float64")],
@@ -1687,6 +1692,37 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     ["linear", "x", np.dtype("float64")],
                     ["angular", "z", np.dtype("float64")],
                 ]
+
+            fbk = Feedback(
+                "slam_max_rpe_drift",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.05,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "slam_ate_rmse",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.05,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "slam_max_yaw_drift",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=0.05,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "slam_pose_sample_count",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+
+        elif fuzzer.config.tb4_sitl:
 
             # Phase-1 TurtleBot4 feedback metrics (populated by
             # oracles.turtlebot._check_turtlebot4_smoke). These are basic

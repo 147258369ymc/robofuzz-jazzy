@@ -10,6 +10,7 @@ KNOWN_PROFILES = {
     "turtlebot4_jazzy",
     "px4_v117_jazzy",
     "moveit2_jazzy",
+    "slam_toolbox_jazzy",
 }
 
 

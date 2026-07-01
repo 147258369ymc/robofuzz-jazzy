@@ -1,0 +1,110 @@
+schema_version: 1
+name: slam_toolbox_jazzy
+display_name: slam_toolbox Jazzy (on TurtleBot4 base)
+status: in_progress
+
+environment:
+  ubuntu: "24.04"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+packages:
+  apt:
+    - ros-jazzy-turtlebot4-simulator
+    - ros-jazzy-irobot-create-nodes
+    - ros-jazzy-slam-toolbox
+
+# slam_toolbox rides on the TurtleBot4 mobile base. Reusing family=turtlebot
+# inherits the verified TB4 bring-up, readiness gate, /cmd_vel TwistStamped
+# driving, and mutation field whitelist. Only the watched topics and oracle
+# diverge: the fuzzer drives legitimate motion via /cmd_vel and the SLAM oracle
+# compares the slam_toolbox pose estimate against the Gazebo ground truth.
+target:
+  family: turtlebot
+  generation: turtlebot4
+  default_model: standard
+  supported_models:
+    - standard
+    - lite
+  slam: slam_toolbox
+
+launch:
+  adapter: split_headless_ros_gz_launch
+  package: turtlebot4_gz_bringup
+  launch_file: turtlebot4_gz.launch.py
+  args:
+    headless: true
+    model: standard
+    gazebo: ignition
+    rviz: false
+    gz_args: "-s -r"
+    xvfb: true
+    world: warehouse
+  command:
+    - ./run_target.sh
+    - slam_toolbox_jazzy
+  compatibility_note: >
+    run_target.sh slam_toolbox_jazzy first brings up the same split headless
+    TurtleBot4 sim as turtlebot4_jazzy, then stacks sync_slam_toolbox_node
+    (mode: mapping) using the official TurtleBot4 slam parameters.
+
+readiness:
+  required_log_patterns:
+    - "Turtlebot4 standard running."
+    - "Configured and activated diffdrive_controller"
+    - "Registering sensor"
+  required_topics_with_data:
+    /odom: nav_msgs/msg/Odometry
+    /sim_ground_truth_pose: nav_msgs/msg/Odometry
+  compatibility_note: >
+    Beyond the TurtleBot4 motion base readiness, require live ground-truth
+    pose samples before fuzzing so the SLAM oracle always has a truth
+    trajectory. slam_toolbox /pose is event-driven (published after enough
+    travel) so it is validated by the oracle at check time rather than gated
+    at startup.
+
+input:
+  mode: velocity_command
+  preferred:
+    topic: /cmd_vel
+    type: geometry_msgs/msg/TwistStamped
+  fallback:
+    topic: /cmd_vel
+    type: geometry_msgs/msg/Twist
+  compatibility_note: Same command surface as turtlebot4_jazzy.
+
+watch:
+  required:
+    /pose: geometry_msgs/msg/PoseWithCovarianceStamped
+    /sim_ground_truth_pose: nav_msgs/msg/Odometry
+    /odom: nav_msgs/msg/Odometry
+  optional:
+    /scan: sensor_msgs/msg/LaserScan
+    /map: nav_msgs/msg/OccupancyGrid
+    /cmd_vel: geometry_msgs/msg/TwistStamped
+    /clock: rosgraph_msgs/msg/Clock
+  compatibility_note: >
+    /pose is the slam_toolbox corrected pose estimate; /sim_ground_truth_pose
+    is the independent Gazebo truth (create3 URDF remaps the model odometry
+    plugin output to this topic). /map and /scan are recorded for auxiliary
+    map/quality metrics but are optional so recording quality does not fail
+    readiness.
+
+oracle:
+  module: oracles.slam
+  mode: slam_toolbox_jazzy
+  status: in_progress
+  initial_properties:
+    - slam_estimate_tracks_ground_truth
+    - relative_pose_error_bound
+    - absolute_trajectory_error_bound
+    - heading_drift_bound
+  threshold_policy: >
+    Derive drift thresholds from a clean no-mutation baseline campaign
+    (baseline max x safety factor). Literature-informed placeholders are used
+    in oracles/slam.py until the baseline calibration run is recorded.
+
+aliases:
+  do_not_map:
+    - --tb3-sitl
+    - --tb4-sitl
