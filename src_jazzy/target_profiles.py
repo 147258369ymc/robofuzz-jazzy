@@ -34,6 +34,7 @@ class TargetProfile:
     required_topics_with_data_for_readiness: Dict[str, str] = field(
         default_factory=dict
     )
+    readiness_timeout_sec: Optional[float] = None
     launch_adapter: str = ""
     launch_command: List[str] = field(default_factory=list)
     oracle_module: str = ""
@@ -107,6 +108,12 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
     required_topics_with_data = dict(
         readiness.get("required_topics_with_data", {}) or {}
     )
+    readiness_timeout_raw = readiness.get("timeout_sec", None)
+    readiness_timeout = (
+        float(readiness_timeout_raw)
+        if readiness_timeout_raw is not None
+        else None
+    )
     launch = raw.get("launch", {}) or {}
     oracle = raw.get("oracle", {}) or {}
 
@@ -123,6 +130,7 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
         required_actions_for_readiness=required_actions,
         required_log_patterns_for_readiness=required_log_patterns,
         required_topics_with_data_for_readiness=required_topics_with_data,
+        readiness_timeout_sec=readiness_timeout,
         launch_adapter=launch.get("adapter", ""),
         launch_command=list(launch.get("command", []) or []),
         oracle_module=oracle.get("module", ""),
@@ -169,6 +177,7 @@ def attach_profile_to_config(config, profile: TargetProfile):
     config.required_topics_with_data_for_readiness = dict(
         profile.required_topics_with_data_for_readiness
     )
+    config.readiness_timeout_sec = profile.readiness_timeout_sec
     config.launch_adapter = profile.launch_adapter
     config.launch_command = list(profile.launch_command)
     config.oracle_mode = profile.oracle_mode

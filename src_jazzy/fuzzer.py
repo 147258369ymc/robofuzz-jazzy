@@ -42,6 +42,12 @@ from checker import StateMonitorNode
 from executor import Executor, ExecMode
 from scheduler import Scheduler, Campaign
 from feedback import Feedback, FeedbackType
+from slam_feedback import (
+    apply_slam_feedback_quality_gate,
+    evaluate_slam_feedback_interest,
+    format_slam_feedback_status,
+    round_has_slam_collision,
+)
 
 import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -692,17 +698,35 @@ class Fuzzer:
 
             if self.config.input_type == "geometry_msgs/msg/TwistStamped":
                 from geometry_msgs.msg import TwistStamped as VelocityMsg
-                platform = "tb4"
-                # Conservative Phase-1 envelope (see seed_generator.py):
-                # linear.x in [-0.15, 0.15], angular.z in [-0.8, 0.8].
-                velocity_seeds = [
-                    (0.15, 0.0),
-                    (-0.15, 0.0),
-                    (0.0, 0.8),
-                    (0.0, -0.8),
-                    (0.10, 0.5),
-                    (0.10, -0.5),
-                ]
+                is_slam = (
+                    getattr(self.config, "oracle_mode", "")
+                    == "slam_toolbox_jazzy"
+                )
+                if is_slam:
+                    max_linear, max_angular = (
+                        seed_generator.slam_velocity_limits()
+                    )
+                    platform = "slam"
+                    velocity_seeds = [
+                        (max_linear, 0.0),
+                        (-max_linear, 0.0),
+                        (0.0, max_angular),
+                        (0.0, -max_angular),
+                        (0.7 * max_linear, 0.8 * max_angular),
+                        (0.7 * max_linear, -0.8 * max_angular),
+                    ]
+                else:
+                    platform = "tb4"
+                    # Conservative Phase-1 envelope (see seed_generator.py):
+                    # linear.x in [-0.15, 0.15], angular.z in [-0.8, 0.8].
+                    velocity_seeds = [
+                        (0.15, 0.0),
+                        (-0.15, 0.0),
+                        (0.0, 0.8),
+                        (0.0, -0.8),
+                        (0.10, 0.5),
+                        (0.10, -0.5),
+                    ]
             else:
                 from geometry_msgs.msg import Twist as VelocityMsg
                 platform = "tb3"
@@ -847,11 +871,20 @@ class Fuzzer:
                 self.config.proj_root,
                 log_dir=self.config.log_dir,
             )
+            # Readiness budget: profile may override (readiness.timeout_sec)
+            # for targets with slow bring-up; otherwise keep the historical
+            # defaults (180s for PX4 SITL, 120s for everything else) so other
+            # targets are unaffected.
+            readiness_timeout = (
+                profile.readiness_timeout_sec
+                if getattr(profile, "readiness_timeout_sec", None) is not None
+                else (180 if profile.family == "px4" else 120)
+            )
             ok, log_graph = harness.wait_for_log_patterns(
                 stdout_log_path,
                 profile.required_log_patterns_for_readiness,
                 since_offset=stdout_log_offset,
-                timeout_sec=180 if profile.family == "px4" else 120,
+                timeout_sec=readiness_timeout,
             )
             log_graph_path = os.path.join(
                 self.config.meta_dir,
@@ -866,7 +899,7 @@ class Fuzzer:
                 )
             ok, topic_graph = harness.wait_for_topics(
                 profile.required_topics_for_readiness,
-                timeout_sec=180 if profile.family == "px4" else 120,
+                timeout_sec=readiness_timeout,
             )
             graph_path = os.path.join(
                 self.config.meta_dir,
@@ -881,7 +914,7 @@ class Fuzzer:
                 )
             ok, action_graph = harness.wait_for_actions(
                 profile.required_actions_for_readiness,
-                timeout_sec=180 if profile.family == "px4" else 120,
+                timeout_sec=readiness_timeout,
             )
             action_graph_path = os.path.join(
                 self.config.meta_dir,
@@ -896,7 +929,7 @@ class Fuzzer:
                 )
             ok, data_graph = harness.wait_for_topic_data(
                 profile.required_topics_with_data_for_readiness,
-                timeout_sec=180 if profile.family == "px4" else 120,
+                timeout_sec=readiness_timeout,
             )
             data_graph_path = os.path.join(
                 self.config.meta_dir,
@@ -1694,6 +1727,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 ]
 
             fbk = Feedback(
+                "slam_oracle_valid",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
                 "slam_max_rpe_drift",
                 FeedbackType.INC,
                 default_value=0.0,
@@ -1716,6 +1756,13 @@ def fuzz_msg(fuzzer, fuzz_targets):
             fbk_list.append(fbk)
             fbk = Feedback(
                 "slam_pose_sample_count",
+                FeedbackType.INC,
+                default_value=0.0,
+                min_threshold=1.0,
+            )
+            fbk_list.append(fbk)
+            fbk = Feedback(
+                "slam_collision_detected",
                 FeedbackType.INC,
                 default_value=0.0,
                 min_threshold=1.0,
@@ -2154,10 +2201,17 @@ def fuzz_msg(fuzzer, fuzz_targets):
 
             if fuzzer.config.tb4_sitl:
                 import seed_generator
+                # slam rides the tb4_sitl path (family=turtlebot) but must be
+                # stressed with aggressive motion; TB4 keeps its safety clamp.
+                max_linear, max_angular = (
+                    seed_generator.velocity_limits_for_oracle(
+                        getattr(fuzzer.config, "oracle_mode", "")
+                    )
+                )
                 seed_generator.clamp_velocity_sequence(
                     msg_list,
-                    max_linear=0.15,
-                    max_angular=0.8,
+                    max_linear=max_linear,
+                    max_angular=max_angular,
                 )
 
             executor.prep_execution(msg_type_class, topic_name)
@@ -2418,6 +2472,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 oracle_started = time.time()
                 errs = checker.run_checks(fuzzer.config, msg_list,
                         state_msgs_dict, fbk_list)
+                if (
+                    getattr(fuzzer.config, "oracle_mode", "")
+                    == "slam_toolbox_jazzy"
+                ):
+                    print(format_slam_feedback_status(fbk_list))
                 print(
                     "[fuzzer] oracle checked in "
                     f"{time.time() - oracle_started:.3f}s"
@@ -2577,15 +2636,32 @@ def fuzz_msg(fuzzer, fuzz_targets):
             # still accumulate interesting seeds for exploration
             is_interesting = False
             print(f"[debug] fbk_list len={len(fbk_list)}")
-            for fbk in fbk_list:
-                # check if any feedback element is interesting
-                cur_interesting = fbk.is_interesting()
-                print("check is_interesting -",
-                    fbk.name,
-                    cur_interesting,
-                    "({})".format(fbk.value)
+            if (
+                getattr(fuzzer.config, "oracle_mode", "")
+                == "slam_toolbox_jazzy"
+            ):
+                slam_collision_round = round_has_slam_collision(fbk_list)
+                raw_is_interesting = evaluate_slam_feedback_interest(
+                    fbk_list
                 )
-                is_interesting = is_interesting or cur_interesting
+                is_interesting = apply_slam_feedback_quality_gate(
+                    raw_is_interesting, fbk_list
+                )
+                if slam_collision_round:
+                    print(
+                        "[feedback] REJECTED — SLAM collision round "
+                        "before feedback history update (quality gate)"
+                    )
+            else:
+                for fbk in fbk_list:
+                    # check if any feedback element is interesting
+                    cur_interesting = fbk.is_interesting()
+                    print("check is_interesting -",
+                        fbk.name,
+                        cur_interesting,
+                        "({})".format(fbk.value)
+                    )
+                    is_interesting = is_interesting or cur_interesting
 
             if fuzzer.config.test_moveit:
                 if not hasattr(scheduler, '_seen_feedback_buckets'):

@@ -11,6 +11,7 @@ import constants as c
 import mutator
 import harness
 import ros_utils
+import seed_generator
 from ros2_fuzzer import ros_commons
 try:
     import px4_utils
@@ -1557,9 +1558,27 @@ class Scheduler:
         (linear.x/angular.z), and the useful bug pressure comes from temporal
         shapes such as boundary pushes, reversals, and stale-command tails.
         """
-        if not hasattr(self, "_tb4_profile"):
-            self._tb4_profile = MutationProfile.turtlebot4_velocity()
-        profile = self._tb4_profile
+        is_slam = (
+            getattr(config, "oracle_mode", "") == "slam_toolbox_jazzy"
+        )
+        if is_slam:
+            max_linear, max_angular = seed_generator.slam_velocity_limits()
+            if not hasattr(self, "_slam_profile"):
+                self._slam_profile = MutationProfile.slam_toolbox_velocity(
+                    max_linear,
+                    max_angular,
+                )
+            profile = self._slam_profile
+            self._tb4_is_slam = True
+            self._tb4_max_linear = max_linear
+            self._tb4_max_angular = max_angular
+        else:
+            if not hasattr(self, "_tb4_profile"):
+                self._tb4_profile = MutationProfile.turtlebot4_velocity()
+            profile = self._tb4_profile
+            self._tb4_is_slam = False
+            self._tb4_max_linear = 0.15
+            self._tb4_max_angular = 0.8
 
         frame = str(time.time())
         meta_file = os.path.join(config.meta_dir, "meta-{}".format(frame))
@@ -1666,6 +1685,16 @@ class Scheduler:
         print(f"[tb4] semantic strategy={strategy}"
               f" feedback={recent_feedback}")
 
+        if getattr(self, "_tb4_is_slam", False):
+            seed_generator.apply_slam_motion_strategy(
+                self.msg_list,
+                strategy=strategy,
+                max_linear=self._tb4_max_linear,
+                max_angular=self._tb4_max_angular,
+                recent_feedback=recent_feedback,
+            )
+            return
+
         if strategy == STRATEGY_BOUNDARY_PUSH:
             self._tb4_boundary_push(profile, recent_feedback)
         elif strategy == STRATEGY_REVERSAL:
@@ -1681,12 +1710,18 @@ class Scheduler:
 
     def _tb4_set_velocity(self, msg, lin_x, ang_z):
         target = self._tb4_twist(msg)
-        target.linear.x = self._tb4_clamp(lin_x, -0.15, 0.15)
+        max_linear = getattr(self, "_tb4_max_linear", 0.15)
+        max_angular = getattr(self, "_tb4_max_angular", 0.8)
+        target.linear.x = self._tb4_clamp(
+            lin_x, -max_linear, max_linear,
+        )
         target.linear.y = 0.0
         target.linear.z = 0.0
         target.angular.x = 0.0
         target.angular.y = 0.0
-        target.angular.z = self._tb4_clamp(ang_z, -0.8, 0.8)
+        target.angular.z = self._tb4_clamp(
+            ang_z, -max_angular, max_angular,
+        )
         return msg
 
     @staticmethod

@@ -38,9 +38,11 @@ SLAM_YAW_DRIFT_ERROR = 0.35   # rad (~20 deg), heading-offset spread
 # Sampling / windowing.
 SLAM_MIN_SAMPLES = 10         # matched pairs needed before judging
 SLAM_RPE_WINDOW_SEC = 1.0     # relative-motion comparison window
+SLAM_MATCH_MAX_DT_SEC = 0.25  # maximum estimate/truth timestamp separation
 
 ESTIMATE_TOPIC = "/pose"
 GROUND_TRUTH_TOPIC = "/sim_ground_truth_pose"
+COLLISION_TOPIC = "/bumper_contact"
 
 
 def _ts_to_sec(ts):
@@ -49,6 +51,26 @@ def _ts_to_sec(ts):
     if len(ts_str) <= 10:
         return float(ts)
     return int(ts_str[:10]) + int(ts_str[10:]) / (10 ** (len(ts_str) - 10))
+
+
+def _message_time_sec(msg, fallback_ts):
+    """Use a valid non-zero ROS header stamp, otherwise the bag timestamp."""
+    try:
+        stamp = msg.header.stamp
+        sec = float(stamp.sec)
+        nanosec = float(stamp.nanosec)
+    except (AttributeError, TypeError, ValueError):
+        return _ts_to_sec(fallback_ts)
+
+    valid_stamp = (
+        math.isfinite(sec)
+        and math.isfinite(nanosec)
+        and 0.0 <= nanosec < 1_000_000_000.0
+        and not (sec == 0.0 and nanosec == 0.0)
+    )
+    if not valid_stamp:
+        return _ts_to_sec(fallback_ts)
+    return sec + nanosec / 1_000_000_000.0
 
 
 def _yaw_from_quat(orientation):
@@ -93,7 +115,7 @@ def _pose_track(records):
         if pose is None:
             continue
         try:
-            t = _ts_to_sec(ts)
+            t = _message_time_sec(msg, ts)
         except (TypeError, ValueError):
             continue
         if not math.isfinite(t):
@@ -104,18 +126,30 @@ def _pose_track(records):
 
 
 def _match_nearest(est_track, truth_track):
-    """Pair each estimate sample with the nearest-in-time truth sample.
+    """Pair tracks monotonically, nearest in time and one-to-one.
 
-    Returns list of (ex, ey, eyaw, tx, ty, tyaw) and the matched estimate
-    timestamps (for window sizing)."""
+    Each truth sample can be used at most once; after a match, later estimates
+    consider only later unused truth samples. Returns (ex, ey, eyaw, tx, ty,
+    tyaw) pairs and matched estimate timestamps for window sizing.
+    """
+    if not est_track or not truth_track:
+        return [], []
+
     truth_times = [row[0] for row in truth_track]
     pairs = []
     matched_times = []
+    truth_start = 0
     for t, ex, ey, eyaw in est_track:
-        idx = _nearest_index(truth_times, t)
-        _, tx, ty, tyaw = truth_track[idx]
+        if truth_start >= len(truth_track):
+            break
+        relative_idx = _nearest_index(truth_times[truth_start:], t)
+        idx = truth_start + relative_idx
+        truth_t, tx, ty, tyaw = truth_track[idx]
+        if abs(truth_t - t) > SLAM_MATCH_MAX_DT_SEC:
+            continue
         pairs.append((ex, ey, eyaw, tx, ty, tyaw))
         matched_times.append(t)
+        truth_start = idx + 1
     return pairs, matched_times
 
 
@@ -200,12 +234,58 @@ def _update_feedback(feedback_list, name, value):
             return
 
 
+def _round_has_collision(state_dict):
+    """True if any /bumper_contact message this round carries a contact.
+
+    The gz Contact system publishes ros_gz_interfaces/msg/Contacts. Ground
+    truth remains reliable during contact, but the robot's motion is no longer
+    cleanly attributable to the fuzzed command alone. Such rounds are excluded
+    from clean commanded-motion drift judgment. Missing topic -> no collision
+    info -> judge normally (backward compatible without a bumper).
+    """
+    for _, msg in state_dict.get(COLLISION_TOPIC, []):
+        contacts = getattr(msg, "contacts", None)
+        if contacts:  # non-empty list => a real contact
+            return True
+    return False
+
+
 def check(config, msg_list, state_dict, feedback_list):
     """SLAM semantic oracle entry point (see checker.run_checks dispatch)."""
     errs = []
+    for feedback_name in (
+        "slam_oracle_valid",
+        "slam_collision_detected",
+        "slam_pose_sample_count",
+        "slam_max_rpe_drift",
+        "slam_ate_rmse",
+        "slam_max_yaw_drift",
+    ):
+        _update_feedback(feedback_list, feedback_name, 0.0)
 
     est_track = _pose_track(state_dict.get(ESTIMATE_TOPIC, []))
     truth_track = _pose_track(state_dict.get(GROUND_TRUTH_TOPIC, []))
+    round_has_collision = _round_has_collision(state_dict)
+    _update_feedback(
+        feedback_list,
+        "slam_collision_detected",
+        1.0 if round_has_collision else 0.0,
+    )
+
+    # Ground truth is still reliable after contact, but this round is not a
+    # clean commanded-motion trial, so skip drift judgment while retaining
+    # time-aligned sample coverage for visibility.
+    if round_has_collision:
+        pairs, _ = (
+            _match_nearest(est_track, truth_track)
+            if est_track and truth_track else ([], [])
+        )
+        _update_feedback(feedback_list, "slam_pose_sample_count",
+                         float(len(pairs)))
+        _update_feedback(feedback_list, "slam_max_rpe_drift", 0.0)
+        _update_feedback(feedback_list, "slam_ate_rmse", 0.0)
+        _update_feedback(feedback_list, "slam_max_yaw_drift", 0.0)
+        return errs
 
     # Missing either signal is a readiness/recording-quality issue, not a bug.
     if not est_track or not truth_track:
@@ -233,6 +313,7 @@ def check(config, msg_list, state_dict, feedback_list):
     _update_feedback(feedback_list, "slam_max_rpe_drift", max_rpe)
     _update_feedback(feedback_list, "slam_ate_rmse", ate_rmse)
     _update_feedback(feedback_list, "slam_max_yaw_drift", yaw_drift)
+    _update_feedback(feedback_list, "slam_oracle_valid", 1.0)
 
     if max_rpe > SLAM_RPE_DRIFT_ERROR:
         errs.append(

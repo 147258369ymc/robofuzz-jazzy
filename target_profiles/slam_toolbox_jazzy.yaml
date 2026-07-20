@@ -39,29 +39,38 @@ launch:
     rviz: false
     gz_args: "-s -r"
     xvfb: true
-    world: warehouse
+    world: slam_arena
   command:
     - ./run_target.sh
     - slam_toolbox_jazzy
   compatibility_note: >
     run_target.sh slam_toolbox_jazzy first brings up the same split headless
-    TurtleBot4 sim as turtlebot4_jazzy, then stacks sync_slam_toolbox_node
-    (mode: mapping) using the official TurtleBot4 slam parameters.
+    TurtleBot4 sim as turtlebot4_jazzy, then uses slam_toolbox's official
+    online_sync lifecycle launch with autostart enabled (mode: mapping) and
+    a profile-specific copy of the official TurtleBot4 slam parameters. The
+    profile changes only check_min_dist_and_heading_precisely=true so either
+    the distance or heading threshold can admit a scan into matching.
 
 readiness:
   required_log_patterns:
     - "Turtlebot4 standard running."
     - "Configured and activated diffdrive_controller"
-    - "Registering sensor"
+    - "[LifecycleLaunch] Slamtoolbox node is activating."
   required_topics_with_data:
     /odom: nav_msgs/msg/Odometry
     /sim_ground_truth_pose: nav_msgs/msg/Odometry
+  # TB4 base + slam_toolbox bring-up runs slower under the fuzzer's per-round
+  # relaunch (gazebo restart + slam node competing for CPU during the
+  # diffdrive handshake). Standalone bring-up activates diffdrive ~90s; give a
+  # 240s budget so readiness has margin. Other profiles keep their defaults.
+  timeout_sec: 240
   compatibility_note: >
-    Beyond the TurtleBot4 motion base readiness, require live ground-truth
-    pose samples before fuzzing so the SLAM oracle always has a truth
-    trajectory. slam_toolbox /pose is event-driven (published after enough
-    travel) so it is validated by the oracle at check time rather than gated
-    at startup.
+    Readiness reuses the two verified TurtleBot4 base log markers and the
+    stable activation message emitted by the official online_sync lifecycle
+    launch, then requires live /odom and ground-truth pose samples before
+    fuzzing. A process name alone is insufficient because a LifecycleNode can
+    exist in the unconfigured state without subscribing to /scan. /pose stays
+    out of readiness because it is event-driven after enough robot travel.
 
 input:
   mode: velocity_command
@@ -75,20 +84,26 @@ input:
 
 watch:
   required:
-    /pose: geometry_msgs/msg/PoseWithCovarianceStamped
     /sim_ground_truth_pose: nav_msgs/msg/Odometry
     /odom: nav_msgs/msg/Odometry
   optional:
+    /pose: geometry_msgs/msg/PoseWithCovarianceStamped
     /scan: sensor_msgs/msg/LaserScan
     /map: nav_msgs/msg/OccupancyGrid
     /cmd_vel: geometry_msgs/msg/TwistStamped
     /clock: rosgraph_msgs/msg/Clock
+    /bumper_contact: ros_gz_interfaces/msg/Contacts
   compatibility_note: >
-    /pose is the slam_toolbox corrected pose estimate; /sim_ground_truth_pose
-    is the independent Gazebo truth (create3 URDF remaps the model odometry
-    plugin output to this topic). /map and /scan are recorded for auxiliary
-    map/quality metrics but are optional so recording quality does not fail
-    readiness.
+    /pose is the slam_toolbox corrected pose estimate. It is OPTIONAL (not a
+    required readiness topic) because slam_toolbox only publishes /pose data
+    after enough translational or angular travel produces a successful scan
+    match — but the robot does not move until fuzzing starts, which does not
+    start until readiness passes. Requiring /pose data at startup therefore
+    deadlocks. /pose is still recorded (watchlist = required + optional) and
+    consumed by the oracle at check time. /sim_ground_truth_pose (Gazebo truth,
+    remapped from the create3 odometry plugin) and /odom are advertised at
+    startup and stay required. /map and /scan are optional so recording quality
+    does not fail readiness.
 
 oracle:
   module: oracles.slam

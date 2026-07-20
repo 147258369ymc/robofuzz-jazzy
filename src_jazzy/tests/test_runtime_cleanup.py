@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import json
 import os
 import sqlite3
@@ -57,6 +58,210 @@ def _install_executor_fakes():
 
 
 class RuntimeCleanupTests(unittest.TestCase):
+
+    def test_slam_pub_command_waits_for_bag_and_target_subscribers(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Cfg:
+            target_profile_name = "slam_toolbox_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        builder = getattr(ex, "build_ros2_pub_command", None)
+        self.assertIsNotNone(builder)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            command = builder(object(), pub_timeout=15.0)
+
+        wait_index = command.index("--wait-matching-subscriptions")
+        max_wait_index = command.index("--max-wait-time-secs")
+        keep_alive_index = command.index("--keep-alive")
+        self.assertEqual(command[wait_index + 1], "2")
+        self.assertEqual(command[max_wait_index + 1], "14.0")
+        self.assertEqual(command[keep_alive_index + 1], "0.5")
+
+    def test_non_slam_pub_command_keeps_original_cli_shape(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Cfg:
+            target_profile_name = "turtlebot4_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        builder = getattr(ex, "build_ros2_pub_command", None)
+        self.assertIsNotNone(builder)
+
+        command = builder(object(), pub_timeout=15.0)
+
+        self.assertNotIn("--wait-matching-subscriptions", command)
+        self.assertNotIn("--max-wait-time-secs", command)
+        self.assertNotIn("--keep-alive", command)
+        self.assertEqual(
+            command[-3:],
+            ["/cmd_vel", "geometry_msgs/msg/TwistStamped", "{}"],
+        )
+
+    def test_slam_pub_command_rejects_invalid_reliability_settings(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Cfg:
+            target_profile_name = "slam_toolbox_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        builder = getattr(ex, "build_ros2_pub_command", None)
+        self.assertIsNotNone(builder)
+
+        invalid_settings = (
+            {"ROBOFUZZ_SLAM_PUB_WAIT_MATCHING": "0"},
+            {"ROBOFUZZ_SLAM_PUB_WAIT_MATCHING": "1.5"},
+            {"ROBOFUZZ_SLAM_PUB_KEEP_ALIVE": "nan"},
+            {"ROBOFUZZ_SLAM_PUB_KEEP_ALIVE": "14.5"},
+        )
+        for settings in invalid_settings:
+            with self.subTest(settings=settings):
+                with mock.patch.dict(os.environ, settings, clear=True):
+                    with self.assertRaises(ValueError):
+                        builder(object(), pub_timeout=15.0)
+
+    def test_ros2_pub_reports_zero_returncode_as_cli_success(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        self.assertIsNotNone(getattr(executor, "PublishResult", None))
+
+        class _Cfg:
+            target_profile_name = "slam_toolbox_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        completed = sp.CompletedProcess([], returncode=0)
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch.object(
+                        executor.sp, "run", return_value=completed,
+                    ):
+                        result = ex.do_ros2_pub(object())
+            finally:
+                os.chdir(cwd)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.error, "")
+
+    def test_ros2_pub_rejects_nonzero_returncode_without_stderr(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        self.assertIsNotNone(getattr(executor, "PublishResult", None))
+
+        class _Cfg:
+            target_profile_name = "slam_toolbox_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        completed = sp.CompletedProcess([], returncode=7)
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch.object(
+                        executor.sp, "run", return_value=completed,
+                    ):
+                        result = ex.do_ros2_pub(object())
+            finally:
+                os.chdir(cwd)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.returncode, 7)
+        self.assertIn("return code 7", result.error)
+
+    def test_ros2_pub_reports_timeout_without_returncode(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        self.assertIsNotNone(getattr(executor, "PublishResult", None))
+
+        class _Cfg:
+            target_profile_name = "slam_toolbox_jazzy"
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        ex = executor.Executor(_Fuzzer())
+        ex.topic_name = "/cmd_vel"
+        ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch.object(
+                        executor.sp,
+                        "run",
+                        side_effect=sp.TimeoutExpired(["ros2"], 15.0),
+                    ):
+                        result = ex.do_ros2_pub(object())
+            finally:
+                os.chdir(cwd)
+
+        self.assertFalse(result.success)
+        self.assertIsNone(result.returncode)
+        self.assertIn("timed out after 15.0s", result.error)
+
+    def test_executor_consumes_structured_publish_results_in_both_modes(self):
+        executor_path = os.path.join(SRC_DIR, "executor.py")
+        with open(executor_path, encoding="utf-8") as fp:
+            text = fp.read()
+        execute_body = text.split("    def execute(", 1)[1]
+
+        self.assertNotIn("if ret:", execute_body)
+        self.assertGreaterEqual(
+            execute_body.count("if not publish_result.success:"), 2,
+        )
+        self.assertGreaterEqual(
+            execute_body.count("publish_error = publish_result.error"), 2,
+        )
+        self.assertGreaterEqual(
+            execute_body.count(
+                "publish_returncode=publish_result.returncode",
+            ),
+            2,
+        )
+
     def test_rosbag_parser_closes_sqlite_connection(self):
         fake_rclpy_serialization = types.ModuleType("rclpy.serialization")
         fake_rclpy_serialization.deserialize_message = lambda data, msg_type: data
@@ -236,6 +441,98 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertTrue(rows[0]["publish_success"])
         self.assertAlmostEqual(0.12, rows[0]["linear_x"])
         self.assertAlmostEqual(-0.4, rows[0]["angular_z"])
+
+    def test_executor_writes_slam_command_trace_with_cli_result(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        signature = inspect.signature(
+            executor.Executor.record_published_command,
+        )
+        self.assertIn("publish_returncode", signature.parameters)
+
+        class _Vector:
+            x = 0.0
+            y = 0.0
+            z = 0.0
+
+        class _Twist:
+            linear = _Vector()
+            angular = _Vector()
+
+        class _Stamp:
+            sec = 321
+            nanosec = 654
+
+        class _Header:
+            stamp = _Stamp()
+
+        class _Msg:
+            header = _Header()
+            twist = _Twist()
+
+        _Msg.twist.linear.x = 0.35
+        _Msg.twist.angular.z = 1.5
+
+        class _Cfg:
+            tb4_sitl = True
+            target_profile_name = "slam_toolbox_jazzy"
+            meta_dir = None
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        with tempfile.TemporaryDirectory() as td:
+            _Cfg.meta_dir = td
+            ex = executor.Executor(_Fuzzer())
+            ex.topic_name = "/cmd_vel"
+            ex.msg_typestr = "geometry_msgs/msg/TwistStamped"
+            ex.record_published_command(
+                _Msg(),
+                "slam-frame",
+                11.5,
+                4,
+                True,
+                "",
+                publish_returncode=0,
+            )
+
+            path = os.path.join(
+                td, "published_commands-slam-frame.jsonl",
+            )
+            with open(path, encoding="utf-8") as fp:
+                row = json.loads(fp.readline())
+
+        self.assertEqual(row["sequence_index"], 4)
+        self.assertTrue(row["publish_success"])
+        self.assertEqual(row["publish_returncode"], 0)
+        self.assertEqual(row["error"], "")
+        self.assertAlmostEqual(row["linear_x"], 0.35)
+        self.assertAlmostEqual(row["angular_z"], 1.5)
+
+    def test_executor_does_not_trace_unrelated_target_profile(self):
+        with _install_executor_fakes():
+            sys.modules.pop("executor", None)
+            executor = importlib.import_module("executor")
+
+        class _Cfg:
+            tb4_sitl = True
+            target_profile_name = "unrelated_target"
+            meta_dir = None
+
+        class _Fuzzer:
+            config = _Cfg()
+
+        with tempfile.TemporaryDirectory() as td:
+            _Cfg.meta_dir = td
+            ex = executor.Executor(_Fuzzer())
+            ex.record_published_command(
+                object(), "unrelated", 1.0, 0, True,
+            )
+            files = os.listdir(td)
+
+        self.assertEqual(files, [])
 
     def test_run_target_has_explicit_moveit_rviz_disable_switch(self):
         run_target = os.path.join(REPO_ROOT, "run_target.sh")

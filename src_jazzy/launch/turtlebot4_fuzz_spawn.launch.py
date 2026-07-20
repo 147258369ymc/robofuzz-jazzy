@@ -16,6 +16,7 @@ import sys
 
 from launch import LaunchDescription, LaunchService
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, PushRosNamespace
@@ -52,6 +53,8 @@ def generate_launch_description():
         "turtlebot4_gz_bringup")
     pkg_turtlebot4_description = get_package_share_directory(
         "turtlebot4_description")
+    pkg_turtlebot4_viz = get_package_share_directory(
+        "turtlebot4_viz")
     pkg_irobot_create_common_bringup = get_package_share_directory(
         "irobot_create_common_bringup")
     pkg_irobot_create_gz_bringup = get_package_share_directory(
@@ -59,6 +62,8 @@ def generate_launch_description():
 
     turtlebot4_ros_gz_bridge_launch = PathJoinSubstitution(
         [pkg_turtlebot4_gz_bringup, "launch", "ros_gz_bridge.launch.py"])
+    rviz_launch = PathJoinSubstitution(
+        [pkg_turtlebot4_viz, "launch", "view_navigation.launch.py"])
     turtlebot4_node_launch = PathJoinSubstitution(
         [pkg_turtlebot4_gz_bringup, "launch", "turtlebot4_nodes.launch.py"])
     create3_nodes_launch = PathJoinSubstitution(
@@ -180,9 +185,22 @@ def generate_launch_description():
         ),
     ])
 
+    # Reuse the official TurtleBot4 navigation RViz launcher so map, scan,
+    # robot model, namespace, and simulation-time behavior stay aligned with
+    # the installed Jazzy TurtleBot4 packages.
+    rviz = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource([rviz_launch]),
+        launch_arguments=[
+            ("namespace", namespace),
+            ("use_sim_time", use_sim_time),
+        ],
+        condition=IfCondition(LaunchConfiguration("rviz")),
+    )
+
     ld = LaunchDescription(ARGUMENTS)
     ld.add_action(param_file_cmd)
     ld.add_action(spawn_robot_group_action)
+    ld.add_action(rviz)
     return ld
 
 

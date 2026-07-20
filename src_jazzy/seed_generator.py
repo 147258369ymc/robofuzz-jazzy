@@ -7,6 +7,18 @@ extensible: add a new function for each platform.
 """
 
 from copy import deepcopy
+import math
+import os
+import random
+
+
+TB4_SAFE_MAX_LINEAR = 0.15
+TB4_SAFE_MAX_ANGULAR = 0.8
+SLAM_DEFAULT_MAX_LINEAR = 0.35
+SLAM_DEFAULT_MAX_ANGULAR = 1.5
+TB4_PHYSICAL_MAX_LINEAR = 0.46
+TB4_PHYSICAL_MAX_ANGULAR = 1.9
+SLAM_ORACLE_MODE = "slam_toolbox_jazzy"
 
 
 def _set_velocity(msg, lin_x, ang_z):
@@ -42,6 +54,53 @@ def clamp_velocity_sequence(msg_list, max_linear=0.15, max_angular=0.8):
     for msg in msg_list:
         clamp_velocity_message(msg, max_linear, max_angular)
     return msg_list
+
+
+def slam_velocity_limits():
+    """Velocity clamp limits for the slam_toolbox target.
+
+    Higher than the TurtleBot4 physical-safety clamp (0.15/0.8) because SLAM
+    must be stressed with aggressive motion (fast moves, sharp turns) to
+    provoke scan-match / loop-closure failures. Defaults 0.35/1.5; override
+    via SLAM_MAX_LIN / SLAM_MAX_ANG to push toward the TB4 envelope
+    (0.46/1.9) without code changes.
+    """
+    max_lin = _validated_velocity_limit(
+        "SLAM_MAX_LIN",
+        SLAM_DEFAULT_MAX_LINEAR,
+        TB4_PHYSICAL_MAX_LINEAR,
+    )
+    max_ang = _validated_velocity_limit(
+        "SLAM_MAX_ANG",
+        SLAM_DEFAULT_MAX_ANGULAR,
+        TB4_PHYSICAL_MAX_ANGULAR,
+    )
+    return max_lin, max_ang
+
+
+def _validated_velocity_limit(env_name, default_value, physical_max):
+    raw_value = os.environ.get(env_name, str(default_value))
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{env_name} must be finite, > 0, and <= {physical_max}; "
+            f"got {raw_value!r}"
+        ) from exc
+
+    if not math.isfinite(value) or value <= 0 or value > physical_max:
+        raise ValueError(
+            f"{env_name} must be finite, > 0, and <= {physical_max}; "
+            f"got {raw_value!r}"
+        )
+    return value
+
+
+def velocity_limits_for_oracle(oracle_mode):
+    """Select velocity limits without leaking SLAM settings into TB4."""
+    if oracle_mode == SLAM_ORACLE_MODE:
+        return slam_velocity_limits()
+    return TB4_SAFE_MAX_LINEAR, TB4_SAFE_MAX_ANGULAR
 
 
 def generate_velocity_sequence_seeds(
@@ -221,6 +280,151 @@ def generate_tb4_sequence_seeds(msg_class, seqlen=10):
     return seeds
 
 
+def generate_slam_sequence_seeds(msg_class, seqlen=10):
+    """Generate sustained SLAM motion seeds inside the validated TB4 limits.
+
+    Unlike the ordinary TurtleBot4 smoke seeds, these sequences intentionally
+    leave enough translational or angular headroom to cross slam_toolbox's
+    scan-acceptance motion thresholds even when individual velocity commands
+    are shortened by the controller timeout.
+    """
+    max_linear, max_angular = slam_velocity_limits()
+    seeds = []
+
+    def constant_sequence(lin_x, ang_z):
+        sequence = []
+        for _ in range(seqlen):
+            sequence.append(_set_velocity(msg_class(), lin_x, ang_z))
+        return sequence
+
+    seeds.append(constant_sequence(max_linear, 0.0))
+    seeds.append(constant_sequence(-max_linear, 0.0))
+    seeds.append(constant_sequence(0.0, max_angular))
+    seeds.append(constant_sequence(0.0, -max_angular))
+    seeds.append(constant_sequence(0.7 * max_linear, 0.8 * max_angular))
+    seeds.append(constant_sequence(0.7 * max_linear, -0.8 * max_angular))
+
+    half = seqlen // 2
+    sequence = []
+    for index in range(seqlen):
+        lin_x = max_linear if index < half else -max_linear
+        sequence.append(_set_velocity(msg_class(), lin_x, 0.0))
+    seeds.append(sequence)
+
+    sequence = []
+    for index in range(seqlen):
+        ang_z = max_angular if index < half else -max_angular
+        sequence.append(_set_velocity(msg_class(), 0.0, ang_z))
+    seeds.append(sequence)
+
+    start = seqlen // 3
+    sequence = []
+    for index in range(seqlen):
+        lin_x = 0.0 if index < start else max_linear
+        sequence.append(_set_velocity(msg_class(), lin_x, 0.0))
+    seeds.append(sequence)
+
+    sequence = []
+    for index in range(seqlen):
+        ang_z = 0.0 if index < start else max_angular
+        sequence.append(_set_velocity(msg_class(), 0.0, ang_z))
+    seeds.append(sequence)
+
+    return seeds
+
+
+def apply_slam_motion_strategy(
+    msg_list,
+    strategy,
+    max_linear,
+    max_angular,
+    recent_feedback=None,
+):
+    """Apply a coherent SLAM motion shape to an existing message sequence."""
+    if not msg_list:
+        return msg_list
+
+    angular_feedback = recent_feedback and (
+        "yaw" in recent_feedback or "angular" in recent_feedback
+    )
+    preferred_axis = "angular" if angular_feedback else "linear"
+
+    if strategy == "single_block":
+        start = len(msg_list) // 3
+        sign = random.choice([-1.0, 1.0])
+        for index, msg in enumerate(msg_list):
+            if index < start:
+                _set_velocity(msg, 0.0, 0.0)
+            elif preferred_axis == "angular":
+                _set_velocity(msg, 0.0, sign * 0.85 * max_angular)
+            else:
+                _set_velocity(msg, sign * 0.85 * max_linear, 0.0)
+        return msg_list
+
+    if strategy == "reversal":
+        half = max(1, len(msg_list) // 2)
+        initial_sign = random.choice([-1.0, 1.0])
+        for index, msg in enumerate(msg_list):
+            sign = initial_sign if index < half else -initial_sign
+            if preferred_axis == "angular":
+                _set_velocity(
+                    msg,
+                    sign * 0.35 * max_linear,
+                    sign * 0.85 * max_angular,
+                )
+            else:
+                _set_velocity(
+                    msg,
+                    sign * 0.85 * max_linear,
+                    sign * 0.40 * max_angular,
+                )
+        return msg_list
+
+    if strategy == "boundary_push":
+        sign = random.choice([-1.0, 1.0])
+        for index, msg in enumerate(msg_list):
+            phase = index / max(len(msg_list) - 1, 1)
+            magnitude = 0.65 + 0.35 * phase
+            if preferred_axis == "angular":
+                _set_velocity(
+                    msg,
+                    0.35 * max_linear,
+                    sign * magnitude * max_angular,
+                )
+            else:
+                _set_velocity(
+                    msg,
+                    sign * magnitude * max_linear,
+                    sign * 0.50 * max_angular,
+                )
+        return msg_list
+
+    if strategy != "random":
+        raise ValueError(f"unknown SLAM motion strategy: {strategy}")
+
+    block_len = max(3, len(msg_list) // 5)
+    index = 0
+    while index < len(msg_list):
+        end = min(len(msg_list), index + block_len)
+        if 0 < len(msg_list) - end < 3:
+            end = len(msg_list)
+        linear = (
+            random.choice([-1.0, 1.0])
+            * random.uniform(0.55, 0.95)
+            * max_linear
+        )
+        angular = (
+            random.choice([-1.0, 1.0])
+            * random.uniform(0.55, 0.95)
+            * max_angular
+        )
+        for msg in msg_list[index:end]:
+            _set_velocity(msg, linear, angular)
+        index = end
+
+    return msg_list
+
+
 def generate_sequence_seeds(platform, msg_class, seqlen=10):
     """
     Dispatch to platform-specific seed generator.
@@ -230,6 +434,7 @@ def generate_sequence_seeds(platform, msg_class, seqlen=10):
         "tb3": generate_tb3_sequence_seeds,
         "tb4": generate_tb4_sequence_seeds,
         "turtlebot4": generate_tb4_sequence_seeds,
+        "slam": generate_slam_sequence_seeds,
     }
     gen_func = generators.get(platform)
     if gen_func is None:

@@ -1,3 +1,4 @@
+import ast
 import json
 import importlib
 import os
@@ -15,6 +16,45 @@ if SRC_DIR not in sys.path:
 
 
 class TargetProfileTests(unittest.TestCase):
+    @staticmethod
+    def _spawn_launch_tree():
+        launch_path = os.path.join(
+            SRC_DIR, "launch", "turtlebot4_fuzz_spawn.launch.py"
+        )
+        with open(launch_path, encoding="utf-8") as fp:
+            return ast.parse(fp.read(), filename=launch_path)
+
+    @staticmethod
+    def _assigned_values(tree):
+        assignments = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                assignments[target.id] = node.value
+        return assignments
+
+    @staticmethod
+    def _call_name(node):
+        if not isinstance(node, ast.Call):
+            return None
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    @staticmethod
+    def _run_target_function_source(function_name, end_marker):
+        run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
+        with open(run_target_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        start = text.index(f"{function_name}() {{")
+        end = text.index(end_marker, start)
+        return text[start:end]
+
     def test_loads_known_profile_and_resolves_watchlist(self):
         import target_profiles
 
@@ -409,6 +449,256 @@ class TargetProfileTests(unittest.TestCase):
         self.assertIn('if [[ "${headless}" == "1" || "${split_launch}" == "1" ]]', text)
         self.assertIn('TURTLEBOT4_USE_XVFB:-${headless}', text)
         self.assertNotIn("exec ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py", text)
+
+    def test_tb4_split_launch_uses_ros2_launch_argument_parser(self):
+        function_source = self._run_target_function_source(
+            "run_turtlebot4", "run_px4() {"
+        )
+
+        spawn_launch = (
+            'ros2 launch "${ROOT_DIR}/src_jazzy/launch/'
+            'turtlebot4_fuzz_spawn.launch.py"'
+        )
+        direct_python = (
+            'python3 "${ROOT_DIR}/src_jazzy/launch/'
+            'turtlebot4_fuzz_spawn.launch.py"'
+        )
+        self.assertIn(spawn_launch, function_source)
+        self.assertNotIn(direct_python, function_source)
+
+    def test_slam_spawn_uses_ros2_launch_argument_parser(self):
+        function_source = self._run_target_function_source(
+            "run_slam_toolbox", 'if [[ -z "${TARGET}"'
+        )
+
+        spawn_launch = (
+            'ros2 launch "${ROOT_DIR}/src_jazzy/launch/'
+            'turtlebot4_fuzz_spawn.launch.py"'
+        )
+        direct_python = (
+            'python3 "${ROOT_DIR}/src_jazzy/launch/'
+            'turtlebot4_fuzz_spawn.launch.py"'
+        )
+        self.assertIn(spawn_launch, function_source)
+        self.assertNotIn(direct_python, function_source)
+
+    def test_spawn_launch_conditionally_includes_official_navigation_rviz(self):
+        tree = self._spawn_launch_tree()
+        assignments = self._assigned_values(tree)
+
+        rviz_declaration = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and self._call_name(node) == "DeclareLaunchArgument"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == "rviz"
+        )
+        default_value = next(
+            keyword.value
+            for keyword in rviz_declaration.keywords
+            if keyword.arg == "default_value"
+        )
+        self.assertEqual("false", default_value.value)
+
+        self.assertIn("pkg_turtlebot4_viz", assignments)
+        self.assertIn("rviz_launch", assignments)
+        self.assertIn("rviz", assignments)
+        viz_package = assignments["pkg_turtlebot4_viz"]
+        self.assertEqual(
+            "get_package_share_directory", self._call_name(viz_package)
+        )
+        self.assertEqual("turtlebot4_viz", viz_package.args[0].value)
+
+        rviz_path = assignments["rviz_launch"]
+        self.assertEqual("PathJoinSubstitution", self._call_name(rviz_path))
+        path_parts = rviz_path.args[0].elts
+        self.assertIsInstance(path_parts[0], ast.Name)
+        self.assertEqual("pkg_turtlebot4_viz", path_parts[0].id)
+        self.assertEqual(
+            ["launch", "view_navigation.launch.py"],
+            [part.value for part in path_parts[1:]],
+        )
+
+        rviz_include = assignments["rviz"]
+        self.assertEqual(
+            "IncludeLaunchDescription", self._call_name(rviz_include)
+        )
+        self.assertTrue(any(
+            isinstance(node, ast.Name) and node.id == "rviz_launch"
+            for node in ast.walk(rviz_include.args[0])
+        ))
+
+        condition = next(
+            keyword.value
+            for keyword in rviz_include.keywords
+            if keyword.arg == "condition"
+        )
+        self.assertEqual("IfCondition", self._call_name(condition))
+        rviz_configuration = condition.args[0]
+        self.assertEqual(
+            "LaunchConfiguration", self._call_name(rviz_configuration)
+        )
+        self.assertEqual("rviz", rviz_configuration.args[0].value)
+
+        launch_arguments = next(
+            keyword.value
+            for keyword in rviz_include.keywords
+            if keyword.arg == "launch_arguments"
+        )
+        argument_names = {
+            item.elts[0].value: item.elts[1].id
+            for item in launch_arguments.elts
+        }
+        self.assertEqual(
+            {"namespace": "namespace", "use_sim_time": "use_sim_time"},
+            argument_names,
+        )
+
+        self.assertTrue(any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_action"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "rviz"
+            for node in ast.walk(tree)
+        ))
+
+    def test_spawn_launch_passes_world_configuration_to_bridge_include(self):
+        tree = self._spawn_launch_tree()
+        assignments = self._assigned_values(tree)
+
+        world_configuration = assignments["world"]
+        self.assertEqual(
+            "LaunchConfiguration", self._call_name(world_configuration)
+        )
+        self.assertEqual("world", world_configuration.args[0].value)
+
+        bridge_include = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and self._call_name(node) == "IncludeLaunchDescription"
+            and any(
+                isinstance(child, ast.Name)
+                and child.id == "turtlebot4_ros_gz_bridge_launch"
+                for child in ast.walk(node.args[0])
+            )
+        )
+        launch_arguments = next(
+            keyword.value
+            for keyword in bridge_include.keywords
+            if keyword.arg == "launch_arguments"
+        )
+        world_argument = next(
+            item
+            for item in launch_arguments.elts
+            if item.elts[0].value == "world"
+        )
+        self.assertIsInstance(world_argument.elts[1], ast.Name)
+        self.assertEqual("world", world_argument.elts[1].id)
+
+    def test_slam_rviz_defaults_off_headless_and_on_in_gui(self):
+        function_source = self._run_target_function_source(
+            "run_slam_toolbox", 'if [[ -z "${TARGET}"'
+        )
+
+        self.assertIn(
+            'local slam_rviz_flag="${SLAM_RVIZ:-0}"', function_source
+        )
+        self.assertIn(
+            'slam_rviz_flag="${SLAM_RVIZ:-1}"', function_source
+        )
+        self.assertIn('"rviz:=${rviz_arg}"', function_source)
+
+    def test_slam_launch_defaults_to_arena_and_retains_world_override(self):
+        function_source = self._run_target_function_source(
+            "run_slam_toolbox", 'if [[ -z "${TARGET}"'
+        )
+
+        self.assertIn('local default_world="slam_arena"', function_source)
+        self.assertIn(
+            'local world="${TURTLEBOT4_WORLD:-${default_world}}"',
+            function_source,
+        )
+        self.assertNotIn("TURTLEBOT4_GUI_WORLD", function_source)
+
+    def test_slam_stack_uses_official_lifecycle_autostart_launch(self):
+        function_source = self._run_target_function_source(
+            "start_slam_toolbox_when_ready", "run_slam_toolbox() {"
+        )
+
+        # A sync_slam_toolbox_node process can exist while its lifecycle state
+        # is still "unconfigured".  The package's official launch owns the
+        # configure/activate transitions, so a bare ros2 run is not equivalent.
+        self.assertIn(
+            'local launch_file="${SLAM_TOOLBOX_LAUNCH:-online_sync_launch.py}"',
+            function_source,
+        )
+        self.assertIn(
+            'exec ros2 launch slam_toolbox "${launch_file}" "${launch_args[@]}"',
+            function_source,
+        )
+        self.assertNotIn(
+            "ros2 run slam_toolbox", function_source
+        )
+        self.assertNotIn("SLAM_TOOLBOX_NODE", function_source)
+
+    def test_slam_lifecycle_launch_enables_autostart_and_sim_time(self):
+        function_source = self._run_target_function_source(
+            "start_slam_toolbox_when_ready", "run_slam_toolbox() {"
+        )
+
+        self.assertIn('"autostart:=true"', function_source)
+        self.assertIn('"use_lifecycle_manager:=false"', function_source)
+        self.assertIn('"use_sim_time:=true"', function_source)
+
+    def test_slam_lifecycle_launch_only_overrides_params_when_resolved(self):
+        function_source = self._run_target_function_source(
+            "start_slam_toolbox_when_ready", "run_slam_toolbox() {"
+        )
+
+        self.assertIn('if [[ -n "${params_file}" ]]; then', function_source)
+        self.assertIn(
+            'launch_args+=("slam_params_file:=${params_file}")',
+            function_source,
+        )
+
+    def test_slam_profile_waits_for_lifecycle_activation(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile(
+            "slam_toolbox_jazzy", REPO_ROOT
+        )
+
+        self.assertIn(
+            "[LifecycleLaunch] Slamtoolbox node is activating.",
+            profile.required_log_patterns_for_readiness,
+        )
+
+    def test_slam_profile_declares_arena_as_default_world(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile(
+            "slam_toolbox_jazzy", REPO_ROOT
+        )
+
+        self.assertEqual(
+            "slam_arena", profile.raw["launch"]["args"]["world"]
+        )
+
+    def test_run_target_help_describes_slam_arena_and_empty_worlds(self):
+        run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
+        with open(run_target_path, encoding="utf-8") as fp:
+            text = fp.read()
+
+        self.assertIn("slam_arena (SLAM mapping arena)", text)
+        self.assertIn("empty (minimal diagnostics)", text)
+        self.assertIn(
+            "SLAM_TOOLBOX_LAUNCH=online_sync_launch.py", text
+        )
 
     def test_run_target_installs_custom_tb4_world_before_official_launch(self):
         run_target_path = os.path.join(REPO_ROOT, "run_target.sh")

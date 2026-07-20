@@ -2,8 +2,10 @@ import os
 
 from threading import Thread
 import time
+import math
 import pickle
 from enum import Enum, auto
+from dataclasses import dataclass
 import subprocess as sp
 import json
 import signal
@@ -23,6 +25,15 @@ from std_srvs.srv import Empty
 class ExecMode(Enum):
     SINGLE = auto()
     SEQUENCE = auto()
+
+
+@dataclass(frozen=True)
+class PublishResult:
+    """Outcome of one ROS CLI publication attempt."""
+
+    success: bool
+    returncode: object = None
+    error: str = ""
 
 
 class Executor:
@@ -71,6 +82,68 @@ class Executor:
 
         # # self.fuzzer.req_stop_monitor = Empty.Request()
 
+    def build_ros2_pub_command(self, msg, pub_timeout):
+        """Build one bounded ROS CLI publication command.
+
+        slam_toolbox waits for both the target and rosbag subscriptions before
+        publishing. Other targets retain the historical CLI shape.
+        """
+        command = ["ros2", "topic", "pub", "--once"]
+        if (
+            getattr(self.fuzzer.config, "target_profile_name", "")
+            == "slam_toolbox_jazzy"
+        ):
+            wait_raw = os.environ.get(
+                "ROBOFUZZ_SLAM_PUB_WAIT_MATCHING", "2",
+            )
+            try:
+                wait_matching = int(wait_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ROBOFUZZ_SLAM_PUB_WAIT_MATCHING must be a positive "
+                    f"integer; got {wait_raw!r}"
+                ) from exc
+            if wait_matching <= 0:
+                raise ValueError(
+                    "ROBOFUZZ_SLAM_PUB_WAIT_MATCHING must be a positive "
+                    f"integer; got {wait_raw!r}"
+                )
+
+            keep_alive_raw = os.environ.get(
+                "ROBOFUZZ_SLAM_PUB_KEEP_ALIVE", "0.5",
+            )
+            try:
+                keep_alive = float(keep_alive_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ROBOFUZZ_SLAM_PUB_KEEP_ALIVE must be finite, >= 0, "
+                    f"and leave 0.5s timeout headroom; got {keep_alive_raw!r}"
+                ) from exc
+            if (
+                not math.isfinite(keep_alive)
+                or keep_alive < 0
+                or keep_alive >= pub_timeout - 0.5
+            ):
+                raise ValueError(
+                    "ROBOFUZZ_SLAM_PUB_KEEP_ALIVE must be finite, >= 0, "
+                    f"and < {pub_timeout - 0.5}; got {keep_alive_raw!r}"
+                )
+
+            max_wait = pub_timeout - keep_alive - 0.5
+            command.extend([
+                "--wait-matching-subscriptions", str(wait_matching),
+                "--max-wait-time-secs", str(max_wait),
+                "--keep-alive", str(keep_alive),
+            ])
+
+        yaml_message = message_to_yaml(msg)
+        command.extend([
+            self.topic_name,
+            self.msg_typestr,
+            yaml_message,
+        ])
+        return command
+
     def prepare_msg_for_publish(self, msg):
         if not getattr(self.fuzzer.config, "tb4_sitl", False):
             return msg
@@ -90,6 +163,7 @@ class Executor:
             return None
         if getattr(self.fuzzer.config, "target_profile_name", "") not in (
             "", "turtlebot4_jazzy",
+            "slam_toolbox_jazzy",
         ):
             return None
 
@@ -112,6 +186,7 @@ class Executor:
         sequence_index,
         publish_success,
         error="",
+        publish_returncode=None,
     ):
         trace_path = self._published_command_trace_path(frame)
         if trace_path is None:
@@ -130,6 +205,7 @@ class Executor:
                 "topic": getattr(self, "topic_name", ""),
                 "message_type": getattr(self, "msg_typestr", ""),
                 "publish_success": bool(publish_success),
+                "publish_returncode": publish_returncode,
                 "error": error or "",
                 "linear_x": getattr(linear, "x", None),
                 "angular_z": getattr(angular, "z", None),
@@ -371,26 +447,53 @@ class Executor:
 
         out = open("out", "w")
         err = open("err", "w")
-        sp.call(
-            [
-                "ros2",
-                "topic",
-                "pub",
-                "--once",
-                self.topic_name,
-                self.msg_typestr,
-                message_to_yaml(msg),
-            ],
-            stdout=out,
-            stderr=err,
-        )
-        out.close()
-        err.close()
+        # `ros2 topic pub --once` blocks until it matches a subscriber and
+        # sends the message. Under a slow (CPU-bound) sim or DDS discovery
+        # churn this can stall for a very long time and freeze the whole fuzz
+        # loop. Bound it so a stuck publish is reported and skipped instead of
+        # hanging the campaign. Override via ROBOFUZZ_PUB_TIMEOUT (seconds).
+        pub_timeout = float(os.environ.get("ROBOFUZZ_PUB_TIMEOUT", "15"))
+        completed = None
+        try:
+            completed = sp.run(
+                self.build_ros2_pub_command(msg, pub_timeout),
+                stdout=out,
+                stderr=err,
+                timeout=pub_timeout,
+            )
+        except sp.TimeoutExpired:
+            pass
+        finally:
+            out.close()
+            err.close()
 
+        if completed is None:
+            return PublishResult(
+                success=False,
+                returncode=None,
+                error=(
+                    f"ros2 topic pub timed out after {pub_timeout}s on "
+                    f"{self.topic_name} (slow sim / no subscriber?)"
+                ),
+            )
+
+        stderr_text = ""
         if os.path.getsize("err") > 0:
             with open("err", "r") as f:
-                e = "".join(f.readlines())
-            return e
+                stderr_text = "".join(f.readlines()).strip()
+
+        if completed.returncode != 0:
+            error = stderr_text or (
+                "ros2 topic pub exited with return code "
+                f"{completed.returncode} on {self.topic_name}"
+            )
+            return PublishResult(
+                success=False,
+                returncode=completed.returncode,
+                error=error,
+            )
+
+        return PublishResult(success=True, returncode=0, error="")
 
     def execute(
         self,
@@ -475,8 +578,9 @@ class Executor:
                     self.prepare_msg_for_publish(msg)
 
                     self.save_msg_to_queue(msg, frame, subframe)
-                    publish_success = True
-                    publish_error = ""
+                    publish_result = PublishResult(
+                        success=True, returncode=0, error="",
+                    )
 
                     # TODO: publishing through API is terribly unreliable.
                     # Switch to externally calling "ros2 topic pub" as it
@@ -489,17 +593,21 @@ class Executor:
                         pub_function(msg)
 
                     else:
-                        ret = self.do_ros2_pub(msg)
+                        publish_result = self.do_ros2_pub(msg)
 
-                        if ret:
-                            pub_failure = True
-                            pub_failure_msg = ret
-                            publish_success = False
-                            publish_error = ret
-                            print(f"[executor] failed to publish: {ret}")
+                    publish_success = publish_result.success
+                    publish_error = publish_result.error
+                    if not publish_result.success:
+                        pub_failure = True
+                        pub_failure_msg = publish_result.error
+                        print(
+                            "[executor] failed to publish: "
+                            f"{publish_result.error}"
+                        )
 
                     self.record_published_command(
-                        msg, frame, subframe, 0, publish_success, publish_error
+                        msg, frame, subframe, 0, publish_success, publish_error,
+                        publish_returncode=publish_result.returncode,
                     )
 
                     # self.fuzzer.pub.publish(msg)
@@ -512,25 +620,30 @@ class Executor:
                         self.prepare_msg_for_publish(msg)
 
                         self.save_msg_to_queue(msg, frame, subframe)
-                        publish_success = True
-                        publish_error = ""
+                        publish_result = PublishResult(
+                            success=True, returncode=0, error="",
+                        )
 
                         if pub_function:
                             pub_function(msg)
 
                         else:
-                            ret = self.do_ros2_pub(msg)
+                            publish_result = self.do_ros2_pub(msg)
 
-                            if ret:
-                                pub_failure = True
-                                pub_failure_msg = ret
-                                publish_success = False
-                                publish_error = ret
-                                print(f"[executor] failed to publish: {ret}")
+                        publish_success = publish_result.success
+                        publish_error = publish_result.error
+                        if not publish_result.success:
+                            pub_failure = True
+                            pub_failure_msg = publish_result.error
+                            print(
+                                "[executor] failed to publish: "
+                                f"{publish_result.error}"
+                            )
 
                         self.record_published_command(
                             msg, frame, subframe, i,
-                            publish_success, publish_error
+                            publish_success, publish_error,
+                            publish_returncode=publish_result.returncode,
                         )
 
                         # self.fuzzer.pub.publish(msg)

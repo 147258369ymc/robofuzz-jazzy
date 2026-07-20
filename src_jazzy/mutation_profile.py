@@ -129,6 +129,16 @@ _MOVEIT_FEEDBACK_STRATEGY_MAP = {
     "smoothness_violation_ratio": STRATEGY_REVERSAL,
 }
 
+# SLAM feedback favors sustained motion when more valid pose samples are
+# needed, and direction changes / boundary pressure when drift increases.
+_SLAM_FEEDBACK_STRATEGY_MAP = {
+    "slam_oracle_valid": STRATEGY_SINGLE_BLOCK,
+    "slam_pose_sample_count": STRATEGY_SINGLE_BLOCK,
+    "slam_max_rpe_drift": STRATEGY_REVERSAL,
+    "slam_ate_rmse": STRATEGY_BOUNDARY_PUSH,
+    "slam_max_yaw_drift": STRATEGY_REVERSAL,
+}
+
 # TurtleBot4 feedback-to-strategy mappings. These mirror the semantic meaning
 # of the executable TB4 oracle: velocity ratios push toward controller
 # boundaries, acceleration and wheel/odom disagreements favor reversal-style
@@ -331,4 +341,30 @@ class MutationProfile:
             },
             block_len_range=(3, 10),
             feedback_strategy_map=_TB4_FEEDBACK_STRATEGY_MAP,
+        )
+
+    @classmethod
+    def slam_toolbox_velocity(
+        cls,
+        max_linear: float,
+        max_angular: float,
+    ) -> "MutationProfile":
+        """Profile for aggressive slam_toolbox motion on the TB4 base."""
+        return cls(
+            field_ranges={
+                "linear.x": FieldRange(
+                    "linear.x", -max_linear, max_linear, extreme_prob=0.0,
+                ),
+                "angular.z": FieldRange(
+                    "angular.z", -max_angular, max_angular, extreme_prob=0.0,
+                ),
+            },
+            strategy_weights={
+                STRATEGY_BOUNDARY_PUSH: 0.30,
+                STRATEGY_REVERSAL: 0.30,
+                STRATEGY_SINGLE_BLOCK: 0.25,
+                STRATEGY_RANDOM: 0.15,
+            },
+            block_len_range=(3, 10),
+            feedback_strategy_map=_SLAM_FEEDBACK_STRATEGY_MAP,
         )

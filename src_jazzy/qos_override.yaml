@@ -3,3 +3,19 @@
   durability: transient_local
   history: keep_last
   depth: 30
+# slam_toolbox_jazzy: the Gazebo ground-truth pose (remapped from the create3
+# odometry plugin) is published BEST_EFFORT, and slam_toolbox /pose QoS is
+# version-dependent. A best-effort recording subscription is compatible with
+# both reliable and best-effort publishers, so these entries let rosbag capture
+# the SLAM oracle's inputs without affecting any other target (no other profile
+# records these topics).
+/sim_ground_truth_pose:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 30
+/pose:
+  reliability: best_effort
+  durability: volatile
+  history: keep_last
+  depth: 30
