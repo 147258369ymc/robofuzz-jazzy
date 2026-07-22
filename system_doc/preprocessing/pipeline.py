@@ -247,6 +247,12 @@ class PipelineResult:
         blocks_dir = out / "blocks"
         blocks_dir.mkdir(exist_ok=True)
 
+        # A saved result is a complete snapshot. Remove only prior block JSON
+        # files for this output target so a narrower rerun cannot retain stale
+        # blocks that are absent from the new manifest and index.
+        for existing_block in blocks_dir.glob("*.json"):
+            existing_block.unlink()
+
         # 保存每个 block
         for block in self.blocks:
             fname = f"{block.block_id}.json"

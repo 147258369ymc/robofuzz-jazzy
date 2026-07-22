@@ -83,7 +83,12 @@ class APIConfig:
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
             )
-            return resp.content[0].text
+            return "".join(
+                block.text
+                for block in resp.content
+                if getattr(block, "type", None) == "text"
+                and isinstance(getattr(block, "text", None), str)
+            )
         elif self.provider == "openai":
             client = self._openai_client()
             resp = client.chat.completions.create(

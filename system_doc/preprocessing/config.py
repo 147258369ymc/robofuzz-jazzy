@@ -136,6 +136,35 @@ PX4_V117_JAZZY_CONFIG = TargetConfig(
 )
 
 
+SLAM_TOOLBOX_JAZZY_CONFIG = TargetConfig(
+    name="slam_toolbox_jazzy",
+    version="slam_toolbox-2.8.5_turtlebot4-navigation-2.1.1_jazzy",
+    doc_root="system_doc/slam_toolbox_jazzy",
+    # 只索引当前同步在线 mapping 的高信号语料。锁定的完整实现证据保存在
+    # source_archive/，但不默认送入 OracleIR，防止 async/localization/
+    # lifelong/map-merging 等非运行模式污染生成上下文。
+    file_configs=[
+        FileConfig("extracted_specs/*.md"),
+        FileConfig("known_issues.md"),
+        FileConfig("versioned_runtime_sources.md"),
+        FileConfig("official_specs/*.md"),
+        FileConfig("params/robofuzz.slam_toolbox_jazzy.params.yaml"),
+        FileConfig("ros2_interfaces/*.msg"),
+        FileConfig("ros2_interfaces/*.srv"),
+        FileConfig("slam_toolbox_interfaces/srv/Pause.srv"),
+        FileConfig("slam_toolbox_interfaces/srv/ClearQueue.srv"),
+        FileConfig("slam_toolbox_interfaces/srv/Reset.srv"),
+        FileConfig("slam_toolbox_interfaces/srv/SaveMap.srv"),
+        FileConfig("source_constraints/profile/slam_toolbox_jazzy.yaml"),
+        FileConfig("source_constraints/oracle/slam.py"),
+        FileConfig("source_constraints/qos/*.yaml"),
+        FileConfig("source_constraints/world/*.sdf"),
+        FileConfig("runtime_metadata/container_versions.tsv"),
+        FileConfig("runtime_metadata/baseline_observations.md"),
+    ],
+)
+
+
 def get_config(target_name: str) -> TargetConfig:
     """获取目标系统配置"""
     configs = {
@@ -144,6 +173,7 @@ def get_config(target_name: str) -> TargetConfig:
         "moveit2_panda": MOVEIT2_PANDA_CONFIG,
         "turtlebot4_jazzy": TURTLEBOT4_JAZZY_CONFIG,
         "px4_v117_jazzy": PX4_V117_JAZZY_CONFIG,
+        "slam_toolbox_jazzy": SLAM_TOOLBOX_JAZZY_CONFIG,
     }
     if target_name not in configs:
         raise ValueError(

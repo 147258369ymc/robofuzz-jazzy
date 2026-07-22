@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from src_jazzy.oracle_ir.agent.api_manager import (
@@ -18,7 +19,30 @@ from src_jazzy.oracle_ir.agent.api_manager import (
 
 
 class JazzyAPIManagerTests(unittest.TestCase):
-    def test_default_profile_uses_rightcode_gpt_responses_api(self):
+    def test_anthropic_call_skips_thinking_blocks_and_joins_text(self):
+        cfg = APIConfig(
+            provider="anthropic",
+            base_url="https://api.example.test",
+            api_key="test-key",
+            model="claude-test",
+        )
+        response = SimpleNamespace(
+            content=[
+                SimpleNamespace(type="thinking", thinking="private reasoning"),
+                SimpleNamespace(type="text", text="id: slam."),
+                SimpleNamespace(type="text", text="rpe\n"),
+            ]
+        )
+        messages = SimpleNamespace()
+        messages.create = unittest.mock.Mock(return_value=response)
+        client = SimpleNamespace(messages=messages)
+
+        with patch.object(cfg, "_anthropic_client", return_value=client):
+            result = cfg.call("system", "generate an oracle")
+
+        self.assertEqual("id: slam.rpe\n", result)
+
+    def test_rightcode_gpt_profile_uses_responses_api(self):
         with tempfile.TemporaryDirectory() as td:
             auth_path = Path(td) / "auth.json"
             auth_path.write_text(
@@ -31,7 +55,7 @@ class JazzyAPIManagerTests(unittest.TestCase):
                 {"ORACLE_CODEX_AUTH_PATH": str(auth_path)},
                 clear=True,
             ):
-                cfg = load_config()
+                cfg = load_config("rightcode_gpt")
 
         self.assertEqual("openai_responses", cfg.provider)
         self.assertEqual("https://right.codes/codex/v1", cfg.base_url)

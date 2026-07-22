@@ -83,8 +83,12 @@ class RobotModelChunker(BaseChunker):
         for joint in root.iter("joint"):
             joint_name = joint.get("name", "unknown_joint")
             joint_type = joint.get("type", "")
-            limit = joint.find("limit") or joint.find(".//limit")
-            axis = joint.find("axis") or joint.find(".//axis")
+            limit = joint.find("limit")
+            if limit is None:
+                limit = joint.find(".//limit")
+            axis = joint.find("axis")
+            if axis is None:
+                axis = joint.find(".//axis")
             origin = joint.find("origin")
 
             extra = {"name": joint_name, "joint_type": joint_type}
@@ -130,8 +134,12 @@ class RobotModelChunker(BaseChunker):
         """提取 link 物理属性（mass、collision geometry）"""
         for link in root.iter("link"):
             link_name = link.get("name", "unknown_link")
-            inertial = link.find("inertial") or link.find(".//inertial")
-            collision = link.find("collision") or link.find(".//collision")
+            inertial = link.find("inertial")
+            if inertial is None:
+                inertial = link.find(".//inertial")
+            collision = link.find("collision")
+            if collision is None:
+                collision = link.find(".//collision")
 
             extra = {"name": link_name}
             has_data = False
@@ -145,7 +153,9 @@ class RobotModelChunker(BaseChunker):
                         has_data = True
 
             if collision is not None:
-                geom = collision.find("geometry") or collision.find(".//geometry")
+                geom = collision.find("geometry")
+                if geom is None:
+                    geom = collision.find(".//geometry")
                 if geom is not None:
                     for shape in geom:
                         tag = shape.tag

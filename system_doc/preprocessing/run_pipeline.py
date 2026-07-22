@@ -25,7 +25,10 @@ def main():
     parser = argparse.ArgumentParser(description="多源规约预处理流水线")
     parser.add_argument(
         "--target", required=True,
-        help="目标系统名称 (px4, turtlebot3, moveit2_panda, turtlebot4_jazzy, px4_v117_jazzy)",
+        help=(
+            "目标系统名称 (px4, turtlebot3, moveit2_panda, "
+            "turtlebot4_jazzy, px4_v117_jazzy, slam_toolbox_jazzy)"
+        ),
     )
     parser.add_argument(
         "--output", default=None,

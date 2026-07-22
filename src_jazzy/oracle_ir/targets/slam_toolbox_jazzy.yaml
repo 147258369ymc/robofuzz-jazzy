@@ -1,0 +1,193 @@
+# Version-locked descriptor for OracleIR generation against synchronous
+# slam_toolbox online mapping in the RoboFuzz Jazzy TurtleBot4 arena.
+name: slam_toolbox_jazzy
+display_name: "SLAM Toolbox 2.8.5 Synchronous Mapping on TurtleBot4 Jazzy"
+version: "slam_toolbox-2.8.5_turtlebot4-navigation-2.1.1_jazzy"
+middleware: ros2
+description: >
+  RoboFuzz clean-state synchronous online mapping target in slam_arena.
+  The fuzzer drives legal TwistStamped motion and compares slam_toolbox pose,
+  map, and TF outputs against simulator ground truth and runtime preconditions.
+
+topic_suffix: ""
+
+topics:
+  - name: /cmd_vel
+    msg_type: geometry_msgs/msg/TwistStamped
+    fields: [header.stamp, twist.linear.x, twist.angular.z]
+    field_units: {twist.linear.x: m/s, twist.angular.z: rad/s}
+    frequency_hz: 1.0
+    description: "RoboFuzz input; controller timeout can make sparse commands execute as separated pulses."
+
+  - name: /scan
+    msg_type: sensor_msgs/msg/LaserScan
+    fields: [header.stamp, header.frame_id, ranges, range_min, range_max]
+    field_units: {ranges: m, range_min: m, range_max: m}
+    frequency_hz: 0.0
+    description: "Real Gazebo laser input. Receipt does not prove TF filtering or scan-motion admission succeeded."
+
+  - name: /odom
+    msg_type: nav_msgs/msg/Odometry
+    fields: [header.stamp, header.frame_id, child_frame_id, pose.pose, twist.twist]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Controller odometry and the SLAM map-to-odom transform input."
+
+  - name: /pose
+    msg_type: geometry_msgs/msg/PoseWithCovarianceStamped
+    fields: [header.stamp, header.frame_id, pose.pose, pose.covariance]
+    field_units: {pose.pose.position.x: m, pose.pose.position.y: m}
+    frequency_hz: 0.0
+    description: "Corrected base pose in map_frame, published only after Karto successfully processes a scan."
+
+  - name: /map
+    msg_type: nav_msgs/msg/OccupancyGrid
+    fields: [header.stamp, header.frame_id, info, data]
+    field_units: {info.resolution: m/cell}
+    frequency_hz: 1.0
+    description: "Map output; the 2.8.5 implementation builds it only while active and subscribed."
+
+  - name: /tf
+    msg_type: tf2_msgs/msg/TFMessage
+    fields: [transforms]
+    field_units: {}
+    frequency_hz: 50.0
+    description: "Dynamic transforms; select the map-to-odom pair by parent and child frame."
+
+  - name: /sim_ground_truth_pose
+    msg_type: nav_msgs/msg/Odometry
+    fields: [header.stamp, header.frame_id, child_frame_id, pose.pose, twist.twist]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Gazebo truth reference, recorded with best-effort QoS."
+
+  - name: /bumper_contact
+    msg_type: ros_gz_interfaces/msg/Contacts
+    fields: [header.stamp, contacts]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Nonempty contacts mark collision contamination."
+
+  - name: /slam_toolbox/transition_event
+    msg_type: lifecycle_msgs/msg/TransitionEvent
+    fields: [timestamp, transition, start_state, goal_state]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Preferred evidence that activation reached PRIMARY_STATE_ACTIVE=3."
+
+  - name: /clock
+    msg_type: rosgraph_msgs/msg/Clock
+    fields: [clock]
+    field_units: {clock: s}
+    frequency_hz: 0.0
+    description: "Simulation clock required for timestamp and timeout interpretation."
+
+operating_modes:
+  - name: cold_start
+    description: "Target processes are starting; no SLAM output is required yet."
+    active_topics: [/clock]
+  - name: configured_inactive
+    description: "Configuration succeeded but lifecycle state is inactive; mapping processing is not expected."
+    active_topics: [/scan, /odom, /clock]
+  - name: active_mapping
+    description: "Lifecycle state is ACTIVE and valid scans may be admitted for synchronous mapping."
+    active_topics: [/scan, /odom, /pose, /tf, /clock]
+  - name: insufficient_observation
+    description: "Active-state, scan/TF, motion/time, or matched-pair evidence is insufficient for a trajectory verdict."
+    active_topics: [/scan, /odom, /clock]
+  - name: collision_contaminated
+    description: "Contact occurred; command attribution and estimator quality are reported separately."
+    active_topics: [/bumper_contact, /sim_ground_truth_pose]
+
+constraint_types:
+  - category: lifecycle_state
+    description: "Configure/inactive/activate/active state and readiness evidence."
+    relevant_topics: [/slam_toolbox/transition_event]
+    param_patterns: [".*lifecycle.*", ".*autostart.*"]
+  - category: scan_admission
+    description: "Scan timing, throttling, motion gates and transform availability."
+    relevant_topics: [/scan, /odom, /tf]
+    param_patterns: [".*minimum_travel.*", ".*minimum_time_interval.*", ".*scan_queue_size.*", ".*throttle_scans.*"]
+  - category: frame_transform
+    description: "map/odom/base/laser frame consistency and TF freshness."
+    relevant_topics: [/tf, /pose, /odom, /scan]
+    param_patterns: [".*frame.*", ".*transform.*"]
+  - category: trajectory_accuracy
+    description: "Frame-aligned temporal association, ATE and true SE(2) relative-pose error."
+    relevant_topics: [/pose, /sim_ground_truth_pose]
+    param_patterns: [".*trajectory.*", ".*pose.*", ".*ATE.*", ".*RPE.*"]
+  - category: map_structure
+    description: "Occupancy-grid shape, metadata, frame and target-specific raster values."
+    relevant_topics: [/map]
+    param_patterns: [".*map.*", ".*occupancy.*", ".*resolution.*"]
+  - category: collision_constraint
+    description: "Contact contamination and separation of safety from estimator accuracy."
+    relevant_topics: [/bumper_contact, /sim_ground_truth_pose]
+    param_patterns: [".*collision.*", ".*contact.*", ".*bumper.*"]
+
+safety_conditions:
+  - name: lifecycle_active
+    description: "The lifecycle goal state is ACTIVE, not merely an activation-request log."
+    check_expr: "slam_toolbox_primary_state_id == 3"
+    required_topics: [/slam_toolbox/transition_event]
+  - name: clock_ready
+    description: "Simulation time is present and monotonic."
+    check_expr: "clock_received_and_monotonic"
+    required_topics: [/clock]
+  - name: scan_tf_resolvable
+    description: "The scan frame can be transformed to odom at the scan timestamp."
+    check_expr: "scan_to_odom_tf_available"
+    required_topics: [/scan, /tf]
+  - name: enough_associated_pairs
+    description: "Unique temporally associated pose/truth pairs meet the current minimum."
+    check_expr: "unique_matched_pairs >= 10"
+    required_topics: [/pose, /sim_ground_truth_pose]
+  - name: trajectory_excited
+    description: "The trajectory has enough translation or rotation for the selected metric."
+    check_expr: "metric_specific_excitation_is_sufficient"
+    required_topics: [/pose, /sim_ground_truth_pose]
+
+param_naming:
+  lifecycle_state:
+    - ".*lifecycle.*"
+    - ".*transition.*"
+    - ".*active.*"
+    - ".*autostart.*"
+    - "^State$"
+  scan_admission:
+    - ".*scan.*"
+    - ".*minimum_travel.*"
+    - ".*minimum_time.*"
+    - ".*throttle.*"
+  frame_transform:
+    - ".*frame.*"
+    - ".*transform.*"
+    - ".*TFMessage.*"
+  trajectory_accuracy:
+    - ".*trajectory.*"
+    - ".*pose.*"
+    - ".*ATE.*"
+    - ".*RPE.*"
+  map_structure:
+    - ".*map.*"
+    - ".*occupancy.*"
+    - ".*resolution.*"
+    - ".*OccupancyGrid.*"
+  collision_constraint:
+    - ".*collision.*"
+    - ".*contact.*"
+    - ".*bumper.*"
+    - ".*Contacts.*"
+
+generation_rules:
+  - "Do not classify missing /pose or /map as a SLAM defect until lifecycle ACTIVE, scan-to-odom TF, admitted motion/time, and observation-count preconditions are satisfied."
+  - "The log text 'Slamtoolbox node is activating' proves an activation request, not successful transition to ACTIVE; prefer lifecycle state id 3 or a matching transition event."
+  - "Associate /pose and ground truth by timestamp without reusing one truth sample for multiple estimates, and reject nonmonotonic or stale samples."
+  - "Compare poses only after resolving their frames; map and simulator world origins may differ by a fixed SE(2) transform."
+  - "Use true SE(2) relative transforms for RPE. Name scalar displacement-length disagreement explicitly rather than calling it RPE."
+  - "ATE requires nondegenerate spatial excitation; translational ATE alone is uninformative for rotation-only or nearly stationary windows."
+  - "Compute yaw residuals with circular angle wrapping and validate quaternion finiteness and norm before conversion."
+  - "For OccupancyGrid, always enforce len(data) == width * height. Treat {-1,0,100} as slam_toolbox implementation evidence, not a universal nav_msgs contract."
+  - "Absence of /map without a pre-existing compatible subscriber is not a target failure because slam_toolbox conditionally builds and publishes the map."
+  - "Report collision safety separately from estimator accuracy; collision may contaminate command attribution but does not invalidate simulator truth."
+  - "Derive numeric alarm thresholds from a version-locked clean calibration stratified by motion type; official documents define semantics but not universal ATE/RPE alarm values."
