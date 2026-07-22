@@ -43,10 +43,12 @@ from executor import Executor, ExecMode
 from scheduler import Scheduler, Campaign
 from feedback import Feedback, FeedbackType
 from slam_feedback import (
+    SLAM_FEEDBACK_DEFINITIONS,
     apply_slam_feedback_quality_gate,
     evaluate_slam_feedback_interest,
     format_slam_feedback_status,
     round_has_slam_collision,
+    slam_error_signature,
 )
 
 import rclpy
@@ -1726,48 +1728,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
                     ["angular", "z", np.dtype("float64")],
                 ]
 
-            fbk = Feedback(
-                "slam_oracle_valid",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=1.0,
-            )
-            fbk_list.append(fbk)
-            fbk = Feedback(
-                "slam_max_rpe_drift",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=0.05,
-            )
-            fbk_list.append(fbk)
-            fbk = Feedback(
-                "slam_ate_rmse",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=0.05,
-            )
-            fbk_list.append(fbk)
-            fbk = Feedback(
-                "slam_max_yaw_drift",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=0.05,
-            )
-            fbk_list.append(fbk)
-            fbk = Feedback(
-                "slam_pose_sample_count",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=1.0,
-            )
-            fbk_list.append(fbk)
-            fbk = Feedback(
-                "slam_collision_detected",
-                FeedbackType.INC,
-                default_value=0.0,
-                min_threshold=1.0,
-            )
-            fbk_list.append(fbk)
+            for feedback_name, min_threshold in SLAM_FEEDBACK_DEFINITIONS:
+                fbk = Feedback(
+                    feedback_name,
+                    FeedbackType.INC,
+                    default_value=0.0,
+                    min_threshold=min_threshold,
+                )
+                fbk_list.append(fbk)
 
         elif fuzzer.config.tb4_sitl:
 
@@ -2487,7 +2455,12 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 # P5: novelty by error signature. A seed that only re-discovers
                 # an already-seen bug signature is NOT worth re-queueing as
                 # interesting — it just churns the queue with duplicates.
+                is_slam_oracle = (
+                    getattr(fuzzer.config, "oracle_mode", "")
+                    == "slam_toolbox_jazzy"
+                )
                 moveit_error_is_novel = False
+                slam_error_is_novel = False
                 tb4_error_is_novel = False
                 px4_error_is_novel = False
                 px4_error_sigs = set()
@@ -2504,7 +2477,24 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         print(f"[dedup] duplicate error signature(s): {sigs} "
                               f"— will not re-queue as interesting")
 
-                if fuzzer.config.tb4_sitl and errs:
+                if is_slam_oracle and errs:
+                    if not hasattr(scheduler, '_seen_slam_error_signatures'):
+                        scheduler._seen_slam_error_signatures = set()
+                    sigs = slam_error_signature(errs)
+                    new_sigs = sigs - scheduler._seen_slam_error_signatures
+                    if new_sigs:
+                        slam_error_is_novel = True
+                        scheduler._seen_slam_error_signatures |= new_sigs
+                        print(
+                            f"[dedup] NEW SLAM error signature(s): {new_sigs}"
+                        )
+                    else:
+                        print(
+                            f"[dedup] duplicate SLAM error signature(s): "
+                            f"{sigs} — will not re-queue as interesting"
+                        )
+
+                if fuzzer.config.tb4_sitl and not is_slam_oracle and errs:
                     if not hasattr(scheduler, '_seen_tb4_error_signatures'):
                         scheduler._seen_tb4_error_signatures = set()
                     sigs = tb4_error_signature(errs)
@@ -2767,7 +2757,11 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         and not moveit_error_is_novel
                     )
                     or (
+                        is_slam_oracle and errs and not slam_error_is_novel
+                    )
+                    or (
                         fuzzer.config.tb4_sitl
+                        and not is_slam_oracle
                         and errs
                         and not tb4_error_is_novel
                     )

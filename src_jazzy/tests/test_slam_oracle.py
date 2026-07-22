@@ -35,9 +35,71 @@ def make_pose_stamped(x=0.0, y=0.0, yaw=0.0):
     return NS(pose=NS(position=_vec(x, y), orientation=_quat_from_yaw(yaw)))
 
 
+def make_odom(x=0.0, y=0.0, yaw=0.0):
+    msg = make_pose_cov(x, y, yaw)
+    msg.child_frame_id = "base_link"
+    return msg
+
+
 def with_header_stamp(msg, sec, nanosec):
     msg.header = NS(stamp=NS(sec=sec, nanosec=nanosec))
     return msg
+
+
+def with_header(msg, sec=1, nanosec=0, frame_id=""):
+    msg.header = NS(
+        stamp=NS(sec=sec, nanosec=nanosec),
+        frame_id=frame_id,
+    )
+    return msg
+
+
+def make_scan(ranges=None, frame_id="rplidar_link"):
+    return with_header(
+        NS(
+            angle_min=-1.0,
+            angle_max=1.0,
+            angle_increment=1.0,
+            range_min=0.1,
+            range_max=12.0,
+            ranges=list(ranges if ranges is not None else [1.0, 2.0, 3.0]),
+        ),
+        frame_id=frame_id,
+    )
+
+
+def make_map(data=None, width=2, height=2, resolution=0.05,
+             frame_id="map"):
+    return with_header(
+        NS(
+            info=NS(
+                resolution=resolution,
+                width=width,
+                height=height,
+                origin=NS(
+                    position=_vec(),
+                    orientation=_quat_from_yaw(0.0),
+                ),
+            ),
+            data=list(data if data is not None else [-1, 0, 100, 0]),
+        ),
+        frame_id=frame_id,
+    )
+
+
+def make_tf(parent="map", child="odom", translation=None,
+            rotation=None):
+    transform = NS(
+        header=NS(stamp=NS(sec=1, nanosec=0), frame_id=parent),
+        child_frame_id=child,
+        transform=NS(
+            translation=translation if translation is not None else _vec(),
+            rotation=(
+                rotation if rotation is not None else _quat_from_yaw(0.0)
+            ),
+        ),
+    )
+    return NS(transforms=[transform])
 
 
 START_NS = 1_000_000_000_000_000_000  # 16-digit-trim -> 1e9 sec
@@ -103,6 +165,25 @@ def feedback_probes():
         FeedbackProbe("slam_ate_rmse"),
         FeedbackProbe("slam_max_yaw_drift"),
         FeedbackProbe("slam_pose_sample_count"),
+        FeedbackProbe("slam_match_ratio"),
+        FeedbackProbe("slam_displacement_magnitude_error"),
+        FeedbackProbe("slam_rpe_translation_rmse"),
+        FeedbackProbe("slam_rpe_rotation_max"),
+        FeedbackProbe("slam_rpe_rotation_rmse"),
+        FeedbackProbe("slam_ate_max"),
+        FeedbackProbe("slam_ate_median"),
+        FeedbackProbe("slam_odom_rpe_drift"),
+        FeedbackProbe("slam_pose_odom_excess_rpe"),
+        FeedbackProbe("slam_translation_excitation"),
+        FeedbackProbe("slam_rotation_excitation"),
+        FeedbackProbe("slam_scan_finite_ratio"),
+        FeedbackProbe("slam_scan_gate_opportunities"),
+        FeedbackProbe("slam_map_known_area"),
+        FeedbackProbe("slam_map_growth"),
+        FeedbackProbe("slam_revisit_count"),
+        FeedbackProbe("slam_loop_closure_residual"),
+        FeedbackProbe("slam_tf_coverage"),
+        FeedbackProbe("slam_tf_max_age"),
     ]
 
 
@@ -316,6 +397,46 @@ class TestSlamOraclePositive(unittest.TestCase):
 
 class TestSlamOracleDrift(unittest.TestCase):
 
+    def test_se2_rpe_detects_direction_error_hidden_by_displacement_length(self):
+        # Both trajectories travel equally far in every segment, so the old
+        # abs(||delta_est|| - ||delta_truth||) proxy reports zero.  After the
+        # corner, however, the estimate turns the opposite way; no single
+        # rigid map/world frame offset can explain both halves.
+        truth = []
+        estimate = []
+        for i in range(15):
+            truth.append((0.1 * i, 0.0, 0.0))
+            estimate.append((0.1 * i, 0.0, 0.0))
+        for i in range(1, 16):
+            truth.append((1.4, 0.1 * i, 0.0))
+            estimate.append((1.4, -0.1 * i, 0.0))
+
+        pairs = [
+            (ex, ey, eyaw, tx, ty, tyaw)
+            for (ex, ey, eyaw), (tx, ty, tyaw)
+            in zip(estimate, truth)
+        ]
+
+        metrics = slam._rpe_metrics(pairs, window=10)
+
+        self.assertGreater(metrics["translation_max"], 0.5)
+        self.assertAlmostEqual(
+            slam._max_displacement_magnitude_error(pairs, window=10),
+            0.0,
+            places=9,
+        )
+
+    def test_yaw_drift_uses_circular_center_across_pi_boundary(self):
+        near_pi = math.pi - math.radians(1.0)
+        pairs = [
+            (0.0, 0.0, near_pi, 0.0, 0.0, 0.0),
+            (0.0, 0.0, -near_pi, 0.0, 0.0, 0.0),
+        ]
+
+        drift = slam._yaw_drift_spread(pairs)
+
+        self.assertLess(drift, math.radians(3.0))
+
     def test_rpe_translation_drift_detected(self):
         truth = straight_truth(30)
         jump = slam.SLAM_RPE_DRIFT_ERROR * 2.0 + 0.5
@@ -369,8 +490,93 @@ class TestSlamOracleDrift(unittest.TestCase):
         self.assertGreater(probe_value(probes, "slam_ate_rmse"),
                            slam.SLAM_ATE_RMSE_ERROR)
 
+    def test_good_odom_baseline_keeps_pose_drift_attributed_to_slam(self):
+        truth = straight_truth(30)
+        jump = slam.SLAM_RPE_DRIFT_ERROR * 2.0 + 0.5
+        estimate = [
+            (x + (jump if i >= 15 else 0.0), y, yaw)
+            for i, (x, y, yaw) in enumerate(truth)
+        ]
+        state = {
+            "/pose": track_to_msgs(estimate),
+            "/odom": track_to_msgs(truth, maker=make_odom),
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+        }
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_RPE_ERROR:pose") for error in errs),
+            msg=f"good odom baseline must retain SLAM attribution, got {errs}",
+        )
+
+    def test_bad_odom_baseline_suppresses_slam_specific_drift_attribution(self):
+        truth = straight_truth(30)
+        jump = slam.SLAM_RPE_DRIFT_ERROR * 2.0 + 0.5
+        contaminated = [
+            (x + (jump if i >= 15 else 0.0), y, yaw)
+            for i, (x, y, yaw) in enumerate(truth)
+        ]
+        state = {
+            "/pose": track_to_msgs(contaminated),
+            "/odom": track_to_msgs(contaminated, maker=make_odom),
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+        }
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertEqual(
+            errs,
+            [],
+            msg=f"shared odom/pose contamination is not a SLAM-only bug: {errs}",
+        )
+
 
 class TestSlamOracleRobustness(unittest.TestCase):
+
+    def test_nonfinite_pose_position_is_reported_not_silently_dropped(self):
+        msg = make_pose_cov(float("nan"), 0.0, 0.0)
+
+        errs = slam.check(
+            slam_config(), [], {"/pose": [(START_NS, msg)]},
+            feedback_probes(),
+        )
+
+        self.assertTrue(
+            any(error.startswith("SLAM_NUMERIC_NONFINITE:pose.position")
+                for error in errs),
+            msg=f"non-finite pose must be explicit, got {errs}",
+        )
+
+    def test_pose_frame_mismatch_is_reported_when_header_frame_is_present(self):
+        msg = with_header(make_pose_cov(), frame_id="odom")
+
+        errs = slam.check(
+            slam_config(), [], {"/pose": [(START_NS, msg)]},
+            feedback_probes(),
+        )
+
+        self.assertTrue(
+            any(error.startswith("SLAM_FRAME_MISMATCH:pose")
+                for error in errs),
+            msg=f"/pose must be in map when declared, got {errs}",
+        )
+
+    def test_pose_header_timestamp_regression_is_reported(self):
+        first = with_header(make_pose_cov(), sec=2, frame_id="map")
+        second = with_header(make_pose_cov(), sec=1, frame_id="map")
+
+        errs = slam.check(
+            slam_config(), [],
+            {"/pose": [(START_NS, first), (START_NS + STEP_NS, second)]},
+            feedback_probes(),
+        )
+
+        self.assertTrue(
+            any(error.startswith("SLAM_TIMESTAMP_REGRESSION:pose")
+                for error in errs),
+            msg=f"header-time regression must be explicit, got {errs}",
+        )
 
     def test_empty_state_clears_all_previous_round_feedback(self):
         truth = straight_truth(30)
@@ -542,6 +748,20 @@ def _drifting_state():
 
 class TestSlamOracleCollision(unittest.TestCase):
 
+    def test_collision_does_not_hide_invalid_pose_quaternion(self):
+        state = track_state(straight_truth(30))
+        for _timestamp, msg in state["/pose"]:
+            msg.pose.pose.orientation = NS(x=0.0, y=0.0, z=0.0, w=0.0)
+        state["/bumper_contact"] = [(START_NS, _contacts_msg(1))]
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_INVALID_QUATERNION:pose")
+                for error in errs),
+            msg=f"collision must not hide invalid output, got {errs}",
+        )
+
     def test_collision_feedback_marks_collision_round(self):
         state = _drifting_state()
         state["/bumper_contact"] = [(START_NS, _contacts_msg(1))]
@@ -602,6 +822,246 @@ class TestSlamOracleCollision(unittest.TestCase):
         probes = feedback_probes()
         slam.check(slam_config(), [], state, probes)
         self.assertGreaterEqual(probe_value(probes, "slam_pose_sample_count"), 10)
+
+
+class TestSlamStructuralOracles(unittest.TestCase):
+
+    def test_scan_positive_infinity_is_a_valid_no_return(self):
+        state = {"/scan": [(START_NS, make_scan([float("inf"), 1.0, 2.0]))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertFalse(
+            any(error.startswith("SLAM_SCAN_") for error in errs),
+            msg=f"+inf LaserScan return is valid, got {errs}",
+        )
+
+    def test_scan_nan_is_reported(self):
+        state = {"/scan": [(START_NS, make_scan([float("nan"), 1.0, 2.0]))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_SCAN_INVALID_RANGE:scan")
+                for error in errs),
+            msg=f"NaN range must be rejected, got {errs}",
+        )
+
+    def test_scan_finite_range_outside_declared_bounds_is_reported(self):
+        state = {"/scan": [(START_NS, make_scan([0.05, 1.0, 13.0]))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_SCAN_INVALID_RANGE:scan")
+                for error in errs),
+            msg=f"finite range outside [min,max] must be rejected, got {errs}",
+        )
+
+    def test_map_data_length_must_match_declared_grid(self):
+        state = {"/map": [(START_NS, make_map(data=[-1, 0, 100]))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_MAP_SHAPE:map") for error in errs),
+            msg=f"OccupancyGrid shape mismatch must be rejected, got {errs}",
+        )
+
+    def test_map_cell_must_follow_occupancy_grid_range(self):
+        state = {"/map": [(START_NS, make_map(data=[-1, 0, 101, 0]))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_MAP_INVALID_CELL:map")
+                for error in errs),
+            msg=f"OccupancyGrid cells must stay in [-1,100], got {errs}",
+        )
+
+    def test_map_resolution_must_match_slam_profile(self):
+        state = {"/map": [(START_NS, make_map(resolution=0.1))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_MAP_RESOLUTION:map")
+                for error in errs),
+            msg=f"unexpected map resolution must be reported, got {errs}",
+        )
+
+    def test_map_declared_frame_must_be_map(self):
+        state = {"/map": [(START_NS, make_map(frame_id="odom"))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_FRAME_MISMATCH:map")
+                for error in errs),
+            msg=f"map output frame must be map, got {errs}",
+        )
+
+    def test_missing_tf_is_insufficient_not_an_error(self):
+        errs = slam.check(slam_config(), [], {}, feedback_probes())
+
+        self.assertFalse(
+            any(error.startswith("SLAM_TF_") for error in errs),
+            msg=f"optional TF absence must not be an error, got {errs}",
+        )
+
+    def test_tf_self_edge_is_reported_when_tf_is_observed(self):
+        state = {"/tf": [(START_NS, make_tf(parent="map", child="map"))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_TF_SELF_EDGE:tf") for error in errs),
+            msg=f"observed TF self-edge must be rejected, got {errs}",
+        )
+
+    def test_tf_invalid_quaternion_is_reported(self):
+        invalid = NS(x=0.0, y=0.0, z=0.0, w=0.0)
+        state = {"/tf": [(START_NS, make_tf(rotation=invalid))]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_TF_INVALID_QUATERNION:tf")
+                for error in errs),
+            msg=f"observed invalid TF rotation must be rejected, got {errs}",
+        )
+
+    def test_valid_tf_transform_is_not_reported(self):
+        state = {"/tf": [(START_NS, make_tf())]}
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertFalse(
+            any(error.startswith("SLAM_TF_") for error in errs),
+            msg=f"valid optional TF must not be rejected, got {errs}",
+        )
+
+
+class TestSlamSemanticFeedback(unittest.TestCase):
+
+    def test_trajectory_feedback_exposes_full_rpe_and_odom_decomposition(self):
+        truth = straight_truth(30)
+        estimate = [
+            (x * 1.02, 0.01 * math.sin(i * 0.3), 0.002 * i)
+            for i, (x, _y, _yaw) in enumerate(truth)
+        ]
+        probes = feedback_probes()
+        state = {
+            "/pose": track_to_msgs(estimate),
+            "/odom": track_to_msgs(truth, maker=make_odom),
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+        }
+
+        slam.check(slam_config(), [], state, probes)
+
+        self.assertGreater(probe_value(probes, "slam_match_ratio"), 0.9)
+        self.assertGreater(
+            probe_value(probes, "slam_rpe_translation_rmse"), 0.0
+        )
+        self.assertGreater(
+            probe_value(probes, "slam_rpe_rotation_max"), 0.0
+        )
+        self.assertLess(
+            probe_value(probes, "slam_odom_rpe_drift"), 1e-9
+        )
+        self.assertGreater(
+            probe_value(probes, "slam_pose_odom_excess_rpe"), 0.0
+        )
+        self.assertGreater(
+            probe_value(probes, "slam_translation_excitation"), 1.0
+        )
+
+    def test_scan_feedback_counts_finite_returns_and_motion_gate_opportunities(self):
+        truth = straight_truth(30, step=0.05)
+        probes = feedback_probes()
+        state = {
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+            "/scan": [
+                (START_NS, make_scan([float("inf"), 1.0, 2.0])),
+                (START_NS + STEP_NS, make_scan([3.0, 4.0, float("inf")])),
+            ],
+        }
+
+        slam.check(slam_config(), [], state, probes)
+
+        self.assertAlmostEqual(
+            probe_value(probes, "slam_scan_finite_ratio"), 4.0 / 6.0
+        )
+        self.assertGreaterEqual(
+            probe_value(probes, "slam_scan_gate_opportunities"), 10.0
+        )
+
+    def test_map_feedback_reports_known_area_and_growth(self):
+        probes = feedback_probes()
+        state = {
+            "/map": [
+                (START_NS, make_map(data=[-1, -1, -1, -1])),
+                (START_NS + STEP_NS, make_map(data=[0, 0, 100, -1])),
+            ]
+        }
+
+        slam.check(slam_config(), [], state, probes)
+
+        cell_area = 0.05 * 0.05
+        self.assertAlmostEqual(
+            probe_value(probes, "slam_map_known_area"), 3.0 * cell_area
+        )
+        self.assertAlmostEqual(
+            probe_value(probes, "slam_map_growth"), 3.0 * cell_area
+        )
+
+    def test_truth_revisit_produces_black_box_loop_feedback(self):
+        truth = []
+        for i in range(11):
+            truth.append((0.1 * i, 0.0, 0.0))
+        for i in range(1, 11):
+            truth.append((1.0, 0.1 * i, math.pi / 2.0))
+        for i in range(1, 11):
+            truth.append((1.0 - 0.1 * i, 1.0, math.pi))
+        for i in range(1, 11):
+            truth.append((0.0, 1.0 - 0.1 * i, -math.pi / 2.0))
+        estimate = list(truth)
+        x, y, yaw = estimate[-1]
+        estimate[-1] = (x + 0.2, y, yaw)
+        probes = feedback_probes()
+        state = {
+            "/pose": track_to_msgs(estimate),
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+        }
+
+        slam.check(slam_config(), [], state, probes)
+
+        self.assertGreaterEqual(
+            probe_value(probes, "slam_revisit_count"), 1.0
+        )
+        self.assertGreater(
+            probe_value(probes, "slam_loop_closure_residual"), 0.1
+        )
+
+    def test_tf_feedback_reports_complete_map_to_laser_chain(self):
+        probes = feedback_probes()
+        scan = make_scan()
+        dynamic = [
+            (START_NS, make_tf("map", "odom")),
+            (START_NS, make_tf("odom", "base_link")),
+        ]
+        static = [
+            (START_NS, make_tf("base_link", "rplidar_link")),
+        ]
+        state = {
+            "/scan": [(START_NS, scan)],
+            "/tf": dynamic,
+            "/tf_static": static,
+        }
+
+        slam.check(slam_config(), [], state, probes)
+
+        self.assertEqual(probe_value(probes, "slam_tf_coverage"), 1.0)
 
 
 if __name__ == "__main__":

@@ -93,6 +93,8 @@ watch:
     /cmd_vel: geometry_msgs/msg/TwistStamped
     /clock: rosgraph_msgs/msg/Clock
     /bumper_contact: ros_gz_interfaces/msg/Contacts
+    /tf: tf2_msgs/msg/TFMessage
+    /tf_static: tf2_msgs/msg/TFMessage
   compatibility_note: >
     /pose is the slam_toolbox corrected pose estimate. It is OPTIONAL (not a
     required readiness topic) because slam_toolbox only publishes /pose data
@@ -103,7 +105,9 @@ watch:
     consumed by the oracle at check time. /sim_ground_truth_pose (Gazebo truth,
     remapped from the create3 odometry plugin) and /odom are advertised at
     startup and stay required. /map and /scan are optional so recording quality
-    does not fail readiness.
+    does not fail readiness. /tf and /tf_static are optional evidence for
+    frame-chain and timing checks; their absence never becomes a readiness
+    failure or a standalone oracle error.
 
 oracle:
   module: oracles.slam

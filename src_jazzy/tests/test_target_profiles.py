@@ -69,6 +69,18 @@ class TargetProfileTests(unittest.TestCase):
         self.assertIn("/odom", profile.watch_topics)
         self.assertIn("/scan", profile.watch_topics)
 
+    def test_slam_profile_records_tf_as_optional_evidence(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile(
+            "slam_toolbox_jazzy", REPO_ROOT
+        )
+
+        self.assertIn("/tf", profile.optional_watch_topics)
+        self.assertIn("/tf_static", profile.optional_watch_topics)
+        self.assertNotIn("/tf", profile.watch_topics)
+        self.assertNotIn("/tf_static", profile.watch_topics)
+
     def test_aliases_resolve_to_profiles_without_mapping_tb3(self):
         import target_profiles
 

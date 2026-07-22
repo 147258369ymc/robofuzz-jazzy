@@ -12,6 +12,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from feedback import Feedback, FeedbackType  # noqa: E402
+from oracles import slam  # noqa: E402
 
 
 FUZZER_PATH = os.path.join(SRC_DIR, "fuzzer.py")
@@ -79,12 +80,19 @@ class TestSlamFeedbackStatusFormatter(unittest.TestCase):
             slam_max_rpe_drift=0.1234,
             slam_ate_rmse=0.4567,
             slam_max_yaw_drift=0.7894,
+            slam_rpe_rotation_max=0.2344,
+            slam_odom_rpe_drift=0.0124,
+            slam_map_known_area=4.5,
+            slam_revisit_count=2.0,
+            slam_tf_coverage=1.0,
         )
 
         self.assertEqual(
             _format_slam_feedback_status(feedback_list),
             "[slam] status=judged valid=1 collision=0 matched_pairs=12 "
-            "rpe_m=0.123 ate_m=0.457 yaw_rad=0.789",
+            "rpe_m=0.123 ate_m=0.457 yaw_rad=0.789 "
+            "rpe_rot_rad=0.234 odom_rpe_m=0.012 map_known_m2=4.500 "
+            "revisits=2 tf_coverage=1.000",
         )
 
     def test_collision_status_has_priority_over_validity(self):
@@ -98,7 +106,9 @@ class TestSlamFeedbackStatusFormatter(unittest.TestCase):
         self.assertEqual(
             _format_slam_feedback_status(feedback_list),
             "[slam] status=collision valid=1 collision=1 matched_pairs=3 "
-            "rpe_m=0.000 ate_m=0.000 yaw_rad=0.000",
+            "rpe_m=0.000 ate_m=0.000 yaw_rad=0.000 "
+            "rpe_rot_rad=0.000 odom_rpe_m=0.000 map_known_m2=0.000 "
+            "revisits=0 tf_coverage=0.000",
         )
 
     def test_insufficient_status_treats_missing_and_invalid_values_as_zero(self):
@@ -113,8 +123,65 @@ class TestSlamFeedbackStatusFormatter(unittest.TestCase):
         self.assertEqual(
             _format_slam_feedback_status(feedback_list),
             "[slam] status=insufficient valid=0 collision=0 "
-            "matched_pairs=0 rpe_m=0.000 ate_m=0.000 yaw_rad=0.000",
+            "matched_pairs=0 rpe_m=0.000 ate_m=0.000 yaw_rad=0.000 "
+            "rpe_rot_rad=0.000 odom_rpe_m=0.000 map_known_m2=0.000 "
+            "revisits=0 tf_coverage=0.000",
         )
+
+
+class TestSlamFeedbackDefinitions(unittest.TestCase):
+
+    def test_runtime_definitions_cover_every_oracle_feedback_name(self):
+        slam_feedback = _load_slam_feedback()
+
+        definitions = slam_feedback.SLAM_FEEDBACK_DEFINITIONS
+        names = [name for name, _threshold in definitions]
+
+        self.assertEqual(len(names), len(set(names)))
+        self.assertEqual(set(names), set(slam.SLAM_FEEDBACK_NAMES))
+
+    def test_precision_feedback_thresholds_resolve_observed_small_changes(self):
+        slam_feedback = _load_slam_feedback()
+        thresholds = dict(slam_feedback.SLAM_FEEDBACK_DEFINITIONS)
+
+        for name in (
+            "slam_max_rpe_drift",
+            "slam_ate_rmse",
+            "slam_max_yaw_drift",
+            "slam_rpe_translation_rmse",
+            "slam_rpe_rotation_max",
+        ):
+            with self.subTest(name=name):
+                self.assertLessEqual(thresholds[name], 0.001)
+
+
+class TestSlamErrorSignature(unittest.TestCase):
+
+    def test_same_error_category_ignores_floating_measurement(self):
+        slam_feedback = _load_slam_feedback()
+
+        first = slam_feedback.slam_error_signature([
+            "SLAM_RPE_ERROR:pose source=pose rpe_m=0.601 limit_m=0.5"
+        ])
+        second = slam_feedback.slam_error_signature([
+            "SLAM_RPE_ERROR:pose source=pose rpe_m=1.900 limit_m=0.5"
+        ])
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, {("slam_rpe_error", "pose")})
+
+    def test_distinct_structural_categories_keep_distinct_signatures(self):
+        slam_feedback = _load_slam_feedback()
+
+        signatures = slam_feedback.slam_error_signature([
+            "SLAM_MAP_SHAPE:map source=map width=2 height=2 cells=3",
+            "SLAM_TF_SELF_EDGE:tf source=tf edge=map->map",
+        ])
+
+        self.assertEqual(signatures, {
+            ("slam_map_shape", "map"),
+            ("slam_tf_self_edge", "tf"),
+        })
 
 
 class TestSlamFeedbackQualityGate(unittest.TestCase):
@@ -273,53 +340,30 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             cls.source = stream.read()
         cls.tree = ast.parse(cls.source, filename=FUZZER_PATH)
 
-    def test_fuzzer_registers_collision_feedback_with_round_default(self):
-        matching_calls = []
-        for node in ast.walk(self.tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Name) or node.func.id != "Feedback":
-                continue
-            if not node.args:
-                continue
-            first_arg = node.args[0]
-            if (
-                isinstance(first_arg, ast.Constant)
-                and first_arg.value == "slam_collision_detected"
-            ):
-                matching_calls.append(node)
+    def test_fuzzer_registers_slam_definitions_with_round_defaults(self):
+        definition_loops = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.iter, ast.Name)
+            and node.iter.id == "SLAM_FEEDBACK_DEFINITIONS"
+        ]
+        self.assertEqual(len(definition_loops), 1)
+        loop = definition_loops[0]
 
-        self.assertEqual(len(matching_calls), 1)
-        call = matching_calls[0]
+        feedback_calls = [
+            node
+            for node in ast.walk(loop)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Feedback"
+        ]
+        self.assertEqual(len(feedback_calls), 1)
+        call = feedback_calls[0]
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         self.assertEqual(ast.literal_eval(keywords["default_value"]), 0.0)
-        self.assertEqual(ast.literal_eval(keywords["min_threshold"]), 1.0)
-        self.assertGreaterEqual(len(call.args), 2)
-        self.assertIsInstance(call.args[1], ast.Attribute)
-        self.assertEqual(call.args[1].attr, "INC")
-
-    def test_fuzzer_registers_validity_once_in_slam_branch(self):
-        matching_calls = []
-        for node in ast.walk(self.tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Name) or node.func.id != "Feedback":
-                continue
-            if not node.args:
-                continue
-            first_arg = node.args[0]
-            if (
-                isinstance(first_arg, ast.Constant)
-                and first_arg.value == "slam_oracle_valid"
-            ):
-                matching_calls.append(node)
-
-        self.assertEqual(len(matching_calls), 1)
-        call = matching_calls[0]
-        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
-        self.assertEqual(ast.literal_eval(keywords["default_value"]), 0.0)
-        self.assertEqual(ast.literal_eval(keywords["min_threshold"]), 1.0)
-        self.assertGreaterEqual(len(call.args), 2)
+        self.assertIsInstance(keywords["min_threshold"], ast.Name)
+        self.assertEqual(keywords["min_threshold"].id, "min_threshold")
         self.assertIsInstance(call.args[1], ast.Attribute)
         self.assertEqual(call.args[1].attr, "INC")
 
@@ -330,16 +374,9 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             and "slam_toolbox_jazzy" in ast.get_source_segment(
                 self.source, node.test
             )
-            and any(
-                descendant is call
-                for statement in node.body
-                for descendant in ast.walk(statement)
-            )
+            and node.lineno <= loop.lineno <= node.end_lineno
         ]
-        self.assertTrue(
-            enclosing_slam_branches,
-            "validity feedback must be registered in the SLAM branch",
-        )
+        self.assertTrue(enclosing_slam_branches)
 
     def test_fuzzer_imports_slam_status_formatter(self):
         imported_names = [
@@ -351,6 +388,40 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
         ]
         self.assertEqual(
             imported_names.count("format_slam_feedback_status"), 1
+        )
+
+    def test_fuzzer_imports_slam_definitions_and_stable_signature(self):
+        imported_names = [
+            alias.name
+            for node in self.tree.body
+            if isinstance(node, ast.ImportFrom)
+            and node.module == "slam_feedback"
+            for alias in node.names
+        ]
+
+        self.assertEqual(
+            imported_names.count("SLAM_FEEDBACK_DEFINITIONS"), 1
+        )
+        self.assertEqual(imported_names.count("slam_error_signature"), 1)
+
+    def test_fuzzer_routes_slam_errors_before_turtlebot_dedup(self):
+        signature_calls = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "slam_error_signature"
+        ]
+
+        self.assertEqual(len(signature_calls), 1)
+        self.assertIn("if is_slam_oracle and errs:", self.source)
+        self.assertIn(
+            "if fuzzer.config.tb4_sitl and not is_slam_oracle and errs:",
+            self.source,
+        )
+        self.assertIn(
+            "is_slam_oracle and errs and not slam_error_is_novel",
+            self.source,
         )
 
     def test_fuzzer_prints_status_once_after_slam_checker(self):
