@@ -16,6 +16,13 @@ TB4_SAFE_MAX_LINEAR = 0.15
 TB4_SAFE_MAX_ANGULAR = 0.8
 SLAM_DEFAULT_MAX_LINEAR = 0.35
 SLAM_DEFAULT_MAX_ANGULAR = 1.5
+# The Jazzy diffdrive controller stops 0.5 s after each sparse command.  The
+# external `ros2 topic pub --once` path takes longer than that between messages,
+# so every sequence element contributes one isolated motion pulse.  Symmetric
+# acceleration/deceleration has total velocity-time area `command * timeout`,
+# and the controller's preserve_turning_radius setting keeps the pulse at the
+# requested curvature while applying those limits.
+SLAM_COMMAND_EFFECTIVE_DURATION_SEC = 0.5
 TB4_PHYSICAL_MAX_LINEAR = 0.46
 TB4_PHYSICAL_MAX_ANGULAR = 1.9
 SLAM_ORACLE_MODE = "slam_toolbox_jazzy"
@@ -101,6 +108,67 @@ def velocity_limits_for_oracle(oracle_mode):
     if oracle_mode == SLAM_ORACLE_MODE:
         return slam_velocity_limits()
     return TB4_SAFE_MAX_LINEAR, TB4_SAFE_MAX_ANGULAR
+
+
+def _slam_loop_plan(sequence_length, max_linear, max_angular):
+    """Return a feasible continuous-circle plan, or ``None``.
+
+    The external publisher spaces commands beyond the controller's 0.5-second
+    timeout, so the loop is a series of equal constant-curvature motion pulses.
+    A useful seed integrates those pulses to one full turn, travels at least
+    one metre, and leaves two final commands for post-closure observation.
+    """
+    minimum_sequence_length = 10
+    idle_steps = 2
+    circle_steps = sequence_length - idle_steps
+    move_speed = 0.55 * max_linear
+    turn_speed_limit = 0.85 * max_angular
+    if (
+        sequence_length < minimum_sequence_length
+        or move_speed <= 0.0
+        or turn_speed_limit <= 0.0
+    ):
+        return None
+
+    motion_time = circle_steps * SLAM_COMMAND_EFFECTIVE_DURATION_SEC
+    turn_rate = 2.0 * math.pi / motion_time
+    if turn_rate > turn_speed_limit or motion_time * move_speed < 1.0:
+        return None
+
+    return {
+        "circle_steps": circle_steps,
+        "idle_steps": idle_steps,
+        "move_speed": move_speed,
+        "turn_rate": turn_rate,
+    }
+
+
+def _apply_slam_arc(msg_list, max_linear, max_angular, direction):
+    """Apply an alternating-curvature arc with the requested first turn."""
+    half = max(1, len(msg_list) // 2)
+    for index, msg in enumerate(msg_list):
+        curvature = direction if index < half else -direction
+        _set_velocity(
+            msg,
+            0.70 * max_linear,
+            curvature * 0.65 * max_angular,
+        )
+    return msg_list
+
+
+def _apply_slam_loop(msg_list, plan, direction):
+    """Apply a previously validated continuous-circle loop plan."""
+
+    for index, msg in enumerate(msg_list):
+        if index < plan["circle_steps"]:
+            _set_velocity(
+                msg,
+                plan["move_speed"],
+                direction * plan["turn_rate"],
+            )
+        else:
+            _set_velocity(msg, 0.0, 0.0)
+    return msg_list
 
 
 def generate_velocity_sequence_seeds(
@@ -330,6 +398,27 @@ def generate_slam_sequence_seeds(msg_class, seqlen=10):
         sequence.append(_set_velocity(msg_class(), 0.0, ang_z))
     seeds.append(sequence)
 
+    # Only advertise a loop-closure seed when the sequence can complete a
+    # continuous full circle plus the post-closure observation dwell.  Shorter
+    # sequences still receive the alternating-curvature seed below.
+    loop_plan = _slam_loop_plan(seqlen, max_linear, max_angular)
+    if loop_plan is not None:
+        sequence = [msg_class() for _ in range(seqlen)]
+        seeds.append(_apply_slam_loop(sequence, loop_plan, direction=1.0))
+
+    # Alternating-curvature arc provides sustained translation and rotation
+    # as a non-closing curved-motion alternative.
+    half = max(1, seqlen // 2)
+    sequence = []
+    for index in range(seqlen):
+        direction = 1.0 if index < half else -1.0
+        sequence.append(_set_velocity(
+            msg_class(),
+            0.70 * max_linear,
+            direction * 0.65 * max_angular,
+        ))
+    seeds.append(sequence)
+
     return seeds
 
 
@@ -398,6 +487,23 @@ def apply_slam_motion_strategy(
                     sign * 0.50 * max_angular,
                 )
         return msg_list
+
+    if strategy == "trajectory_arc":
+        direction = random.choice([-1.0, 1.0])
+        return _apply_slam_arc(
+            msg_list, max_linear, max_angular, direction
+        )
+
+    if strategy == "loop_closure":
+        direction = random.choice([-1.0, 1.0])
+        loop_plan = _slam_loop_plan(
+            len(msg_list), max_linear, max_angular
+        )
+        if loop_plan is None:
+            return _apply_slam_arc(
+                msg_list, max_linear, max_angular, direction
+            )
+        return _apply_slam_loop(msg_list, loop_plan, direction)
 
     if strategy != "random":
         raise ValueError(f"unknown SLAM motion strategy: {strategy}")

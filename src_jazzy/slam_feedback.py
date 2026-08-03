@@ -6,6 +6,46 @@ import math
 
 SLAM_COLLISION_FEEDBACK_NAME = "slam_collision_detected"
 
+# These values are useful for diagnosing whether a trajectory error belongs
+# to slam_toolbox, but increasing them is not a behavior the seed scheduler
+# should reward.  Collision is handled before feedback history is traversed.
+SLAM_DIAGNOSTIC_FEEDBACK_NAMES = frozenset({
+    SLAM_COLLISION_FEEDBACK_NAME,
+    "slam_odom_rpe_drift",
+})
+
+# When several metrics improve in the same round, consume the most direct
+# SLAM failure pressure first, then behavior/scene coverage, and only then
+# evidence sufficiency.  Any future metric not listed here sorts last.
+SLAM_FEEDBACK_PRIORITY = (
+    "slam_pose_odom_excess_rpe",
+    "slam_loop_closure_residual",
+    "slam_max_rpe_drift",
+    "slam_rpe_translation_rmse",
+    "slam_rpe_rotation_max",
+    "slam_rpe_rotation_rmse",
+    "slam_ate_rmse",
+    "slam_ate_max",
+    "slam_ate_median",
+    "slam_max_yaw_drift",
+    "slam_displacement_magnitude_error",
+    "slam_tf_max_age",
+    "slam_revisit_count",
+    "slam_map_growth",
+    "slam_map_known_area",
+    "slam_scan_gate_opportunities",
+    "slam_rotation_excitation",
+    "slam_translation_excitation",
+    "slam_match_ratio",
+    "slam_pose_sample_count",
+    "slam_scan_finite_ratio",
+    "slam_tf_coverage",
+    "slam_oracle_valid",
+)
+_SLAM_FEEDBACK_PRIORITY_INDEX = {
+    name: index for index, name in enumerate(SLAM_FEEDBACK_PRIORITY)
+}
+
 # (name, minimum current value eligible for INC interestingness).  The
 # precision thresholds deliberately resolve the 0.001--0.02 ranges observed
 # in clean SLAM campaigns; the previous blanket 0.05 floor suppressed every
@@ -133,6 +173,11 @@ def apply_slam_feedback_quality_gate(is_interesting, feedback_list):
     return bool(is_interesting) and not round_has_slam_collision(feedback_list)
 
 
+def should_requeue_slam_seed(triggered_feedback, has_novel_error=False):
+    """Keep feedback discoveries and first-seen hard Oracle violations."""
+    return bool(triggered_feedback) or bool(has_novel_error)
+
+
 def evaluate_slam_feedback_interest(feedback_list):
     """Evaluate SLAM feedback without admitting collisions into history."""
     if round_has_slam_collision(feedback_list):
@@ -143,3 +188,29 @@ def evaluate_slam_feedback_interest(feedback_list):
         cur_interesting = fbk.is_interesting()
         is_interesting = is_interesting or cur_interesting
     return is_interesting
+
+
+def evaluate_slam_feedback_triggers(feedback_list):
+    """Return current-round interesting metrics in semantic priority order.
+
+    Every feedback object is still evaluated so its historical ceiling stays
+    current.  Diagnostic-only metrics update that history for logs, but are
+    excluded from the returned seed rewards.
+    """
+    if round_has_slam_collision(feedback_list):
+        return ()
+
+    triggered = []
+    for fbk in feedback_list or []:
+        if not fbk.is_interesting():
+            continue
+        if fbk.name in SLAM_DIAGNOSTIC_FEEDBACK_NAMES:
+            continue
+        triggered.append(fbk.name)
+
+    return tuple(sorted(
+        triggered,
+        key=lambda name: _SLAM_FEEDBACK_PRIORITY_INDEX.get(
+            name, len(_SLAM_FEEDBACK_PRIORITY_INDEX)
+        ),
+    ))

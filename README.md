@@ -220,6 +220,26 @@ records and checks that round, then tears the stack down. This resets the
 occupancy map, pose graph, `map -> odom` transform, robot pose, and SLAM node
 state before the next mutated sequence.
 
+Verified software versions for this target:
+
+```text
+OS:              Ubuntu 24.04 (Noble)
+ROS:             ROS 2 Jazzy
+Simulator:       Gazebo Harmonic (ros_gz)
+World:           slam_arena (in-repo, worlds/slam_arena.sdf)
+slam_toolbox:    ros-jazzy-slam-toolbox 2.8.5-1noble  (sync_slam_toolbox_node, mode: mapping)
+TurtleBot4 base: ros-jazzy-turtlebot4-simulator, ros-jazzy-irobot-create-nodes
+Laser:           simulated RPLidar (frame rplidar_link, 0.164-12.0 m, 640 samples)
+Input:           /cmd_vel geometry_msgs/msg/TwistStamped
+Oracle:          oracles.slam (estimate-vs-ground-truth RPE / ATE / yaw drift)
+```
+
+`seqlen 20` is a workable starting point, but a longer sequence (for example
+`--seqlen 40`) keeps the robot moving long enough for slam_toolbox to publish
+more time-aligned poses per round, which raises the fraction of rounds the
+oracle can actually judge. `SLAM_MAX_LIN` / `SLAM_MAX_ANG` override the SLAM
+velocity envelope if you want to push motion harder.
+
 Run one clean end-to-end validation round first. This includes a complete
 target launch and can take several minutes on a CPU-bound simulator:
 

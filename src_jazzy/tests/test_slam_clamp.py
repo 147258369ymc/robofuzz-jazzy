@@ -1,4 +1,5 @@
 import ast
+import math
 import os
 import random
 import sys
@@ -49,6 +50,23 @@ def _twist(msg):
     return msg.twist if hasattr(msg, "twist") else msg
 
 
+def _integrate_diff_drive(sequence, interval=1.0):
+    x = 0.0
+    y = 0.0
+    yaw = 0.0
+    path = 0.0
+    for msg in sequence:
+        twist = _twist(msg)
+        linear = float(twist.linear.x)
+        angular = float(twist.angular.z)
+        x += linear * math.cos(yaw) * interval
+        y += linear * math.sin(yaw) * interval
+        yaw += angular * interval
+        path += abs(linear) * interval
+    wrapped_yaw = (yaw + math.pi) % (2.0 * math.pi) - math.pi
+    return math.hypot(x, y), path, abs(wrapped_yaw)
+
+
 class TestSlamVelocityLimits(unittest.TestCase):
 
     def setUp(self):
@@ -96,7 +114,7 @@ class TestSlamVelocityLimits(unittest.TestCase):
 
         seeds = generator(_TwistStamped, seqlen=20)
 
-        self.assertEqual(len(seeds), 10)
+        self.assertEqual(len(seeds), 12)
         self.assertTrue(all(len(sequence) == 20 for sequence in seeds))
         self.assertTrue(all(_twist(msg).linear.x == 0.35 for msg in seeds[0]))
         self.assertTrue(all(_twist(msg).linear.x == -0.35 for msg in seeds[1]))
@@ -138,6 +156,23 @@ class TestSlamVelocityLimits(unittest.TestCase):
             all(_twist(msg).angular.z == 1.5 for msg in seeds[9][start:])
         )
 
+        endpoint, path, yaw_error = _integrate_diff_drive(
+            seeds[10], interval=0.5
+        )
+        self.assertLessEqual(endpoint, 0.25)
+        self.assertGreaterEqual(path, 1.0)
+        self.assertLessEqual(yaw_error, 0.05)
+
+        arc_values = [
+            (_twist(msg).linear.x, _twist(msg).angular.z)
+            for msg in seeds[11]
+        ]
+        half = len(arc_values) // 2
+        self.assertTrue(all(lin_x > 0.0 and ang_z > 0.0
+                            for lin_x, ang_z in arc_values[:half]))
+        self.assertTrue(all(lin_x > 0.0 and ang_z < 0.0
+                            for lin_x, ang_z in arc_values[half:]))
+
     def test_slam_sequence_seeds_honor_validated_environment_limits(self):
         generator = getattr(
             seed_generator, "generate_slam_sequence_seeds", None,
@@ -150,6 +185,40 @@ class TestSlamVelocityLimits(unittest.TestCase):
 
         self.assertTrue(all(_twist(msg).linear.x == 0.4 for msg in seeds[0]))
         self.assertTrue(all(_twist(msg).angular.z == 1.8 for msg in seeds[2]))
+
+    def test_ten_message_sequence_omits_timeout_shortened_false_loop(self):
+        seeds = seed_generator.generate_slam_sequence_seeds(
+            _TwistStamped, seqlen=10
+        )
+
+        self.assertEqual(len(seeds), 11)
+
+    def test_eleven_message_sequence_omits_timeout_shortened_false_loop(self):
+        seeds = seed_generator.generate_slam_sequence_seeds(
+            _TwistStamped, seqlen=11
+        )
+
+        self.assertEqual(len(seeds), 11)
+
+    def test_too_short_sequence_omits_false_loop_seed(self):
+        seeds = seed_generator.generate_slam_sequence_seeds(
+            _TwistStamped, seqlen=8
+        )
+
+        self.assertEqual(len(seeds), 11)
+
+    def test_low_angular_limit_rejects_twenty_message_loop(self):
+        os.environ["SLAM_MAX_ANG"] = "0.5"
+
+        short_seeds = seed_generator.generate_slam_sequence_seeds(
+            _TwistStamped, seqlen=10
+        )
+        long_seeds = seed_generator.generate_slam_sequence_seeds(
+            _TwistStamped, seqlen=20
+        )
+
+        self.assertEqual(len(short_seeds), 11)
+        self.assertEqual(len(long_seeds), 11)
 
 
 class TestSlamMutationProfile(unittest.TestCase):
@@ -173,6 +242,23 @@ class TestSlamMutationProfile(unittest.TestCase):
         self.assertEqual(profile.get_range("angular.z").low, -1.5)
         self.assertEqual(profile.get_range("angular.z").high, 1.5)
 
+    def test_deep_feedback_maps_to_semantic_motion_strategies(self):
+        profile = MutationProfile.slam_toolbox_velocity(0.35, 1.5)
+        mapping = profile.feedback_strategy_map
+
+        self.assertEqual(
+            mapping["slam_loop_closure_residual"], "loop_closure"
+        )
+        self.assertEqual(mapping["slam_revisit_count"], "loop_closure")
+        self.assertEqual(mapping["slam_rpe_rotation_max"], "trajectory_arc")
+        self.assertEqual(mapping["slam_rotation_excitation"], "trajectory_arc")
+        self.assertEqual(mapping["slam_pose_odom_excess_rpe"], "reversal")
+        self.assertEqual(mapping["slam_map_growth"], "trajectory_arc")
+        self.assertEqual(
+            mapping["slam_scan_gate_opportunities"], "single_block"
+        )
+        self.assertNotIn("slam_odom_rpe_drift", mapping)
+
     def test_ordinary_tb4_profile_keeps_safe_limits(self):
         profile = MutationProfile.turtlebot4_velocity()
 
@@ -180,6 +266,27 @@ class TestSlamMutationProfile(unittest.TestCase):
         self.assertEqual(profile.get_range("linear.x").high, 0.15)
         self.assertEqual(profile.get_range("angular.z").low, -0.8)
         self.assertEqual(profile.get_range("angular.z").high, 0.8)
+        self.assertEqual(
+            profile.strategy_weights,
+            {
+                "boundary_push": 0.30,
+                "reversal": 0.30,
+                "single_block": 0.25,
+                "random": 0.15,
+            },
+        )
+
+    def test_only_slam_profile_adds_arc_and_loop_strategies(self):
+        slam_profile = MutationProfile.slam_toolbox_velocity(0.35, 1.5)
+        tb4_profile = MutationProfile.turtlebot4_velocity()
+
+        self.assertIn("trajectory_arc", slam_profile.strategy_weights)
+        self.assertIn("loop_closure", slam_profile.strategy_weights)
+        self.assertNotIn("trajectory_arc", tb4_profile.strategy_weights)
+        self.assertNotIn("loop_closure", tb4_profile.strategy_weights)
+        self.assertAlmostEqual(
+            sum(slam_profile.strategy_weights.values()), 1.0
+        )
 
     def test_each_invalid_linear_override_is_rejected(self):
         invalid_values = (
@@ -292,6 +399,70 @@ class TestSlamMotionStrategies(unittest.TestCase):
                 for lin_x, ang_z in values)
         )
 
+    def test_loop_closure_strategy_builds_continuous_circle_then_dwell(self):
+        messages = self._messages(count=20)
+        with mock.patch.object(random, "choice", return_value=1.0):
+            self._apply(
+                messages,
+                "loop_closure",
+                recent_feedback="slam_loop_closure_residual",
+            )
+
+        values = [
+            (_twist(msg).linear.x, _twist(msg).angular.z)
+            for msg in messages
+        ]
+        self.assertTrue(all(
+            lin_x > 0.0 and ang_z > 0.0
+            for lin_x, ang_z in values[:-2]
+        ))
+        self.assertEqual(values[-2:], [(0.0, 0.0), (0.0, 0.0)])
+
+        endpoint, path, yaw_error = _integrate_diff_drive(
+            messages, interval=0.5
+        )
+        self.assertLessEqual(endpoint, 0.25)
+        self.assertGreaterEqual(path, 1.0)
+        self.assertLessEqual(yaw_error, 0.05)
+
+    def test_short_loop_strategy_falls_back_to_alternating_arc(self):
+        messages = self._messages(count=8)
+        with mock.patch.object(random, "choice", return_value=1.0):
+            self._apply(
+                messages,
+                "loop_closure",
+                recent_feedback="slam_loop_closure_residual",
+            )
+
+        values = [
+            (_twist(msg).linear.x, _twist(msg).angular.z)
+            for msg in messages
+        ]
+        half = len(values) // 2
+        self.assertTrue(all(lin_x > 0.0 and ang_z > 0.0
+                            for lin_x, ang_z in values[:half]))
+        self.assertTrue(all(lin_x > 0.0 and ang_z < 0.0
+                            for lin_x, ang_z in values[half:]))
+
+    def test_trajectory_arc_strategy_alternates_curvature(self):
+        messages = self._messages(count=20)
+        with mock.patch.object(random, "choice", return_value=1.0):
+            self._apply(
+                messages,
+                "trajectory_arc",
+                recent_feedback="slam_rpe_rotation_max",
+            )
+
+        values = [
+            (_twist(msg).linear.x, _twist(msg).angular.z)
+            for msg in messages
+        ]
+        half = len(values) // 2
+        self.assertTrue(all(lin_x > 0.0 and ang_z > 0.0
+                            for lin_x, ang_z in values[:half]))
+        self.assertTrue(all(lin_x > 0.0 and ang_z < 0.0
+                            for lin_x, ang_z in values[half:]))
+
 
 class TestVelocityLimitSelection(unittest.TestCase):
 
@@ -391,6 +562,77 @@ class TestFuzzerVelocityClampIntegration(unittest.TestCase):
         self.assertIn('== "slam_toolbox_jazzy"', init_queue)
         self.assertIn('platform = "slam"', init_queue)
         self.assertIn("seed_generator.slam_velocity_limits()", init_queue)
+
+    def test_slam_sequence_queue_skips_redundant_single_message_seeds(self):
+        fuzzer_path = Path(SRC_DIR) / "fuzzer.py"
+        tree = ast.parse(fuzzer_path.read_text(encoding="utf-8"))
+        helpers = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_should_add_tb_velocity_singletons"
+        ]
+        self.assertEqual(len(helpers), 1)
+
+        class _Campaign:
+            RND_SEQUENCE = object()
+            RND_REPEATED = object()
+
+        namespace = {"Campaign": _Campaign}
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=helpers, type_ignores=[])
+                ),
+                str(fuzzer_path),
+                "exec",
+            ),
+            namespace,
+        )
+        should_add = namespace["_should_add_tb_velocity_singletons"]
+        self.assertFalse(
+            should_add("slam_toolbox_jazzy", _Campaign.RND_SEQUENCE)
+        )
+        self.assertTrue(
+            should_add("slam_toolbox_jazzy", _Campaign.RND_REPEATED)
+        )
+        self.assertTrue(
+            should_add("turtlebot4_jazzy", _Campaign.RND_SEQUENCE)
+        )
+        self.assertTrue(
+            should_add("turtlebot4_jazzy", _Campaign.RND_REPEATED)
+        )
+
+        fuzzer_class = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Fuzzer"
+        )
+        init_queue = next(
+            node for node in fuzzer_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "init_queue"
+        )
+        singleton_loop = next(
+            node for node in ast.walk(init_queue)
+            if isinstance(node, ast.For)
+            and ast.unparse(node.target) == "(lin_x, ang_z)"
+            and ast.unparse(node.iter) == "velocity_seeds"
+        )
+        matching_guards = [
+            node for node in ast.walk(init_queue)
+            if isinstance(node, ast.If)
+            and singleton_loop in node.body
+            and isinstance(node.test, ast.Call)
+            and isinstance(node.test.func, ast.Name)
+            and node.test.func.id == "_should_add_tb_velocity_singletons"
+        ]
+
+        self.assertEqual(len(matching_guards), 1)
+        self.assertEqual(
+            [ast.unparse(arg) for arg in matching_guards[0].test.args],
+            [
+                "getattr(self.config, 'oracle_mode', '')",
+                "self.config.schedule",
+            ],
+        )
 
     def test_tb4_scheduler_selects_and_applies_slam_motion_profile(self):
         scheduler_path = Path(SRC_DIR) / "scheduler.py"

@@ -1,4 +1,5 @@
 import importlib
+from copy import deepcopy
 import os
 import random
 import sys
@@ -75,7 +76,7 @@ def load_seedqueue_class():
     start = text.index("class SeedQueue:")
     end = text.index("\n\nclass Fuzzer:", start)
     source = text[start:end]
-    ns = {"random": random}
+    ns = {"deepcopy": deepcopy, "random": random}
     exec(compile(source, fuzzer_path, "exec"), ns)
     return ns["SeedQueue"]
 
@@ -104,6 +105,132 @@ def fuzzer_source_block(start_marker, end_marker):
 
 
 class TurtleBot4SchedulerTests(unittest.TestCase):
+    def test_slam_seed_keeps_trigger_across_cycle_selection(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        original = [FakeTwistStamped() for _ in range(8)]
+        for index, msg in enumerate(original):
+            msg.twist.linear.x = 0.20 if index < 4 else -0.20
+            msg.twist.angular.z = 0.50
+
+        sched.remember_slam_seed_triggers(
+            original, ("slam_max_rpe_drift",)
+        )
+        sched.record_slam_feedback_triggers(("slam_pose_sample_count",))
+
+        selected = deepcopy(original)
+        selected[0].twist.linear.x += 0.01
+        sched._activate_slam_seed_triggers(selected)
+
+        self.assertEqual(
+            sched._consume_slam_feedback_trigger(),
+            "slam_max_rpe_drift",
+        )
+        self.assertIsNone(sched._consume_slam_feedback_trigger())
+
+    def test_current_round_trigger_overrides_seed_origin_trigger(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        seed = [FakeTwistStamped() for _ in range(8)]
+
+        sched.remember_slam_seed_triggers(
+            seed, ("slam_loop_closure_residual",)
+        )
+        sched._activate_slam_seed_triggers(seed)
+        sched.record_slam_feedback_triggers(("slam_max_rpe_drift",))
+
+        self.assertEqual(
+            sched._consume_slam_feedback_trigger(),
+            "slam_max_rpe_drift",
+        )
+        self.assertIsNone(sched._consume_slam_feedback_trigger())
+
+    def test_collision_discards_seed_origin_trigger(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        seed = [FakeTwistStamped() for _ in range(8)]
+
+        sched.remember_slam_seed_triggers(
+            seed, ("slam_loop_closure_residual",)
+        )
+        sched._activate_slam_seed_triggers(seed)
+        sched.record_slam_feedback_triggers(
+            (), discard_seed_origin=True, current_seed=seed
+        )
+
+        self.assertIsNone(sched._consume_slam_feedback_trigger())
+        sched._activate_slam_seed_triggers(deepcopy(seed))
+        self.assertIsNone(sched._consume_slam_feedback_trigger(seed))
+
+    def test_slam_feedback_trigger_is_consumed_exactly_once(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+
+        sched.record_slam_feedback_triggers(
+            ("slam_max_rpe_drift", "slam_pose_sample_count")
+        )
+
+        self.assertEqual(
+            sched._consume_slam_feedback_trigger(),
+            "slam_max_rpe_drift",
+        )
+        self.assertIsNone(sched._consume_slam_feedback_trigger())
+
+    def test_consuming_current_event_invalidates_same_seed_origin(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        seed = [FakeTwistStamped() for _ in range(8)]
+
+        sched.remember_slam_seed_triggers(
+            seed, ("slam_loop_closure_residual",)
+        )
+        sched.record_slam_feedback_triggers(
+            ("slam_loop_closure_residual",)
+        )
+
+        self.assertEqual(
+            sched._consume_slam_feedback_trigger(seed),
+            "slam_loop_closure_residual",
+        )
+        sched._activate_slam_seed_triggers(deepcopy(seed))
+        self.assertIsNone(sched._consume_slam_feedback_trigger(seed))
+
+    def test_slam_mutation_uses_explicit_trigger_not_list_order(self):
+        scheduler = import_scheduler_with_fakes()
+        sched = object.__new__(scheduler.Scheduler)
+        sched._tb4_is_slam = True
+        sched._tb4_max_linear = 0.35
+        sched._tb4_max_angular = 1.5
+        sched._no_interesting_rounds = 0
+        sched.msg_list = [FakeTwistStamped() for _ in range(8)]
+        profile = scheduler.MutationProfile.slam_toolbox_velocity(0.35, 1.5)
+        sched.record_slam_feedback_triggers(
+            ("slam_loop_closure_residual", "slam_pose_sample_count")
+        )
+        feedback_list = [
+            FeedbackProbe(
+                "slam_pose_sample_count",
+                value=20.0,
+                interesting_value=20.0,
+                prev_interesting_value=10.0,
+            ),
+        ]
+
+        with mock.patch.object(
+            scheduler.seed_generator,
+            "apply_slam_motion_strategy",
+        ) as apply_strategy:
+            sched._tb4_mutate_round(profile, feedback_list)
+
+        self.assertEqual(
+            apply_strategy.call_args.kwargs["recent_feedback"],
+            "slam_loop_closure_residual",
+        )
+        self.assertEqual(
+            apply_strategy.call_args.kwargs["strategy"],
+            "loop_closure",
+        )
+
     def test_seedqueue_compares_twiststamped_velocity_fields(self):
         SeedQueue = load_seedqueue_class()
 
@@ -119,6 +246,46 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
 
         self.assertFalse(SeedQueue._msg_similar(a, b, threshold=0.05))
         self.assertTrue(SeedQueue._msg_similar(a, c, threshold=0.05))
+
+    def test_seedqueue_keeps_sequence_with_hidden_middle_difference(self):
+        SeedQueue = load_seedqueue_class()
+        original = [FakeTwistStamped() for _ in range(8)]
+        changed = deepcopy(original)
+        changed[2].twist.linear.x = 0.20
+        queue = SeedQueue()
+
+        queue.append(original)
+        queue.append(changed, is_readd=True)
+
+        self.assertEqual(len(queue), 2)
+
+    def test_seedqueue_collapses_full_sequence_with_only_small_differences(self):
+        SeedQueue = load_seedqueue_class()
+        original = [FakeTwistStamped() for _ in range(8)]
+        changed = deepcopy(original)
+        for msg in changed:
+            msg.twist.linear.x = 0.01
+            msg.twist.angular.z = -0.01
+        queue = SeedQueue()
+
+        queue.append(original)
+        queue.append(changed, is_readd=True)
+
+        self.assertEqual(len(queue), 1)
+
+    def test_seedqueue_selection_returns_independent_sequence(self):
+        SeedQueue = load_seedqueue_class()
+        original = [FakeTwistStamped() for _ in range(8)]
+        queue = SeedQueue()
+        queue.append(original)
+
+        selected = queue.popleft()
+        selected[2].twist.linear.x = 0.20
+
+        self.assertIsNot(selected, queue._items[0])
+        self.assertEqual(queue._items[0][2].twist.linear.x, 0.0)
+        queue.append(selected, is_readd=True)
+        self.assertEqual(len(queue), 2)
 
     def test_tb4_semantic_reversal_uses_feedback_strategy(self):
         scheduler = import_scheduler_with_fakes()
@@ -140,6 +307,8 @@ class TurtleBot4SchedulerTests(unittest.TestCase):
         fbk_list = [
             FeedbackProbe(
                 "tb4_linear_accel_ratio",
+                value=1.0,
+                interesting_value=1.0,
                 prev_interesting_value=-1.0,
             )
         ]

@@ -45,9 +45,10 @@ from feedback import Feedback, FeedbackType
 from slam_feedback import (
     SLAM_FEEDBACK_DEFINITIONS,
     apply_slam_feedback_quality_gate,
-    evaluate_slam_feedback_interest,
+    evaluate_slam_feedback_triggers,
     format_slam_feedback_status,
     round_has_slam_collision,
+    should_requeue_slam_seed,
     slam_error_signature,
 )
 
@@ -338,6 +339,14 @@ def write_px4_error_summary(
         json.dump(summary, fp, indent=2, sort_keys=True)
 
 
+def _should_add_tb_velocity_singletons(oracle_mode, schedule):
+    """Keep singleton seeds unless SLAM already has full sequence seeds."""
+    return not (
+        oracle_mode == "slam_toolbox_jazzy"
+        and schedule == Campaign.RND_SEQUENCE
+    )
+
+
 class SeedQueue:
     """Quality-aware seed queue with deduplication, staleness decay, and warmup.
 
@@ -377,7 +386,7 @@ class SeedQueue:
             for idx, sc in enumerate(self._select_count):
                 if sc == 0:
                     self._select_count[idx] += 1
-                    return self._items[idx]
+                    return deepcopy(self._items[idx])
             self._warmup_done = True
         # Normal: weight = 1/(1+select_count)
         weights = [1.0 / (1 + sc) for sc in self._select_count]
@@ -392,7 +401,7 @@ class SeedQueue:
             else:
                 # Last seed: reset its counter instead of evicting
                 self._select_count[idx] = 0
-        return self._items[idx]
+        return deepcopy(self._items[idx])
 
     def purge_crashed(self):
         """Remove most-selected seeds on crash detection.
@@ -431,8 +440,8 @@ class SeedQueue:
         if isinstance(a, list) and isinstance(b, list):
             if len(a) != len(b):
                 return False
-            for i in [0, len(a) // 2, len(a) - 1]:
-                if not SeedQueue._msg_similar(a[i], b[i], threshold):
+            for first, second in zip(a, b):
+                if not SeedQueue._msg_similar(first, second, threshold):
                     return False
             return True
         return SeedQueue._msg_similar(a, b, threshold)
@@ -745,12 +754,16 @@ class Fuzzer:
                     (0.0, 2.80),
                 ]
 
-            for (lin_x, ang_z) in velocity_seeds:
-                msg = VelocityMsg()
-                target = msg.twist if hasattr(msg, "twist") else msg
-                target.linear.x = lin_x
-                target.angular.z = ang_z
-                self.queue.append(msg)
+            if _should_add_tb_velocity_singletons(
+                getattr(self.config, "oracle_mode", ""),
+                self.config.schedule,
+            ):
+                for (lin_x, ang_z) in velocity_seeds:
+                    msg = VelocityMsg()
+                    target = msg.twist if hasattr(msg, "twist") else msg
+                    target.linear.x = lin_x
+                    target.angular.z = ang_z
+                    self.queue.append(msg)
 
             if self.config.schedule == Campaign.RND_SEQUENCE:
                 seq_seeds = seed_generator.generate_sequence_seeds(
@@ -2631,17 +2644,44 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 == "slam_toolbox_jazzy"
             ):
                 slam_collision_round = round_has_slam_collision(fbk_list)
-                raw_is_interesting = evaluate_slam_feedback_interest(
+                slam_triggered_feedback = evaluate_slam_feedback_triggers(
                     fbk_list
                 )
-                is_interesting = apply_slam_feedback_quality_gate(
+                scheduler.record_slam_feedback_triggers(
+                    slam_triggered_feedback,
+                    discard_seed_origin=slam_collision_round,
+                    current_seed=msg_list,
+                )
+                raw_is_interesting = bool(slam_triggered_feedback)
+                feedback_is_interesting = apply_slam_feedback_quality_gate(
                     raw_is_interesting, fbk_list
                 )
-                if slam_collision_round:
+                is_interesting = should_requeue_slam_seed(
+                    slam_triggered_feedback,
+                    has_novel_error=slam_error_is_novel,
+                )
+                if not feedback_is_interesting and not slam_error_is_novel:
+                    is_interesting = False
+                if slam_triggered_feedback:
                     print(
-                        "[feedback] REJECTED — SLAM collision round "
-                        "before feedback history update (quality gate)"
+                        "[feedback] SLAM trigger(s): "
+                        f"{slam_triggered_feedback}"
                     )
+                if slam_error_is_novel and not slam_collision_round:
+                    print(
+                        "[feedback] SLAM novel hard error keeps seed"
+                    )
+                if slam_collision_round:
+                    if slam_error_is_novel:
+                        print(
+                            "[feedback] SLAM collision numeric feedback "
+                            "ignored; novel hard error preserved separately"
+                        )
+                    else:
+                        print(
+                            "[feedback] REJECTED — SLAM collision round "
+                            "before feedback history update (quality gate)"
+                        )
             else:
                 for fbk in fbk_list:
                     # check if any feedback element is interesting
@@ -2779,6 +2819,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
                         fuzzer.queue.append(deepcopy(msg_to_queue), is_readd=True)
                     else:
                         fuzzer.queue.append(deepcopy(msg_to_queue))
+                    # SeedQueue may reject an equivalent duplicate, but in
+                    # that case a replayable matching seed already exists.
+                    # Record the cause only after this branch survives the
+                    # duplicate-error and diminishing-return gates.
+                    if is_slam_oracle:
+                        scheduler.remember_slam_seed_triggers(
+                            msg_to_queue, slam_triggered_feedback
+                        )
                 else:
                     print("[feedback] diminishing — skip re-queue")
 

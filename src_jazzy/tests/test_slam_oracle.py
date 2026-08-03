@@ -370,6 +370,20 @@ class TestSlamOracleTimeSemantics(unittest.TestCase):
 class TestSlamOraclePositive(unittest.TestCase):
     """SLAM estimate tracks truth (up to a rigid frame offset) -> no bug."""
 
+    def test_hard_error_thresholds_match_clean_campaign_calibration(self):
+        # Widened from the original ~10% headroom after the 1000-round campaign
+        # (slam_calibrated_long_1000_v3) showed ATE/RPE firing 0.02-0.6 mm over
+        # the old limits — indistinguishable from clean-baseline jitter. RPE/ATE
+        # widened to ~1.35x/1.5x the clean maxima; YAW kept tight (real alarms
+        # sit far above it). See oracles/slam.py calibration comment.
+        self.assertAlmostEqual(slam.SLAM_RPE_DRIFT_ERROR, 0.023)
+        self.assertAlmostEqual(slam.SLAM_ATE_RMSE_ERROR, 0.009)
+        self.assertAlmostEqual(slam.SLAM_YAW_DRIFT_ERROR, 0.023)
+        # thresholds must stay above the observed clean-baseline maxima
+        self.assertGreater(slam.SLAM_RPE_DRIFT_ERROR, 0.017)
+        self.assertGreater(slam.SLAM_ATE_RMSE_ERROR, 0.006)
+        self.assertGreater(slam.SLAM_YAW_DRIFT_ERROR, 0.021)
+
     def test_perfect_same_frame_no_error(self):
         truth = straight_truth(30)
         state = {
@@ -510,6 +524,29 @@ class TestSlamOracleDrift(unittest.TestCase):
             msg=f"good odom baseline must retain SLAM attribution, got {errs}",
         )
 
+    def test_normal_odom_noise_does_not_use_calibrated_slam_error_limit(self):
+        truth = straight_truth(30)
+        estimate = [
+            (x + (0.10 if i >= 15 else 0.0), y, yaw)
+            for i, (x, y, yaw) in enumerate(truth)
+        ]
+        odom = [
+            (x + (0.05 if i >= 15 else 0.0), y, yaw)
+            for i, (x, y, yaw) in enumerate(truth)
+        ]
+        state = {
+            "/pose": track_to_msgs(estimate),
+            "/odom": track_to_msgs(odom, maker=make_odom),
+            "/sim_ground_truth_pose": track_to_msgs(truth),
+        }
+
+        errs = slam.check(slam_config(), [], state, feedback_probes())
+
+        self.assertTrue(
+            any(error.startswith("SLAM_RPE_ERROR:pose") for error in errs),
+            msg=f"ordinary odom noise must not suppress SLAM errors: {errs}",
+        )
+
     def test_bad_odom_baseline_suppresses_slam_specific_drift_attribution(self):
         truth = straight_truth(30)
         jump = slam.SLAM_RPE_DRIFT_ERROR * 2.0 + 0.5
@@ -582,9 +619,9 @@ class TestSlamOracleRobustness(unittest.TestCase):
         truth = straight_truth(30)
         estimate = [
             (
-                x * 1.01,
-                0.01 * math.sin(0.4 * i),
-                0.002 * i,
+                x * 1.001,
+                0.001 * math.sin(0.4 * i),
+                0.0002 * i,
             )
             for i, (x, _y, _yaw) in enumerate(truth)
         ]

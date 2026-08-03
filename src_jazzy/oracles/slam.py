@@ -19,8 +19,9 @@ frame-aware criteria:
   * yaw  - heading drift: the estimate-vs-truth yaw difference should be a
            constant frame offset; its spread over the run is the drift.
 
-None of these depend on a crash. Thresholds are conservative placeholders
-intended to be replaced by a baseline-calibrated value (see the design spec).
+None of these depend on a crash. Thresholds are calibrated from the version-
+locked clean Jazzy campaign and must be recalibrated when the target, world,
+command timing, or observation pipeline changes.
 """
 
 import math
@@ -28,13 +29,24 @@ import math
 import numpy as np
 
 
-# === Drift thresholds (baseline-calibratable placeholders) ===
-# Design decision: final thresholds = clean-baseline max x safety factor.
-# Until that calibration run is done, use conservative literature-informed
-# values so the oracle is exercisable and unit-testable.
-SLAM_RPE_DRIFT_ERROR = 0.5    # m, per-window SE(2) translation error
-SLAM_ATE_RMSE_ERROR = 0.30    # m, aligned absolute trajectory RMSE
-SLAM_YAW_DRIFT_ERROR = 0.35   # rad (~20 deg), heading-offset spread
+# === Drift thresholds calibrated on the clean Jazzy campaign ===
+# logs_jazzy/slam_clean_100_motion_pubfix observed rounded maxima of
+# 0.017 m RPE, 0.006 m ATE RMSE, and 0.021 rad yaw drift.
+#
+# The original ~10% headroom proved too tight: on the 1000-round campaign
+# (logs_jazzy/slam_calibrated_long_1000_v3) three ATE alarms recomputed to
+# 0.006622 / 0.006659 / 0.006740 m -- i.e. 0.02-0.14 mm over the 0.0066 limit,
+# indistinguishable from clean-baseline numerical variation (false positives).
+# RPE likewise fired at exactly 0.019. Widen ATE/RPE to ~1.3-1.5x the clean
+# maximum so ordinary baseline jitter stays quiet while genuine drift still
+# crosses. YAW stays tight: its real alarms (0.034, +62% over baseline) sit
+# far above the boundary and are unaffected by the widening.
+SLAM_RPE_DRIFT_ERROR = 0.023   # m, per-window SE(2) translation error (clean max 0.017 x ~1.35)
+SLAM_ATE_RMSE_ERROR = 0.009    # m, aligned absolute trajectory RMSE (clean max 0.006 x 1.5)
+SLAM_YAW_DRIFT_ERROR = 0.023   # rad, heading-offset spread (clean max 0.021 x ~1.1)
+# Odom is an attribution guard, not the SLAM estimator under test.  Keep its
+# much wider trust envelope independent from the calibrated SLAM alarm limit.
+SLAM_ODOM_RPE_TRUST_MAX = 0.5  # m
 
 # Sampling / windowing.
 SLAM_MIN_SAMPLES = 10         # matched pairs needed before judging
@@ -958,7 +970,7 @@ def check(config, msg_list, state_dict, feedback_list):
             odom_rpe = _rpe_metrics(
                 odom_pairs, odom_window
             )["translation_max"]
-            odom_baseline_trustworthy = odom_rpe <= SLAM_RPE_DRIFT_ERROR
+            odom_baseline_trustworthy = odom_rpe <= SLAM_ODOM_RPE_TRUST_MAX
 
     _update_feedback(feedback_list, "slam_max_rpe_drift", max_rpe)
     _update_feedback(
@@ -995,7 +1007,7 @@ def check(config, msg_list, state_dict, feedback_list):
 
     if odom_baseline_trustworthy and max_rpe > SLAM_RPE_DRIFT_ERROR:
         errs.append(
-            f"SLAM_RPE_ERROR:pose source=pose rpe_m={max_rpe:.3f} "
+            f"SLAM_RPE_ERROR:pose source=pose rpe_m={max_rpe:.5f} "
             f"window={window} limit_m={SLAM_RPE_DRIFT_ERROR}"
         )
     ate_has_excitation = (
@@ -1008,12 +1020,12 @@ def check(config, msg_list, state_dict, feedback_list):
         and ate_rmse > SLAM_ATE_RMSE_ERROR
     ):
         errs.append(
-            f"SLAM_ATE_ERROR:pose source=pose ate_rmse_m={ate_rmse:.3f} "
+            f"SLAM_ATE_ERROR:pose source=pose ate_rmse_m={ate_rmse:.5f} "
             f"limit_m={SLAM_ATE_RMSE_ERROR}"
         )
     if odom_baseline_trustworthy and yaw_drift > SLAM_YAW_DRIFT_ERROR:
         errs.append(
-            f"SLAM_YAW_ERROR:pose source=pose yaw_rad={yaw_drift:.3f} "
+            f"SLAM_YAW_ERROR:pose source=pose yaw_rad={yaw_drift:.5f} "
             f"limit_rad={SLAM_YAW_DRIFT_ERROR}"
         )
 

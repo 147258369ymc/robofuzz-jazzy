@@ -119,9 +119,10 @@ oracle:
     - absolute_trajectory_error_bound
     - heading_drift_bound
   threshold_policy: >
-    Derive drift thresholds from a clean no-mutation baseline campaign
-    (baseline max x safety factor). Literature-informed placeholders are used
-    in oracles/slam.py until the baseline calibration run is recorded.
+    Drift thresholds are calibrated from the 100-round clean Jazzy campaign
+    logs_jazzy/slam_clean_100_motion_pubfix with roughly ten percent headroom:
+    RPE 0.019 m, ATE RMSE 0.0066 m, and yaw drift 0.023 rad. Recalibrate them
+    when the target version, world, command timing, or observation path changes.
 
 aliases:
   do_not_map:

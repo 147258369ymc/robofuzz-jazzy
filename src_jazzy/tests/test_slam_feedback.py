@@ -56,6 +56,18 @@ def _evaluate_slam_feedback_interest(slam_feedback, feedback_list):
     return evaluator(feedback_list)
 
 
+def _evaluate_slam_feedback_triggers(slam_feedback, feedback_list):
+    evaluator = getattr(
+        slam_feedback, "evaluate_slam_feedback_triggers", None
+    )
+    if evaluator is None:
+        raise AssertionError(
+            "slam_feedback must return the exact metrics that became "
+            "interesting in the current round"
+        )
+    return evaluator(feedback_list)
+
+
 def _format_slam_feedback_status(feedback_list):
     slam_feedback = _load_slam_feedback()
     formatter = getattr(slam_feedback, "format_slam_feedback_status", None)
@@ -94,6 +106,92 @@ class TestSlamFeedbackStatusFormatter(unittest.TestCase):
             "rpe_rot_rad=0.234 odom_rpe_m=0.012 map_known_m2=4.500 "
             "revisits=2 tf_coverage=1.000",
         )
+
+
+class TestSlamFeedbackTriggerSelection(unittest.TestCase):
+
+    @staticmethod
+    def _feedback(name, value, threshold=0.0):
+        feedback = Feedback(
+            name,
+            FeedbackType.INC,
+            default_value=0.0,
+            min_threshold=threshold,
+        )
+        feedback.update_value(value)
+        return feedback
+
+    def test_priority_orders_error_then_coverage_then_sufficiency(self):
+        slam_feedback = _load_slam_feedback()
+        feedback_list = [
+            self._feedback("slam_pose_sample_count", 10.0, 1.0),
+            self._feedback("slam_map_growth", 0.5, 0.1),
+            self._feedback("slam_max_rpe_drift", 0.010, 0.001),
+            self._feedback("slam_collision_detected", 0.0, 1.0),
+        ]
+
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
+                slam_feedback, feedback_list
+            ),
+            (),
+        )
+
+        _reset_round_values(feedback_list)
+        feedback_list[0].update_value(12.0)
+        feedback_list[1].update_value(0.8)
+        feedback_list[2].update_value(0.020)
+        feedback_list[3].update_value(0.0)
+
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
+                slam_feedback, feedback_list
+            ),
+            (
+                "slam_max_rpe_drift",
+                "slam_map_growth",
+                "slam_pose_sample_count",
+            ),
+        )
+
+    def test_odom_baseline_drift_is_diagnostic_not_seed_reward(self):
+        slam_feedback = _load_slam_feedback()
+        feedback_list = [
+            self._feedback("slam_odom_rpe_drift", 0.010, 0.001),
+            self._feedback("slam_collision_detected", 0.0, 1.0),
+        ]
+
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
+                slam_feedback, feedback_list
+            ),
+            (),
+        )
+
+        _reset_round_values(feedback_list)
+        feedback_list[0].update_value(0.250)
+        feedback_list[1].update_value(0.0)
+
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
+                slam_feedback, feedback_list
+            ),
+            (),
+        )
+        self.assertEqual(feedback_list[0].interesting_value, 0.250)
+
+    def test_novel_hard_error_requeues_without_numeric_trigger(self):
+        slam_feedback = _load_slam_feedback()
+        decide = getattr(
+            slam_feedback, "should_requeue_slam_seed", None
+        )
+        self.assertIsNotNone(decide)
+
+        self.assertTrue(decide((), has_novel_error=True))
+        self.assertTrue(
+            decide(("slam_max_rpe_drift",), has_novel_error=False)
+        )
+        self.assertFalse(decide((), has_novel_error=False))
 
     def test_collision_status_has_priority_over_validity(self):
         feedback_list = _status_feedback(
@@ -214,10 +312,11 @@ class TestSlamFeedbackQualityGate(unittest.TestCase):
         feedback_by_name["slam_pose_sample_count"].update_value(10.0)
         feedback_by_name["slam_collision_detected"].update_value(0.0)
 
-        self.assertFalse(
-            _evaluate_slam_feedback_interest(
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
                 slam_feedback, feedback_list
-            )
+            ),
+            (),
         )
         self.assertEqual(
             feedback_by_name["slam_pose_sample_count"].interesting_value,
@@ -238,10 +337,11 @@ class TestSlamFeedbackQualityGate(unittest.TestCase):
         feedback_by_name["slam_pose_sample_count"].update_value(12.0)
         feedback_by_name["slam_collision_detected"].update_value(0.0)
 
-        self.assertTrue(
-            _evaluate_slam_feedback_interest(
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
                 slam_feedback, feedback_list
-            )
+            ),
+            ("slam_pose_sample_count",),
         )
         self.assertEqual(
             feedback_by_name["slam_pose_sample_count"].interesting_value,
@@ -275,10 +375,11 @@ class TestSlamFeedbackQualityGate(unittest.TestCase):
         # A clean round establishes the historical sample-count baseline.
         feedback_list[0].update_value(20.0)
         feedback_list[1].update_value(0.0)
-        self.assertFalse(
-            _evaluate_slam_feedback_interest(
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
                 slam_feedback, feedback_list
-            )
+            ),
+            (),
         )
         self.assertEqual(feedback_list[0].interesting_value, 20.0)
         self.assertEqual(feedback_list[1].interesting_value, 0.0)
@@ -295,10 +396,11 @@ class TestSlamFeedbackQualityGate(unittest.TestCase):
         _reset_round_values(feedback_list)
         feedback_list[0].update_value(30.0)
         feedback_list[1].update_value(1.0)
-        self.assertFalse(
-            _evaluate_slam_feedback_interest(
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
                 slam_feedback, feedback_list
-            )
+            ),
+            (),
         )
         self.assertEqual(feedback_list[0].interesting_value, 20.0)
         self.assertEqual(feedback_list[1].interesting_value, 0.0)
@@ -308,10 +410,11 @@ class TestSlamFeedbackQualityGate(unittest.TestCase):
         _reset_round_values(feedback_list)
         feedback_list[0].update_value(25.0)
         feedback_list[1].update_value(0.0)
-        self.assertTrue(
-            _evaluate_slam_feedback_interest(
+        self.assertEqual(
+            _evaluate_slam_feedback_triggers(
                 slam_feedback, feedback_list
-            )
+            ),
+            ("slam_pose_sample_count",),
         )
         self.assertEqual(feedback_list[0].interesting_value, 25.0)
 
@@ -403,6 +506,9 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             imported_names.count("SLAM_FEEDBACK_DEFINITIONS"), 1
         )
         self.assertEqual(imported_names.count("slam_error_signature"), 1)
+        self.assertEqual(
+            imported_names.count("evaluate_slam_feedback_triggers"), 1
+        )
 
     def test_fuzzer_routes_slam_errors_before_turtlebot_dedup(self):
         signature_calls = [
@@ -474,13 +580,13 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             "status print must be restricted to slam_toolbox_jazzy",
         )
 
-    def test_fuzzer_uses_slam_evaluator_before_requeue(self):
+    def test_fuzzer_passes_exact_slam_triggers_to_scheduler_before_requeue(self):
         helper_calls = [
             node
             for node in ast.walk(self.tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "evaluate_slam_feedback_interest"
+            and node.func.id == "evaluate_slam_feedback_triggers"
         ]
         self.assertEqual(len(helper_calls), 1)
         helper_call = helper_calls[0]
@@ -498,6 +604,33 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             and node.lineno >= 2500
         ]
         self.assertTrue(any(line > helper_line for line in requeue_lines))
+
+        record_calls = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "scheduler"
+            and node.func.attr == "record_slam_feedback_triggers"
+        ]
+        self.assertEqual(len(record_calls), 1)
+        record_call = record_calls[0]
+        self.assertGreater(record_call.lineno, helper_line)
+        self.assertEqual(len(record_call.args), 1)
+        self.assertEqual(
+            ast.unparse(record_call.args[0]), "slam_triggered_feedback"
+        )
+        self.assertEqual(
+            {
+                keyword.arg: ast.unparse(keyword.value)
+                for keyword in record_call.keywords
+            },
+            {
+                "discard_seed_origin": "slam_collision_round",
+                "current_seed": "msg_list",
+            },
+        )
 
         enclosing_slam_checks = [
             node
@@ -528,6 +661,61 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             "non-SLAM branch must retain the existing feedback traversal",
         )
 
+    def test_fuzzer_combines_slam_feedback_with_novel_hard_errors(self):
+        helper_calls = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "should_requeue_slam_seed"
+        ]
+        self.assertEqual(len(helper_calls), 1)
+        call = helper_calls[0]
+        self.assertEqual(
+            [ast.unparse(arg) for arg in call.args],
+            ["slam_triggered_feedback"],
+        )
+        self.assertEqual(
+            {kw.arg: ast.unparse(kw.value) for kw in call.keywords},
+            {"has_novel_error": "slam_error_is_novel"},
+        )
+
+    def test_fuzzer_remembers_trigger_reason_for_requeued_slam_seed(self):
+        remember_calls = [
+            node
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "scheduler"
+            and node.func.attr == "remember_slam_seed_triggers"
+        ]
+        self.assertEqual(len(remember_calls), 1)
+        call = remember_calls[0]
+        self.assertEqual(
+            [ast.unparse(arg) for arg in call.args],
+            ["msg_to_queue", "slam_triggered_feedback"],
+        )
+        queue_append_lines = [
+            node.lineno
+            for node in ast.walk(self.tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Attribute)
+            and isinstance(node.func.value.value, ast.Name)
+            and node.func.value.value.id == "fuzzer"
+            and node.func.value.attr == "queue"
+            and 2700 <= node.lineno <= 2850
+        ]
+        self.assertTrue(queue_append_lines)
+        self.assertGreater(
+            call.lineno,
+            max(queue_append_lines),
+            "seed-trigger history must only be recorded after an enqueue "
+            "attempt survives duplicate-error and diminishing-return gates",
+        )
+
     def test_slam_evaluator_checks_collision_before_feedback_traversal(self):
         with open(SLAM_FEEDBACK_PATH, encoding="utf-8") as stream:
             source = stream.read()
@@ -536,7 +724,7 @@ class TestFuzzerSlamFeedbackIntegration(unittest.TestCase):
             node
             for node in tree.body
             if isinstance(node, ast.FunctionDef)
-            and node.name == "evaluate_slam_feedback_interest"
+            and node.name == "evaluate_slam_feedback_triggers"
         ]
         self.assertEqual(len(functions), 1)
         evaluator = functions[0]

@@ -66,6 +66,7 @@ STRATEGY_BOUNDARY_PUSH = "boundary_push"
 STRATEGY_REVERSAL = "reversal"
 STRATEGY_TRAJECTORY_ARC = "trajectory_arc"
 STRATEGY_SINGLE_EXTREME = "single_extreme"
+STRATEGY_LOOP_CLOSURE = "loop_closure"
 
 # Default feedback-to-strategy mappings for PX4
 _PX4_FEEDBACK_STRATEGY_MAP = {
@@ -134,9 +135,27 @@ _MOVEIT_FEEDBACK_STRATEGY_MAP = {
 _SLAM_FEEDBACK_STRATEGY_MAP = {
     "slam_oracle_valid": STRATEGY_SINGLE_BLOCK,
     "slam_pose_sample_count": STRATEGY_SINGLE_BLOCK,
+    "slam_match_ratio": STRATEGY_SINGLE_BLOCK,
+    "slam_scan_gate_opportunities": STRATEGY_SINGLE_BLOCK,
+    "slam_tf_coverage": STRATEGY_SINGLE_BLOCK,
     "slam_max_rpe_drift": STRATEGY_REVERSAL,
+    "slam_displacement_magnitude_error": STRATEGY_REVERSAL,
+    "slam_rpe_translation_rmse": STRATEGY_REVERSAL,
+    "slam_pose_odom_excess_rpe": STRATEGY_REVERSAL,
     "slam_ate_rmse": STRATEGY_BOUNDARY_PUSH,
-    "slam_max_yaw_drift": STRATEGY_REVERSAL,
+    "slam_ate_max": STRATEGY_BOUNDARY_PUSH,
+    "slam_ate_median": STRATEGY_BOUNDARY_PUSH,
+    "slam_translation_excitation": STRATEGY_BOUNDARY_PUSH,
+    "slam_rpe_rotation_max": STRATEGY_TRAJECTORY_ARC,
+    "slam_rpe_rotation_rmse": STRATEGY_TRAJECTORY_ARC,
+    "slam_max_yaw_drift": STRATEGY_TRAJECTORY_ARC,
+    "slam_rotation_excitation": STRATEGY_TRAJECTORY_ARC,
+    "slam_scan_finite_ratio": STRATEGY_TRAJECTORY_ARC,
+    "slam_map_known_area": STRATEGY_TRAJECTORY_ARC,
+    "slam_map_growth": STRATEGY_TRAJECTORY_ARC,
+    "slam_tf_max_age": STRATEGY_TRAJECTORY_ARC,
+    "slam_revisit_count": STRATEGY_LOOP_CLOSURE,
+    "slam_loop_closure_residual": STRATEGY_LOOP_CLOSURE,
 }
 
 # TurtleBot4 feedback-to-strategy mappings. These mirror the semantic meaning
@@ -360,10 +379,12 @@ class MutationProfile:
                 ),
             },
             strategy_weights={
-                STRATEGY_BOUNDARY_PUSH: 0.30,
-                STRATEGY_REVERSAL: 0.30,
-                STRATEGY_SINGLE_BLOCK: 0.25,
-                STRATEGY_RANDOM: 0.15,
+                STRATEGY_BOUNDARY_PUSH: 0.20,
+                STRATEGY_REVERSAL: 0.20,
+                STRATEGY_SINGLE_BLOCK: 0.20,
+                STRATEGY_TRAJECTORY_ARC: 0.20,
+                STRATEGY_LOOP_CLOSURE: 0.10,
+                STRATEGY_RANDOM: 0.10,
             },
             block_len_range=(3, 10),
             feedback_strategy_map=_SLAM_FEEDBACK_STRATEGY_MAP,

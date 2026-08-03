@@ -744,6 +744,55 @@ class TargetProfileTests(unittest.TestCase):
         self.assertIn('topic.startswith("/fmu/out/")', text)
         self.assertIn("return [best_effort_qos]", text)
 
+    def test_slam_ground_truth_readiness_uses_best_effort_only(self):
+        harness_path = os.path.join(SRC_DIR, "harness.py")
+        with open(harness_path, encoding="utf-8") as fp:
+            tree = ast.parse(fp.read(), filename=harness_path)
+
+        wait_fn = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "wait_for_topic_data"
+        )
+        qos_fn = next(
+            node for node in ast.walk(wait_fn)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "qos_candidates"
+        )
+        namespace = {
+            "default_qos": object(),
+            "best_effort_qos": object(),
+            "transient_local_qos": object(),
+        }
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[qos_fn], type_ignores=[])
+                ),
+                harness_path,
+                "exec",
+            ),
+            namespace,
+        )
+        qos_candidates = namespace["qos_candidates"]
+
+        self.assertEqual(
+            [namespace["best_effort_qos"]],
+            qos_candidates("/sim_ground_truth_pose"),
+        )
+        self.assertEqual(
+            [namespace["best_effort_qos"]],
+            qos_candidates("/fmu/out/vehicle_status_v1"),
+        )
+        self.assertEqual(
+            [
+                namespace["default_qos"],
+                namespace["best_effort_qos"],
+                namespace["transient_local_qos"],
+            ],
+            qos_candidates("/odom"),
+        )
+
     def test_run_target_exposes_px4_headless_toggle(self):
         run_target_path = os.path.join(REPO_ROOT, "run_target.sh")
         with open(run_target_path, encoding="utf-8") as fp:

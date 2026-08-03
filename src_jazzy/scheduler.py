@@ -31,6 +31,7 @@ from mutation_profile import (
 from moveit_plan_params import normalize_plan_params
 
 MOVEIT_RELIABLE_REACH_M = 0.75
+SLAM_SEED_TRIGGER_HISTORY_LIMIT = 128
 
 
 def _moveit_pose_radius(x, y, z):
@@ -1612,6 +1613,8 @@ class Scheduler:
             except IndexError:
                 queued = None
             if queued is not None:
+                if getattr(self, "_tb4_is_slam", False):
+                    self._activate_slam_seed_triggers(queued)
                 if isinstance(queued, list):
                     self.msg_list = queued
                 else:
@@ -1625,6 +1628,8 @@ class Scheduler:
                 return
 
         self.msg_list = []
+        if getattr(self, "_tb4_is_slam", False):
+            self._activate_slam_seed_triggers(None)
         for _ in range(self.num_msgs):
             msg = self.msg_type_class()
             self._tb4_set_velocity(
@@ -1669,8 +1674,106 @@ class Scheduler:
                     return fbk.name
         return None
 
+    @staticmethod
+    def _slam_seed_velocity_samples(seed):
+        if seed is None:
+            return ()
+        sequence = seed if isinstance(seed, list) else [seed]
+        if not sequence:
+            return ()
+        samples = []
+        for index in (0, len(sequence) // 2, len(sequence) - 1):
+            msg = sequence[index]
+            twist = msg.twist if hasattr(msg, "twist") else msg
+            samples.append((
+                float(getattr(twist.linear, "x", 0.0)),
+                float(getattr(twist.angular, "z", 0.0)),
+            ))
+        return tuple(samples)
+
+    @classmethod
+    def _slam_seeds_similar(cls, first, second, threshold=0.05):
+        first_samples = cls._slam_seed_velocity_samples(first)
+        second_samples = cls._slam_seed_velocity_samples(second)
+        if not first_samples or len(first_samples) != len(second_samples):
+            return False
+        return all(
+            abs(first_linear - second_linear) <= threshold
+            and abs(first_angular - second_angular) <= threshold
+            for (first_linear, first_angular), (
+                second_linear, second_angular
+            ) in zip(first_samples, second_samples)
+        )
+
+    def remember_slam_seed_triggers(self, seed, triggered_names):
+        """Associate a requeued SLAM seed with why it was retained."""
+        triggered = tuple(dict.fromkeys(triggered_names or ()))
+        if seed is None or not triggered:
+            return
+        history = getattr(self, "_slam_seed_trigger_history", [])
+        for index, (known_seed, _known_triggers) in enumerate(history):
+            if self._slam_seeds_similar(seed, known_seed):
+                history[index] = (deepcopy(seed), triggered)
+                self._slam_seed_trigger_history = history
+                return
+        history.append((deepcopy(seed), triggered))
+        if len(history) > SLAM_SEED_TRIGGER_HISTORY_LIMIT:
+            history.pop(0)
+        self._slam_seed_trigger_history = history
+
+    def _activate_slam_seed_triggers(self, seed):
+        """Select the remembered reason for a seed entering a new cycle."""
+        self._pending_slam_feedback_triggers = ()
+        self._active_slam_seed_triggers = ()
+        history = getattr(self, "_slam_seed_trigger_history", [])
+        for known_seed, triggered in reversed(history):
+            if self._slam_seeds_similar(seed, known_seed):
+                self._active_slam_seed_triggers = triggered
+                break
+
+    def _discard_slam_seed_trigger_history(self, seed):
+        """Invalidate consumed trigger events associated with ``seed``."""
+        if seed is None:
+            return
+        history = getattr(self, "_slam_seed_trigger_history", [])
+        self._slam_seed_trigger_history = [
+            (known_seed, triggered)
+            for known_seed, triggered in history
+            if not self._slam_seeds_similar(seed, known_seed)
+        ]
+
+    def record_slam_feedback_triggers(
+        self,
+        triggered_names,
+        discard_seed_origin=False,
+        current_seed=None,
+    ):
+        """Store one current-round SLAM decision for the next mutation."""
+        self._pending_slam_feedback_triggers = tuple(
+            dict.fromkeys(triggered_names or ())
+        )
+        if discard_seed_origin:
+            self._active_slam_seed_triggers = ()
+            self._discard_slam_seed_trigger_history(current_seed)
+
+    def _consume_slam_feedback_trigger(self, current_seed=None):
+        """Consume the highest-priority SLAM trigger exactly once."""
+        triggered = getattr(self, "_pending_slam_feedback_triggers", ())
+        if not triggered:
+            triggered = getattr(self, "_active_slam_seed_triggers", ())
+        self._pending_slam_feedback_triggers = ()
+        self._active_slam_seed_triggers = ()
+        if triggered:
+            self._discard_slam_seed_trigger_history(current_seed)
+        return triggered[0] if triggered else None
+
     def _tb4_mutate_round(self, profile, fbk_list):
-        recent_feedback = self._tb4_recent_feedback(fbk_list)
+        if getattr(self, "_tb4_is_slam", False):
+            recent_feedback = self._consume_slam_feedback_trigger(
+                self.msg_list
+            )
+        else:
+            recent_feedback = self._tb4_recent_feedback(fbk_list)
         if not hasattr(self, "_no_interesting_rounds"):
             self._no_interesting_rounds = 0
         self._no_interesting_rounds += 1

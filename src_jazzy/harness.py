@@ -338,6 +338,8 @@ def wait_for_topic_data(topic_map, timeout_sec=120, min_msgs=1):
         )
 
         def qos_candidates(topic):
+            if topic == "/sim_ground_truth_pose":
+                return [best_effort_qos]
             # PX4 v1.17 uXRCE-DDS state streams publish best-effort. Creating
             # reliable readiness subscriptions for /fmu/out/* receives no data
             # and spams reliability-incompatible warnings every fuzz round.
