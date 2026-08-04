@@ -963,6 +963,45 @@ class TargetProfileTests(unittest.TestCase):
                 for call in fake_rclpy.spin_calls)
         )
 
+    def test_nav2_profile_loads_with_action_goal_mode(self):
+        import target_profiles
+
+        profile = target_profiles.load_profile("nav2_jazzy")
+        self.assertEqual(profile.family, "turtlebot")
+        self.assertEqual(profile.oracle_mode, "nav2_jazzy")
+        self.assertEqual(profile.input_mode, "action_goal")
+        self.assertIn("/navigate_to_pose",
+                      profile.required_actions_for_readiness)
+
+    def test_nav2_attaches_input_mode_to_config(self):
+        import target_profiles
+        from types import SimpleNamespace
+
+        profile = target_profiles.load_profile("nav2_jazzy")
+        cfg = SimpleNamespace()
+        target_profiles.attach_profile_to_config(cfg, profile)
+        self.assertEqual(cfg.input_mode, "action_goal")
+
+    def test_existing_profiles_keep_declared_input_mode(self):
+        import target_profiles
+
+        # Isolation guard: existing profiles already declare input.mode in
+        # their YAMLs. Adding input_mode parsing must read those verbatim and
+        # not perturb any existing profile. Nothing consumed input_mode before
+        # this change, so behavior is unchanged regardless of the value; this
+        # asserts the parser leaves each existing profile's declared mode
+        # exactly as-is.
+        expected = {
+            "turtlebot4_jazzy": "velocity_command",
+            "slam_toolbox_jazzy": "velocity_command",
+            "px4_v117_jazzy": "offboard_ros2",
+            "moveit2_jazzy": "motion_plan_request",
+        }
+        for name, mode in expected.items():
+            profile = target_profiles.load_profile(name)
+            self.assertEqual(profile.input_mode, mode,
+                             f"{name} input_mode changed unexpectedly")
+
     def _fake_px4_utils_modules(self):
         class FakePublisher:
             def publish(self, _msg):

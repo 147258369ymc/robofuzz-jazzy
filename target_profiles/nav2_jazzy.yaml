@@ -1,0 +1,85 @@
+schema_version: 1
+name: nav2_jazzy
+display_name: nav2 Navigation (on TurtleBot4 base, ground-truth localization)
+status: in_progress
+
+environment:
+  ubuntu: "24.04"
+  ros_distro: jazzy
+  gazebo: harmonic
+
+packages:
+  apt:
+    - ros-jazzy-turtlebot4-simulator
+    - ros-jazzy-irobot-create-nodes
+    - ros-jazzy-navigation2
+    - ros-jazzy-nav2-bringup
+
+target:
+  family: turtlebot
+  generation: turtlebot4
+  default_model: standard
+  supported_models: [standard, lite]
+  nav: nav2
+
+launch:
+  adapter: split_headless_ros_gz_launch
+  package: turtlebot4_gz_bringup
+  launch_file: turtlebot4_gz.launch.py
+  args:
+    headless: true
+    model: standard
+    world: slam_arena
+  command:
+    - ./run_target.sh
+    - nav2_jazzy
+
+readiness:
+  required_log_patterns:
+    - "Turtlebot4 standard running."
+    - "Configured and activated diffdrive_controller"
+  required_actions:
+    /navigate_to_pose: nav2_msgs/action/NavigateToPose
+  required_topics_with_data:
+    /odom: nav_msgs/msg/Odometry
+    /sim_ground_truth_pose: nav_msgs/msg/Odometry
+  timeout_sec: 240
+
+input:
+  mode: action_goal
+  preferred:
+    topic: /navigate_to_pose
+    type: nav2_msgs/action/NavigateToPose
+
+watch:
+  required:
+    /sim_ground_truth_pose: nav_msgs/msg/Odometry
+    /odom: nav_msgs/msg/Odometry
+    /robofuzz/nav2_goal: geometry_msgs/msg/PoseStamped
+    /robofuzz/nav2_result: std_msgs/msg/Int32
+  optional:
+    /robofuzz/nav2_goal_event: std_msgs/msg/String
+    /scan: sensor_msgs/msg/LaserScan
+    /cmd_vel: geometry_msgs/msg/TwistStamped
+    /bumper_contact: ros_gz_interfaces/msg/Contacts
+    /plan: nav_msgs/msg/Path
+    /clock: rosgraph_msgs/msg/Clock
+
+oracle:
+  module: oracles.nav2
+  mode: nav2_jazzy
+  status: in_progress
+  initial_properties:
+    - navigation_arrival_honest
+    - collision_free
+    - navigation_liveness
+    - no_false_failure
+  threshold_policy: >
+    Arrival tolerances start from nav2 goal_checker (0.25 m / 0.25 rad) x ~1.4.
+    Timeout/stuck budgets calibrate from a clean nav2 campaign (max reach time
+    x safety factor). Recalibrate on target/world/timing change.
+
+aliases:
+  do_not_map:
+    - --tb3-sitl
+    - --tb4-sitl

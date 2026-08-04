@@ -11,6 +11,7 @@ KNOWN_PROFILES = {
     "px4_v117_jazzy",
     "moveit2_jazzy",
     "slam_toolbox_jazzy",
+    "nav2_jazzy",
 }
 
 
@@ -39,6 +40,7 @@ class TargetProfile:
     launch_command: List[str] = field(default_factory=list)
     oracle_module: str = ""
     oracle_mode: str = ""
+    input_mode: str = ""
     status: str = ""
 
     @property
@@ -116,6 +118,7 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
     )
     launch = raw.get("launch", {}) or {}
     oracle = raw.get("oracle", {}) or {}
+    input_mode = (raw.get("input", {}) or {}).get("mode", "")
 
     return TargetProfile(
         name=raw["name"],
@@ -135,6 +138,7 @@ def load_profile(name: str, repo_root: Optional[str] = None) -> TargetProfile:
         launch_command=list(launch.get("command", []) or []),
         oracle_module=oracle.get("module", ""),
         oracle_mode=oracle.get("mode", ""),
+        input_mode=input_mode,
         status=raw.get("status", ""),
     )
 
@@ -181,6 +185,7 @@ def attach_profile_to_config(config, profile: TargetProfile):
     config.launch_adapter = profile.launch_adapter
     config.launch_command = list(profile.launch_command)
     config.oracle_mode = profile.oracle_mode
+    config.input_mode = profile.input_mode
 
     if profile.family == "turtlebot":
         config.tb4_sitl = True
