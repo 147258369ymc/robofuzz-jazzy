@@ -24,6 +24,7 @@ import oracles.px4
 import oracles.moveit
 import oracles.rosidl
 import oracles.slam
+import oracles.nav2
 
 
 class StateMonitorNode(Node):
@@ -142,6 +143,13 @@ def run_checks(config, msg_list, state_dict, feedback_list=[]):
             return errs
 
         errs = oracles.turtlesim.check(config, msg_list, pose_list, feedback_list)
+
+    elif getattr(config, "oracle_mode", "") == "nav2_jazzy":
+        if ("/robofuzz/nav2_goal" not in state_dict
+                and "/sim_ground_truth_pose" not in state_dict):
+            print("[checker] no nav2 state available")
+
+        errs = oracles.nav2.check(config, msg_list, state_dict, feedback_list)
 
     elif getattr(config, "oracle_mode", "") == "slam_toolbox_jazzy":
         if "/pose" not in state_dict and "/sim_ground_truth_pose" not in state_dict:
