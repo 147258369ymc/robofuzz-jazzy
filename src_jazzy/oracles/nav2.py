@@ -22,6 +22,7 @@ NAV2_STATUS_TIMEOUT = -6
 NAV2_ARRIVAL_XY_TOL = 0.35   # m, nav2 goal_checker xy_goal_tolerance(0.25) x ~1.4
 NAV2_ARRIVAL_YAW_TOL = 0.35  # rad, yaw_goal_tolerance(0.25) x ~1.4
 NAV2_MIN_SAMPLES = 10
+NAV2_STUCK_DISP_MIN = 0.10  # m, min net displacement below which "stuck"
 
 GOAL_TOPIC = "/robofuzz/nav2_goal"
 RESULT_TOPIC = "/robofuzz/nav2_result"
@@ -88,6 +89,20 @@ def _arrival_error(goal, truth_track):
     return None, xy, yaw
 
 
+def _round_has_collision(state_dict):
+    for _, msg in state_dict.get(COLLISION_TOPIC, []) or []:
+        if getattr(msg, "contacts", None):
+            return True
+    return False
+
+
+def _net_displacement(truth_track):
+    if len(truth_track) < 2:
+        return 0.0
+    a, b = truth_track[0], truth_track[-1]
+    return math.hypot(b[1] - a[1], b[2] - a[2])
+
+
 def check(config, msg_list, state_dict, feedback_list):
     errs = []
     for name in NAV2_FEEDBACK_NAMES:
@@ -107,6 +122,40 @@ def check(config, msg_list, state_dict, feedback_list):
         return errs
 
     _update_feedback(feedback_list, "nav2_oracle_valid", 1.0)
+
+    net_disp = _net_displacement(truth_track)
+    _update_feedback(feedback_list, "nav2_net_displacement", net_disp)
+    duration = truth_track[-1][0] - truth_track[0][0]
+    _update_feedback(feedback_list, "nav2_navigation_duration", duration)
+    _, arr_xy, _arr_yaw = _arrival_error(goal, truth_track)
+    reached = arr_xy <= NAV2_ARRIVAL_XY_TOL
+
+    # Criterion 2: collision. Unlike slam (excludes the round), here contact
+    # IS the bug: goal is in free space and localization is truth, so hitting
+    # an obstacle can only be a costmap/controller avoidance failure.
+    if _round_has_collision(state_dict):
+        _update_feedback(feedback_list, "nav2_collision_detected", 1.0)
+        errs.append("NAV2_COLLISION_ERROR:pose source=nav2 contact=1")
+
+    # Criterion 3: hang/stuck (liveness). Goal passed the reachability gate.
+    if result == NAV2_STATUS_TIMEOUT:
+        errs.append(
+            f"NAV2_TIMEOUT_ERROR:pose source=nav2 duration_s={duration:.1f}"
+        )
+    elif result != NAV2_STATUS_SUCCEEDED and not reached \
+            and net_disp < NAV2_STUCK_DISP_MIN:
+        errs.append(
+            f"NAV2_STUCK_ERROR:pose source=nav2 net_disp_m={net_disp:.3f} "
+            f"limit_m={NAV2_STUCK_DISP_MIN}"
+        )
+
+    # Criterion 4: false failure. Reachable goal (gate) + real motion but
+    # ABORTED -> over-conservative. Stuck case handled above; require motion.
+    if result == NAV2_STATUS_ABORTED and net_disp >= NAV2_STUCK_DISP_MIN \
+            and not reached:
+        errs.append(
+            f"NAV2_FALSE_FAILURE:pose source=nav2 net_disp_m={net_disp:.3f}"
+        )
 
     if result == NAV2_STATUS_SUCCEEDED:
         arr_err, xy, yaw = _arrival_error(goal, truth_track)

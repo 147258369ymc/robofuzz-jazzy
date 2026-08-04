@@ -63,3 +63,61 @@ class TestArrival(unittest.TestCase):
     def test_missing_topics_no_error(self):
         errs = nav2.check(NS(), [], {}, fb_list())
         self.assertEqual(errs, [])
+
+class TestCollision(unittest.TestCase):
+    def test_collision_reports_error(self):
+        goal = [(1.0, make_pose_stamped(2.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.1 * s, 0.0, 0.0, s))
+                 for s in range(1, 21)]
+        contact = NS(header=NS(stamp=NS(sec=5, nanosec=0), frame_id="base"),
+                     contacts=[NS(collision1=NS(name="wall"))])
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(20.0, make_int32(nav2.NAV2_STATUS_SUCCEEDED))],
+                 nav2.GROUND_TRUTH_TOPIC: truth,
+                 nav2.COLLISION_TOPIC: [(5.0, contact)]}
+        errs = nav2.check(NS(), [], state, fb_list())
+        self.assertTrue(any("NAV2_COLLISION_ERROR" in e for e in errs))
+
+    def test_no_contact_no_collision_error(self):
+        goal = [(1.0, make_pose_stamped(2.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.1 * s, 0.0, 0.0, s))
+                 for s in range(1, 21)]
+        empty = NS(header=NS(stamp=NS(sec=5, nanosec=0), frame_id="base"),
+                   contacts=[])
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(20.0, make_int32(nav2.NAV2_STATUS_SUCCEEDED))],
+                 nav2.GROUND_TRUTH_TOPIC: truth,
+                 nav2.COLLISION_TOPIC: [(5.0, empty)]}
+        errs = nav2.check(NS(), [], state, fb_list())
+        self.assertEqual([e for e in errs if "COLLISION" in e], [])
+
+class TestTimeoutStuck(unittest.TestCase):
+    def test_timeout_reports_error(self):
+        goal = [(1.0, make_pose_stamped(5.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.0, 0.0, 0.0, s)) for s in range(1, 21)]
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(20.0, make_int32(nav2.NAV2_STATUS_TIMEOUT))],
+                 nav2.GROUND_TRUTH_TOPIC: truth}
+        errs = nav2.check(NS(), [], state, fb_list())
+        self.assertTrue(any("NAV2_TIMEOUT_ERROR" in e for e in errs))
+
+    def test_stuck_reports_error(self):
+        # result not reached, near-zero displacement, not at goal
+        goal = [(1.0, make_pose_stamped(5.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.01, 0.0, 0.0, s)) for s in range(1, 21)]
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(20.0, make_int32(nav2.NAV2_STATUS_ABORTED))],
+                 nav2.GROUND_TRUTH_TOPIC: truth}
+        errs = nav2.check(NS(), [], state, fb_list())
+        self.assertTrue(any("NAV2_STUCK_ERROR" in e for e in errs))
+
+class TestFalseFailure(unittest.TestCase):
+    def test_aborted_but_moved_far_is_false_failure(self):
+        # ABORTED but robot moved a lot (reachable goal exercised) -> false failure
+        goal = [(1.0, make_pose_stamped(5.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.2 * s, 0.0, 0.0, s)) for s in range(1, 21)]
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(20.0, make_int32(nav2.NAV2_STATUS_ABORTED))],
+                 nav2.GROUND_TRUTH_TOPIC: truth}
+        errs = nav2.check(NS(), [], state, fb_list())
+        self.assertTrue(any("NAV2_FALSE_FAILURE" in e for e in errs))
