@@ -46,3 +46,13 @@ class TestMapContext(unittest.TestCase):
         c, r = self.m.world_to_cell(2.5, 0.5)  # wall
         nc, nr = self.m.nearest_free_cell(c, r)
         self.assertTrue(self.m.is_free(nc, nr))
+
+    def test_world_to_cell_floors_negative(self):
+        # origin at (-2,-2); a point below origin must map to a negative
+        # cell index (out of bounds -> not free), not be truncated into cell 0.
+        m = nav2_map.MapContext.from_grid(
+            np.zeros((5, 5), dtype=np.int8), resolution=1.0,
+            origin=(-2.0, -2.0, 0.0))
+        col, row = m.world_to_cell(-2.5, -2.5)  # 0.5m below origin corner
+        self.assertEqual((col, row), (-1, -1))
+        self.assertFalse(m.is_free(col, row))

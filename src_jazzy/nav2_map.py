@@ -26,8 +26,8 @@ class MapContext:
         return cls(grid, resolution, origin)
 
     def world_to_cell(self, x, y):
-        col = int((x - self.origin[0]) / self.resolution)
-        row = int((y - self.origin[1]) / self.resolution)
+        col = int(np.floor((x - self.origin[0]) / self.resolution))
+        row = int(np.floor((y - self.origin[1]) / self.resolution))
         return col, row
 
     def cell_to_world(self, col, row):
