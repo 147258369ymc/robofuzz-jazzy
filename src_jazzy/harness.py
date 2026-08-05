@@ -4,6 +4,7 @@ import signal
 import subprocess as sp
 import time
 import json
+import math
 import shlex
 import threading
 
@@ -881,6 +882,105 @@ def sweep_turtlebot_processes():
             stdout=sp.DEVNULL,
             stderr=sp.DEVNULL,
         )
+
+
+def _nav2_resolve_goal(msg, map_ctx, start_xy=(0.0, 0.0)):
+    """Read (x,y,yaw) from a mutated PoseStamped; if a map is given and the
+    goal is not reachable from start, snap to the nearest reachable free cell.
+    Returns (x, y, yaw, snapped)."""
+    import math as _m
+    pose = getattr(msg, "pose", None)
+    inner = getattr(pose, "pose", None)
+    if inner is not None and hasattr(inner, "position"):
+        pose = inner
+    px = float(pose.position.x)
+    py = float(pose.position.y)
+    q = pose.orientation
+    yaw = _m.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                   1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    if map_ctx is None:
+        return px, py, yaw, False
+    if map_ctx.reachable(start_xy, (px, py)):
+        return px, py, yaw, False
+    col, row = map_ctx.world_to_cell(px, py)
+    nearest = map_ctx.nearest_free_cell(col, row)
+    if nearest is None:
+        return px, py, yaw, False
+    nx, ny = map_ctx.cell_to_world(*nearest)
+    return nx, ny, yaw, True
+
+
+def nav2_send_command(msg, map_ctx=None, start_xy=(0.0, 0.0)):
+    """Send a NavigateToPose goal (mirrors moveit_send_command). Republishes
+    the actual goal + terminal result + events onto /robofuzz/nav2_* so the
+    rosbag captures them and oracles/nav2.py can judge them offline."""
+    print("[nav2 harness] sending NavigateToPose goal")
+    from nav2_msgs.action import NavigateToPose
+    from geometry_msgs.msg import PoseStamped
+    from std_msgs.msg import Int32, String
+    from rclpy.action import ActionClient
+
+    node = rclpy.create_node(
+        f"_nav2_profile_client_{os.getpid()}_{time.time_ns()}")
+    try:
+        gx, gy, gyaw, snapped = _nav2_resolve_goal(msg, map_ctx, start_xy)
+
+        goal_pub = node.create_publisher(PoseStamped, "/robofuzz/nav2_goal", 10)
+        result_pub = node.create_publisher(Int32, "/robofuzz/nav2_result", 10)
+        event_pub = node.create_publisher(String, "/robofuzz/nav2_goal_event", 10)
+
+        goal_msg = PoseStamped()
+        goal_msg.header.frame_id = "map"
+        goal_msg.pose.position.x = gx
+        goal_msg.pose.position.y = gy
+        goal_msg.pose.orientation.z = math.sin(gyaw / 2.0)
+        goal_msg.pose.orientation.w = math.cos(gyaw / 2.0)
+        for _ in range(3):
+            goal_pub.publish(goal_msg)
+            rclpy.spin_once(node, timeout_sec=0.05)
+            time.sleep(0.05)
+        if snapped:
+            ev = String(); ev.data = f"snapped:{gx:.3f},{gy:.3f}"
+            event_pub.publish(ev)
+
+        client = ActionClient(node, NavigateToPose, "/navigate_to_pose")
+        if not client.wait_for_server(timeout_sec=20.0):
+            raise RuntimeError("nav2 /navigate_to_pose server unavailable")
+
+        goal = NavigateToPose.Goal()
+        goal.pose = goal_msg
+        send_future = client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(node, send_future, timeout_sec=30.0)
+        handle = send_future.result()
+        if handle is None or not handle.accepted:
+            raise RuntimeError("nav2 goal rejected")
+
+        timeout = float(os.environ.get("NAV2_ACTION_TIMEOUT_SEC", "120.0"))
+        result_future = handle.get_result_async()
+        rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout)
+        wrapper = result_future.result()
+        code = Int32()
+        if wrapper is None:
+            try:
+                cf = handle.cancel_goal_async()
+                rclpy.spin_until_future_complete(node, cf, timeout_sec=2.0)
+            except Exception:
+                pass
+            code.data = -6  # TIMEOUT
+            result_pub.publish(code)
+            ev = String(); ev.data = f"timeout:{timeout}"
+            event_pub.publish(ev)
+            raise RuntimeError("nav2 navigation timed out")
+        code.data = int(getattr(wrapper, "status", 0))
+        result_pub.publish(code)
+        ev = String(); ev.data = f"result:{code.data}"
+        event_pub.publish(ev)
+        for _ in range(3):
+            rclpy.spin_once(node, timeout_sec=0.05)
+            time.sleep(0.05)
+        print(f"                 + nav2 result status={code.data}")
+    finally:
+        node.destroy_node()
 
 
 if __name__ == "__main__":

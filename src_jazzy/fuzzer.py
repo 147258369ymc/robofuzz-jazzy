@@ -1219,6 +1219,9 @@ def inspect_target(fuzzer):
         if profile.family == "moveit":
             topic_name = "/metatopic"
             msg_type = "geometry_msgs/msg/Pose"
+        elif getattr(profile, "input_mode", "") == "action_goal":
+            topic_name = "/metatopic"
+            msg_type = "geometry_msgs/msg/PoseStamped"
         msg_type_class = _msg_class_from_type(msg_type)
         fuzz_targets.append([topic_name, msg_type_class, profile.name])
         return fuzz_targets
@@ -2285,6 +2288,15 @@ def fuzz_msg(fuzzer, fuzz_targets):
                 pub_function = partial(
                     harness.moveit_send_command,
                     plan_params=plan_params,
+                )
+
+            elif getattr(fuzzer.config, "input_mode", "") == "action_goal":
+                pre_exec_list = None
+                post_exec_list = None
+                pub_function = partial(
+                    harness.nav2_send_command,
+                    map_ctx=getattr(fuzzer, "nav2_map_ctx", None),
+                    start_xy=getattr(fuzzer, "nav2_start_xy", (0.0, 0.0)),
                 )
 
             else:
