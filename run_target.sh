@@ -13,6 +13,7 @@ Target profiles:
   px4_v117_jazzy
   moveit2_jazzy
   slam_toolbox_jazzy
+  nav2_jazzy
 
 Environment overrides:
   TURTLEBOT4_HEADLESS=1|0
@@ -37,6 +38,11 @@ Environment overrides:
   MOVEIT_HEADLESS=1|0
   MOVEIT_WITH_RVIZ=1|0
   MOVEIT_RVIZ_CONFIG=/work/src_jazzy/rviz/moveit_fuzz.rviz
+  NAV2_MAP=/work/maps/slam_arena.yaml
+    Static occupancy map served by map_server for the nav2_jazzy target
+  NAV2_PARAMS=/path/to/nav2_params.yaml
+    Optional nav2 params_file for navigation_launch.py (defaults built-in)
+  NAV2_RVIZ=0|1
 USAGE
 }
 
@@ -385,6 +391,131 @@ run_slam_toolbox() {
     "rviz:=${rviz_arg}"
 }
 
+start_nav2_when_ready() {
+  # Wait for the TurtleBot4 base to publish /scan, then stack the nav2
+  # navigable stack on top. Runs as a background subshell of run_nav2 so its
+  # child launches stay under this PID for trap-based cleanup (mirrors
+  # start_slam_toolbox_when_ready). Unlike slam we do NOT run a localizer:
+  # instead of amcl we synthesize a ground-truth map->odom TF, and we serve a
+  # pre-built static map so the planner has a costmap immediately.
+  local waited=0
+  while [[ "${waited}" -lt 120 ]]; do
+    if ros2 topic list 2>/dev/null | grep -qx "/scan"; then
+      break
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  # Let the tf tree (odom->base_link) and first scans/odom settle.
+  sleep 3
+
+  local map_yaml="${NAV2_MAP:-/work/maps/slam_arena.yaml}"
+
+  # Ground-truth map->odom: bridge /sim_ground_truth_pose into a periodic TF so
+  # nav2 localizes perfectly (bypasses amcl / the TB4 scan-frame TF issue).
+  echo "nav2_jazzy stack: launching ground-truth map->odom TF publisher"
+  python3 "${ROOT_DIR}/src_jazzy/nav2_gt_tf.py" \
+    --ros-args -p use_sim_time:=true &
+
+  # Serve the pre-built static occupancy map (map_server is a LifecycleNode;
+  # nav2_bringup's navigation_launch does NOT include it, so start + activate
+  # it here). Use nav2 lifecycle_manager to configure+activate it.
+  echo "nav2_jazzy stack: launching map_server for ${map_yaml}"
+  ros2 run nav2_map_server map_server \
+    --ros-args -p yaml_filename:="${map_yaml}" -p use_sim_time:=true &
+  ros2 run nav2_lifecycle_manager lifecycle_manager \
+    --ros-args -p use_sim_time:=true -p autostart:=true \
+    -p "node_names:=[map_server]" -r __node:=lifecycle_manager_map &
+
+  # nav2 navigation stack (planner + controller + bt_navigator +
+  # /navigate_to_pose action server). Pass params_file only when provided.
+  local nav_args=("use_sim_time:=true")
+  local params_file="${NAV2_PARAMS:-}"
+  if [[ -n "${params_file}" && -f "${params_file}" ]]; then
+    nav_args+=("params_file:=${params_file}")
+  fi
+  echo "nav2_jazzy stack: launching navigation_launch.py ${nav_args[*]}"
+  exec ros2 launch nav2_bringup navigation_launch.py "${nav_args[@]}"
+}
+
+run_nav2() {
+  # nav2 stacked on the TurtleBot4 base. Mirrors run_slam_toolbox's
+  # split-headless TB4 bring-up VERBATIM (so the verified base path is not
+  # modified), then rides the nav2 navigable stack on top instead of
+  # slam_toolbox via start_nav2_when_ready.
+  local model="${TURTLEBOT4_MODEL:-standard}"
+  local headless="${TURTLEBOT4_HEADLESS:-1}"
+  local default_world="slam_arena"
+  local world="${TURTLEBOT4_WORLD:-${default_world}}"
+  local tb4_gz_share
+  local create_gz_share
+  local ros_share="/opt/ros/${ROS_DISTRO}/share"
+
+  tb4_gz_share="$(pkg_share turtlebot4_gz_bringup)"
+  create_gz_share="$(pkg_share irobot_create_gz_bringup)"
+  install_custom_tb4_world "${world}" "${tb4_gz_share}"
+  export GZ_SIM_RESOURCE_PATH="/work/worlds:${tb4_gz_share}/worlds:${create_gz_share}/worlds:${ros_share}:${GZ_SIM_RESOURCE_PATH:-}"
+
+  local world_arg
+  if [[ "${world}" == */* ]]; then
+    world_arg="${world}"
+  elif [[ -f "/work/worlds/${world}.sdf" ]]; then
+    world_arg="/work/worlds/${world}.sdf"
+  else
+    world_arg="${world}.sdf"
+  fi
+
+  # GUI mode needs gz_args without -s (server-only) so the Gazebo window opens;
+  # headless uses -s -r + offscreen/software GL. Mirrors run_turtlebot4.
+  local gz_args
+  if [[ "${headless}" == "1" ]]; then
+    gz_args="${TURTLEBOT4_GZ_ARGS:--s -r}"
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+    export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+  else
+    gz_args="${TURTLEBOT4_GZ_ARGS:--r}"
+    unset QT_QPA_PLATFORM
+  fi
+
+  local use_xvfb="${TURTLEBOT4_USE_XVFB:-${headless}}"
+  local sim_pid="" clock_pid="" nav2_pid=""
+
+  if [[ "${use_xvfb}" == "1" ]] && command -v xvfb-run >/dev/null 2>&1; then
+    xvfb-run -a -s "-screen 0 1280x1024x24" \
+      ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
+  else
+    ros2 launch ros_gz_sim gz_sim.launch.py "gz_args:=${gz_args} ${world_arg}" &
+  fi
+  sim_pid="$!"
+
+  ros2 run ros_gz_bridge parameter_bridge \
+    "/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock" \
+    --ros-args -r __node:=clock_bridge &
+  clock_pid="$!"
+
+  start_nav2_when_ready &
+  nav2_pid="$!"
+
+  trap 'kill "${nav2_pid}" "${clock_pid}" "${sim_pid}" >/dev/null 2>&1 || true' EXIT
+  sleep 5
+
+  # nav2 fuzzing runs headless; keep RViz off unless explicitly requested via
+  # the same TB4 spawn arg surface used by the other targets.
+  local nav2_rviz_flag="${NAV2_RVIZ:-0}"
+  if [[ "${headless}" != "1" ]]; then
+    nav2_rviz_flag="${NAV2_RVIZ:-1}"
+  fi
+  local rviz_arg="false"
+  if [[ "${nav2_rviz_flag}" == "1" ]]; then
+    rviz_arg="true"
+  fi
+
+  ros2 launch "${ROOT_DIR}/src_jazzy/launch/turtlebot4_fuzz_spawn.launch.py" \
+    "model:=${model}" \
+    "world:=${world}" \
+    "rviz:=${rviz_arg}"
+}
+
 if [[ -z "${TARGET}" || "${TARGET}" == "-h" || "${TARGET}" == "--help" ]]; then
   usage
   exit 0
@@ -404,6 +535,9 @@ case "${TARGET}" in
     ;;
   slam_toolbox_jazzy)
     run_slam_toolbox
+    ;;
+  nav2_jazzy)
+    run_nav2
     ;;
   *)
     echo "ERROR: unknown target profile: ${TARGET}" >&2
