@@ -531,7 +531,8 @@ def apply_slam_motion_strategy(
     return msg_list
 
 
-def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12):
+def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12,
+                             min_dist=0.75, max_dist=3.0):
     """Sample reachable free-space goal poses (x, y, yaw) from an occupancy map.
 
     Deterministic: walks free cells on a stride so the same map yields the same
@@ -539,7 +540,18 @@ def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12):
     start_xy, so nav2's ABORTED-on-reachable 'false failure' verdict stays sound.
     Returns a list of (x, y, yaw) world-coordinate tuples. yaw cycles a few
     headings so orientation is exercised too.
+
+    Goals are constrained to ``min_dist <= |goal - start| <= max_dist`` (metres,
+    straight-line). The max bound matters because the gz Harmonic full-sensor
+    TB4 sim is CPU-bound and runs well below real time: a goal near the far
+    corner of slam_arena (~6-7 m) does not finish within the action-timeout
+    budget even while navigating correctly. Capping distance keeps each round
+    completable so the arrival/collision oracles get a real verdict. Override
+    max_dist=None to sample the whole free space (long campaigns with a large
+    NAV2_ACTION_TIMEOUT_SEC). min_dist keeps goals off the spawn point so the
+    robot actually has to move.
     """
+    import math as _math
     import numpy as np
     grid = map_ctx.grid
     free = np.argwhere((grid >= 0) & (grid < 50))  # (row, col) free cells
@@ -547,13 +559,18 @@ def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12):
         return []
     yaws = [0.0, 1.5708, 3.14159, -1.5708]
     seeds = []
-    stride = max(1, len(free) // (count * 4))
+    stride = max(1, len(free) // (count * 8))
     i = 0
     for idx in range(0, len(free), stride):
         if len(seeds) >= count:
             break
         row, col = int(free[idx][0]), int(free[idx][1])
         x, y = map_ctx.cell_to_world(col, row)
+        dist = _math.hypot(x - start_xy[0], y - start_xy[1])
+        if dist < min_dist:
+            continue
+        if max_dist is not None and dist > max_dist:
+            continue
         if not map_ctx.reachable(start_xy, (x, y)):
             continue
         seeds.append((x, y, yaws[i % len(yaws)]))
