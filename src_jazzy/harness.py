@@ -925,7 +925,14 @@ def nav2_send_command(msg, map_ctx=None, start_xy=(0.0, 0.0)):
     try:
         gx, gy, gyaw, snapped = _nav2_resolve_goal(msg, map_ctx, start_xy)
 
-        goal_pub = node.create_publisher(PoseStamped, "/robofuzz/nav2_goal", 10)
+        # goal_pub must use TRANSIENT_LOCAL (latched) so the rosbag (which
+        # subscribes slightly after the publish at t~0) receives the goal. With
+        # VOLATILE (default), the three quick publishes finish before rosbag
+        # subscribes, leaving /robofuzz/nav2_goal Count=0 in the bag -> oracle
+        # has no goal to judge arrival against.
+        from rclpy.qos import QoSProfile, DurabilityPolicy
+        latched_qos = QoSProfile(depth=10, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        goal_pub = node.create_publisher(PoseStamped, "/robofuzz/nav2_goal", latched_qos)
         result_pub = node.create_publisher(Int32, "/robofuzz/nav2_result", 10)
         event_pub = node.create_publisher(String, "/robofuzz/nav2_goal_event", 10)
 
@@ -955,7 +962,13 @@ def nav2_send_command(msg, map_ctx=None, start_xy=(0.0, 0.0)):
         if handle is None or not handle.accepted:
             raise RuntimeError("nav2 goal rejected")
 
-        timeout = float(os.environ.get("NAV2_ACTION_TIMEOUT_SEC", "120.0"))
+        # Default 300s: the gz Harmonic + full-sensor TB4 sim is CPU-bound and
+        # runs well below real time (the nav2 controller logs "Control loop
+        # missed its desired rate"), so a far goal (~6-7 m across slam_arena)
+        # legitimately needs more than 120s of wall time even while navigating
+        # correctly. Smoke confirmed nav2 plans + drives fine; the old 120s
+        # budget just cancelled mid-navigation. Override via NAV2_ACTION_TIMEOUT_SEC.
+        timeout = float(os.environ.get("NAV2_ACTION_TIMEOUT_SEC", "300.0"))
         result_future = handle.get_result_async()
         rclpy.spin_until_future_complete(node, result_future, timeout_sec=timeout)
         wrapper = result_future.result()
