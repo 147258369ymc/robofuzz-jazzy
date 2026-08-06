@@ -52,12 +52,19 @@ input:
     type: nav2_msgs/action/NavigateToPose
 
 watch:
+  # required = advertised-at-startup topics the readiness gate may wait on.
+  # Only /sim_ground_truth_pose + /odom qualify: they flow as soon as the sim
+  # and TB4 base come up. The /robofuzz/nav2_* helper topics are published ONLY
+  # while the harness is sending a goal during fuzzing, which cannot happen
+  # until readiness passes -- listing them as required deadlocks the gate
+  # (same failure mode as slam_toolbox's /pose). They are OPTIONAL: still
+  # recorded to the rosbag and consumed by the oracle, just not gated on.
   required:
     /sim_ground_truth_pose: nav_msgs/msg/Odometry
     /odom: nav_msgs/msg/Odometry
+  optional:
     /robofuzz/nav2_goal: geometry_msgs/msg/PoseStamped
     /robofuzz/nav2_result: std_msgs/msg/Int32
-  optional:
     /robofuzz/nav2_goal_event: std_msgs/msg/String
     /scan: sensor_msgs/msg/LaserScan
     /cmd_vel: geometry_msgs/msg/TwistStamped

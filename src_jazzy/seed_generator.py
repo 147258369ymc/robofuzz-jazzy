@@ -531,6 +531,36 @@ def apply_slam_motion_strategy(
     return msg_list
 
 
+def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12):
+    """Sample reachable free-space goal poses (x, y, yaw) from an occupancy map.
+
+    Deterministic: walks free cells on a stride so the same map yields the same
+    seeds (reproducible campaigns). Each returned goal is BFS-reachable from
+    start_xy, so nav2's ABORTED-on-reachable 'false failure' verdict stays sound.
+    Returns a list of (x, y, yaw) world-coordinate tuples. yaw cycles a few
+    headings so orientation is exercised too.
+    """
+    import numpy as np
+    grid = map_ctx.grid
+    free = np.argwhere((grid >= 0) & (grid < 50))  # (row, col) free cells
+    if len(free) == 0:
+        return []
+    yaws = [0.0, 1.5708, 3.14159, -1.5708]
+    seeds = []
+    stride = max(1, len(free) // (count * 4))
+    i = 0
+    for idx in range(0, len(free), stride):
+        if len(seeds) >= count:
+            break
+        row, col = int(free[idx][0]), int(free[idx][1])
+        x, y = map_ctx.cell_to_world(col, row)
+        if not map_ctx.reachable(start_xy, (x, y)):
+            continue
+        seeds.append((x, y, yaws[i % len(yaws)]))
+        i += 1
+    return seeds
+
+
 def generate_sequence_seeds(platform, msg_class, seqlen=10):
     """
     Dispatch to platform-specific seed generator.

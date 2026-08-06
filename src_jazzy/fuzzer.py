@@ -704,6 +704,40 @@ class Fuzzer:
                     for seq in seq_seeds:
                         self.queue.append(seq)
 
+        elif getattr(self.config, "input_mode", "") == "action_goal":
+            # nav2 rides on the turtlebot base (tb4_sitl=True) but its input is a
+            # NavigateToPose goal (PoseStamped), NOT a velocity command. Seed the
+            # queue with reachable goal poses sampled from the static map's free
+            # space (Q5), so the generic mutator perturbs goal x/y/yaw. Falls back
+            # to a small fixed set if the map can't be loaded.
+            import os
+            import math
+            import nav2_map
+            import seed_generator
+            from geometry_msgs.msg import PoseStamped
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            map_path = os.environ.get(
+                "NAV2_MAP", os.path.join(repo_root, "maps", "slam_arena.yaml"))
+            goal_seeds = []
+            try:
+                mctx = nav2_map.load_occupancy_map(map_path)
+                self.nav2_map_ctx = mctx  # cache so inspect_target can reuse
+                goal_seeds = seed_generator.generate_nav2_goal_seeds(
+                    mctx, start_xy=(0.0, 0.0), count=12)
+            except Exception as exc:
+                print(f"[nav2] seed: map load failed ({exc}); using fixed goals")
+            if not goal_seeds:
+                goal_seeds = [(1.0, 0.0, 0.0), (-1.0, 0.0, 3.14),
+                              (0.0, 1.0, 1.57), (0.0, -1.0, -1.57)]
+            for (gx, gy, gyaw) in goal_seeds:
+                msg = PoseStamped()
+                msg.header.frame_id = "map"
+                msg.pose.position.x = float(gx)
+                msg.pose.position.y = float(gy)
+                msg.pose.orientation.z = math.sin(float(gyaw) / 2.0)
+                msg.pose.orientation.w = math.cos(float(gyaw) / 2.0)
+                self.queue.append(msg)
+
         elif self.config.tb4_sitl or self.config.tb3_sitl or self.config.tb3_hitl:
             import seed_generator
 
@@ -1748,6 +1782,21 @@ def fuzz_msg(fuzzer, fuzz_targets):
             )
             fbk_list.append(fbk)
 
+        elif getattr(fuzzer.config, "oracle_mode", "") == "nav2_jazzy":
+            # nav2 goal (PoseStamped): mutate only the goal position + heading,
+            # never the header/stamp. Field paths match the flattened nested
+            # message names (cf. slam's ["twist","linear","x",...]).
+            field_whitelist = [
+                ["pose", "position", "x", np.dtype("float64")],
+                ["pose", "position", "y", np.dtype("float64")],
+                ["pose", "orientation", "z", np.dtype("float64")],
+                ["pose", "orientation", "w", np.dtype("float64")],
+            ]
+            from oracles.nav2 import NAV2_FEEDBACK_NAMES
+            for feedback_name in NAV2_FEEDBACK_NAMES:
+                fbk_list.append(Feedback(
+                    feedback_name, FeedbackType.INC, default_value=0.0))
+
         elif getattr(fuzzer.config, "oracle_mode", "") == "slam_toolbox_jazzy":
             # slam_toolbox rides on the TurtleBot4 base: same TwistStamped
             # command surface and mutation whitelist as TB4, but SLAM-semantic
@@ -2204,10 +2253,14 @@ def fuzz_msg(fuzzer, fuzz_targets):
             if msg_list is None:
                 continue
 
-            if fuzzer.config.tb4_sitl:
+            if (fuzzer.config.tb4_sitl
+                    and getattr(fuzzer.config, "input_mode", "")
+                    != "action_goal"):
                 import seed_generator
                 # slam rides the tb4_sitl path (family=turtlebot) but must be
                 # stressed with aggressive motion; TB4 keeps its safety clamp.
+                # nav2 (input_mode=action_goal) carries PoseStamped goals, not
+                # velocity commands, so the Twist clamp must be skipped.
                 max_linear, max_angular = (
                     seed_generator.velocity_limits_for_oracle(
                         getattr(fuzzer.config, "oracle_mode", "")

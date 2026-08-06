@@ -46,7 +46,15 @@ class TargetProfile:
     @property
     def required_topics_for_readiness(self) -> Dict[str, str]:
         topics = dict(self.watch_topics)
-        if self.family in {"turtlebot", "px4"}:
+        # action_goal targets (e.g. nav2) declare their input as an ACTION
+        # (/navigate_to_pose), not a topic. Folding it into the topic-readiness
+        # set makes the turtlebot gate wait forever for it to be advertised as
+        # a topic (deadlock). Action readiness is handled separately by
+        # required_actions_for_readiness, so skip the input merge in that mode.
+        if (
+            self.family in {"turtlebot", "px4"}
+            and self.input_mode != "action_goal"
+        ):
             topics.update(self.input_topics)
         return topics
 
