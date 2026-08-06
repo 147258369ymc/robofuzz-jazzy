@@ -1222,6 +1222,27 @@ def inspect_target(fuzzer):
         elif getattr(profile, "input_mode", "") == "action_goal":
             topic_name = "/metatopic"
             msg_type = "geometry_msgs/msg/PoseStamped"
+            # Load the static occupancy map so the goal reachability gate +
+            # snapping in harness.nav2_send_command actually run. Without this
+            # map_ctx is None and unreachable goals get sent raw, making the
+            # stuck/false-failure oracle criteria unsound.
+            import nav2_map
+            _repo_root = os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))
+            )
+            map_path = os.environ.get(
+                "NAV2_MAP",
+                os.path.join(_repo_root, "maps", "slam_arena.yaml"),
+            )
+            try:
+                fuzzer.nav2_map_ctx = nav2_map.load_occupancy_map(map_path)
+                print(f"[nav2] loaded reachability map: {map_path} "
+                      f"({fuzzer.nav2_map_ctx.width}x{fuzzer.nav2_map_ctx.height})")
+            except Exception as exc:
+                print(f"[nav2] WARNING: could not load map {map_path}: {exc}; "
+                      "reachability gate DISABLED (goals sent raw)")
+                fuzzer.nav2_map_ctx = None
+            fuzzer.nav2_start_xy = (0.0, 0.0)  # robot spawns at world origin
         msg_type_class = _msg_class_from_type(msg_type)
         fuzz_targets.append([topic_name, msg_type_class, profile.name])
         return fuzz_targets

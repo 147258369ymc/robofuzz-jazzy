@@ -128,7 +128,10 @@ def check(config, msg_list, state_dict, feedback_list):
     duration = truth_track[-1][0] - truth_track[0][0]
     _update_feedback(feedback_list, "nav2_navigation_duration", duration)
     _, arr_xy, _arr_yaw = _arrival_error(goal, truth_track)
-    reached = arr_xy <= NAV2_ARRIVAL_XY_TOL
+    reached = (
+        len(truth_track) >= NAV2_MIN_SAMPLES
+        and arr_xy <= NAV2_ARRIVAL_XY_TOL
+    )
 
     # Criterion 2: collision. Unlike slam (excludes the round), here contact
     # IS the bug: goal is in free space and localization is truth, so hitting

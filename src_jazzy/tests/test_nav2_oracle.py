@@ -111,6 +111,25 @@ class TestTimeoutStuck(unittest.TestCase):
         errs = nav2.check(NS(), [], state, fb_list())
         self.assertTrue(any("NAV2_STUCK_ERROR" in e for e in errs))
 
+class TestSparseRound(unittest.TestCase):
+    def test_sparse_round_does_not_fake_reached(self):
+        # Fewer than NAV2_MIN_SAMPLES truth samples: _arrival_error returns
+        # arr_xy=0.0, which pre-fix made reached=True and silently suppressed
+        # STUCK/FALSE_FAILURE. After the fix reached=False on sparse rounds,
+        # so a stuck (barely-moving, far-from-goal, ABORTED) round is caught.
+        n = nav2.NAV2_MIN_SAMPLES - 1
+        self.assertGreater(n, 0)
+        goal = [(1.0, make_pose_stamped(5.0, 0.0, 0.0))]
+        truth = [(float(s), make_truth(0.01, 0.0, 0.0, s))
+                 for s in range(1, n + 1)]
+        self.assertLess(len(truth), nav2.NAV2_MIN_SAMPLES)
+        state = {nav2.GOAL_TOPIC: goal,
+                 nav2.RESULT_TOPIC: [(float(n), make_int32(nav2.NAV2_STATUS_ABORTED))],
+                 nav2.GROUND_TRUTH_TOPIC: truth}
+        errs = nav2.check(NS(), [], state, fb_list())
+        # reached must NOT mask the stuck criterion on a sparse round.
+        self.assertTrue(any("NAV2_STUCK_ERROR" in e for e in errs))
+
 class TestFalseFailure(unittest.TestCase):
     def test_aborted_but_moved_far_is_false_failure(self):
         # ABORTED but robot moved a lot (reachable goal exercised) -> false failure
