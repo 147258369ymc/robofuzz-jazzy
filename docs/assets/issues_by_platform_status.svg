@@ -12,7 +12,7 @@
     <text x="80" y="103" font-size="16" fill="#5D6878">统计时点：2026-09-16　｜　共 34 个：开放 22，关闭 12</text>
 
     <g aria-label="图例">
-      <rect x="930" y="53" width="22" height="16" rx="4" fill="#159A8C"/>
+      <rect x="930" y="53" width="22" height="16" rx="4" fill="#0F766E"/>
       <text x="962" y="67" font-size="15" fill="#354153">开放</text>
       <rect x="1040" y="53" width="22" height="16" rx="4" fill="#7756C5"/>
       <text x="1072" y="67" font-size="15" fill="#354153">关闭</text>
@@ -56,7 +56,7 @@
     </g>
 
     <g id="turtlebot3" data-open="6" data-closed="2" data-total="8">
-      <rect x="330" y="153" width="480" height="46" rx="7" fill="#159A8C"/>
+      <rect x="330" y="153" width="480" height="46" rx="7" fill="#0F766E"/>
       <rect x="810" y="153" width="160" height="46" rx="7" fill="#7756C5"/>
       <text x="570" y="183" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">6</text>
       <text x="890" y="183" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">2</text>
@@ -64,7 +64,7 @@
     </g>
 
     <g id="px4" data-open="1" data-closed="4" data-total="5">
-      <rect x="330" y="243" width="80" height="46" rx="7" fill="#159A8C"/>
+      <rect x="330" y="243" width="80" height="46" rx="7" fill="#0F766E"/>
       <rect x="410" y="243" width="320" height="46" rx="7" fill="#7756C5"/>
       <text x="370" y="273" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">1</text>
       <text x="570" y="273" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">4</text>
@@ -72,13 +72,13 @@
     </g>
 
     <g id="moveit" data-open="6" data-closed="0" data-total="6">
-      <rect x="330" y="333" width="480" height="46" rx="7" fill="#159A8C"/>
+      <rect x="330" y="333" width="480" height="46" rx="7" fill="#0F766E"/>
       <text x="570" y="363" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">6</text>
       <text x="830" y="363" font-size="16" font-weight="700" fill="#263345">合计 6</text>
     </g>
 
     <g id="turtlebot4-create3" data-open="9" data-closed="0" data-total="9">
-      <rect x="330" y="423" width="720" height="46" rx="7" fill="#159A8C"/>
+      <rect x="330" y="423" width="720" height="46" rx="7" fill="#0F766E"/>
       <text x="690" y="453" font-size="17" font-weight="700" fill="#FFFFFF" text-anchor="middle">9</text>
       <text x="1070" y="453" font-size="16" font-weight="700" fill="#263345">合计 9</text>
     </g>
