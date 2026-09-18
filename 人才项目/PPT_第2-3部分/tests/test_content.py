@@ -51,6 +51,7 @@ class ContentTests(unittest.TestCase):
 
     def test_required_boundaries_are_present(self):
         corpus = content.all_visible_text()
+        self.assertIn("下一阶段｜尚未开展", content.BOUNDARY_LABELS)
         for phrase in (
             "34 条 Issue 不等于 34 个漏洞",
             "组合优化结果，不等同于语义约束覆盖率",

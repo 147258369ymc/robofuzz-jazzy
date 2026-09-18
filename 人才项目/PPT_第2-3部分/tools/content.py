@@ -59,6 +59,12 @@ TASKS = [
     {"id": 3, "title": "控制语义偏轨判定、证据回溯与根因归并"},
 ]
 
+BOUNDARY_LABELS = [
+    "组合优化结果，不等同于语义约束覆盖率",
+    "下一阶段｜尚未开展",
+    "成熟度不一",
+]
+
 TECH_SLIDES = [
     {
         "title": "三项重点技术任务与总体链路",
@@ -119,8 +125,9 @@ def all_visible_text() -> str:
     parts = TOC + [FOOTNOTE]
     for row in METRICS:
         parts.extend(str(value) for value in row.values())
+    parts.extend(task["title"] for task in TASKS)
     for slide in TECH_SLIDES:
         parts.extend([slide["title"], slide["difficulty"], slide["boundary"]])
         parts.extend(slide["method_lines"])
-    parts.extend(["组合优化结果，不等同于语义约束覆盖率", "下一阶段｜尚未开展", "成熟度不一"])
+    parts.extend(BOUNDARY_LABELS)
     return "\n".join(parts)
