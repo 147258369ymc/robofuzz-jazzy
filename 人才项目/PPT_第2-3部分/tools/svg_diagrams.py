@@ -133,8 +133,8 @@ def draw_overview() -> str:
     c.polyline(((820, 330), (935, 330)), color=COLORS["blue"], arrow="blue")
     c.polyline(((1325, 330), (1440, 330)), color=COLORS["blue"], arrow="blue")
     # Each task has its own correctly typed asset output.
-    c.polyline(((820, 450), (820, 575), (1910, 575), (1910, 220), (1945, 220)), color=COLORS["blue"], arrow="blue")
-    c.polyline(((1325, 450), (1325, 565), (1900, 565), (1900, 337), (1945, 337)), color=COLORS["blue"], arrow="blue")
+    c.polyline(((820, 220), (850, 220), (850, 120), (1910, 120), (1910, 220), (1945, 220)), color=COLORS["blue"], arrow="blue")
+    c.polyline(((1325, 250), (1360, 250), (1360, 135), (1900, 135), (1900, 337), (1945, 337)), color=COLORS["blue"], arrow="blue")
     c.polyline(((1830, 330), (1885, 330), (1885, 454), (1945, 454)), color=COLORS["blue"], arrow="blue")
     # feedback is deliberately above the platform strip.
     c.polyline(((1635, 510), (1635, 550), (1130, 550), (1130, 510)), color=COLORS["green"], arrow="green", dash="12 10")
@@ -183,10 +183,10 @@ def draw_oracle_pipeline() -> str:
     label(c, 1165, 130, "自动化边界", size=48, fill=COLORS["orange"])
     label(c, 1165, 190, "阶段4", size=56)
     c.multiline(1165, 238, ("目标上下文化", "话题/字段　状态/时间窗", "容差/噪声　质量门控", "运行时判断"), leading=44)
-    c.rect(1165, 385, 500, 72, fill=COLORS["white"], stroke=COLORS["orange"])
-    c.multiline(1185, 414, ("候选规则｜目标适配", "并非全部IR上线"), size=42, leading=38, fill=COLORS["orange"], weight="700")
-    c.rect(1165, 470, 500, 95, fill=COLORS["green_fill"], stroke=COLORS["green"])
-    c.multiline(1190, 510, ("正常　/　偏轨", "不可判定"), size=42, leading=44, fill=COLORS["green"], weight="700")
+    c.rect(1165, 385, 500, 92, fill=COLORS["white"], stroke=COLORS["orange"])
+    c.multiline(1185, 420, ("候选规则｜目标适配", "并非全部IR上线"), size=42, leading=46, fill=COLORS["orange"], weight="700")
+    c.rect(1165, 484, 500, 84, fill=COLORS["green_fill"], stroke=COLORS["green"])
+    c.multiline(1190, 518, ("正常　/　偏轨", "不可判定"), size=42, leading=42, fill=COLORS["green"], weight="700")
 
     c.rect(1750, 50, 630, 550, fill=COLORS["gray"], stroke=COLORS["navy"], stroke_width=4)
     label(c, 1772, 112, "OracleIR", size=56)
@@ -251,8 +251,8 @@ def draw_seed_feedback() -> str:
     c.text(1885, 333, "按目标适配，成熟度不同", size=42, fill=COLORS["gray_text"])
     c.rect(1885, 350, 470, 360, fill=COLORS["white"], stroke=COLORS["blue"], stroke_width=4)
     label(c, 1908, 395, "TB4｜组合优化结果", size=42, fill=COLORS["blue"])
-    c.multiline(1908, 435, ("唯一输入签名", "629→842｜+33.9%", "最高单一签名重复", "156→21｜下降86.5%"), size=42, leading=42)
-    c.multiline(1908, 590, ("组合优化结果", "不等同于语义约束", "覆盖率"), size=42, leading=42, fill=COLORS["red"], weight="700")
+    c.multiline(1908, 435, ("唯一输入签名", "629→842｜+33.9%", "最高单一输入签名重复", "156→21｜下降86.5%"), size=42, leading=42)
+    c.multiline(1908, 612, ("组合优化结果", "不等同于语义约束", "覆盖率"), size=42, leading=42, fill=COLORS["red"], weight="700")
 
     c.polyline(((320, 270), (395, 270)), color=COLORS["blue"], arrow="blue")
     c.polyline(((785, 220), (815, 220)), color=COLORS["blue"], arrow="blue")
@@ -277,8 +277,12 @@ def draw_evidence_root_cause() -> str:
     )
     for x, width, (title, lines) in zip(stage_xs, stage_widths, stages):
         c.rect(x, 95, width, 500, fill=COLORS["gray"], stroke=COLORS["line"], stroke_width=3)
-        label(c, x + 18, 150, title, size=56)
-        c.multiline(x + 18, 207, lines, size=42, leading=48)
+        if title == "③在线Oracle":
+            c.multiline(x + 18, 140, ("③在线", "Oracle"), size=56, leading=52, fill=COLORS["navy"], weight="700")
+            c.multiline(x + 18, 240, lines, size=42, leading=48)
+        else:
+            label(c, x + 18, 150, title, size=56)
+            c.multiline(x + 18, 207, lines, size=42, leading=48)
     c.polyline(((385, 345), (405, 345)), color=COLORS["blue"], arrow="blue")
     c.polyline(((745, 345), (765, 345)), color=COLORS["blue"], arrow="blue")
     c.polyline(((1095, 345), (1115, 345)), color=COLORS["blue"], arrow="blue")
@@ -308,7 +312,7 @@ def draw_evidence_root_cause() -> str:
     c.polyline(((2235, 289), (2340, 289), (2340, 355), (2235, 355)), color=COLORS["gray_text"], arrow="gray")
 
     c.rect(1730, 550, 650, 190, fill=COLORS["green_fill"], stroke=COLORS["green"], stroke_width=4)
-    label(c, 1755, 590, "证据带", size=56, fill=COLORS["green"])
+    label(c, 1755, 600, "证据带", size=56, fill=COLORS["green"])
     c.multiline(1755, 640, ("TB4：928轮→781签名", "→1条加速度路径候选链", "MoveIt：224帧→1个候选族"), size=42, leading=48)
 
     c.rect(760, 660, 900, 110, fill=COLORS["orange_fill"], stroke=COLORS["orange"], stroke_width=4, dash="14 10")
