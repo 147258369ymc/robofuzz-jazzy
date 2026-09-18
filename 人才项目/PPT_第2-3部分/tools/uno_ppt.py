@@ -195,7 +195,14 @@ def make_table(document, page, x, y, w, h, columns, rows):
     shape.Size = Size(cm(w), cm(h))
     page.add(shape)
     table = shape.Model
-    table.initialize(columns, rows)
+    existing_columns = table.getColumns().getCount()
+    existing_rows = table.getRows().getCount()
+    if columns > existing_columns:
+        table.getColumns().insertByIndex(
+            existing_columns, columns - existing_columns
+        )
+    if rows > existing_rows:
+        table.getRows().insertByIndex(existing_rows, rows - existing_rows)
     return shape, table
 
 
