@@ -23,6 +23,10 @@ BUILDERS = {
 
 
 def main() -> None:
+    missing = set(OUTPUT_STEMS) - set(BUILDERS)
+    extra = set(BUILDERS) - set(OUTPUT_STEMS)
+    if missing or extra:
+        raise ValueError(f"BUILDERS/OUTPUT_STEMS mismatch: missing={sorted(missing)}, extra={sorted(extra)}")
     ASSETS.mkdir(parents=True, exist_ok=True)
     for stem in OUTPUT_STEMS:
         svg_path = ASSETS / f"{stem}.svg"

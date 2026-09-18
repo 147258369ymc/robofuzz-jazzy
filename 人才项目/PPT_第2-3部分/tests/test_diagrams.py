@@ -1,4 +1,5 @@
 import re
+import struct
 import subprocess
 import sys
 import unittest
@@ -11,7 +12,8 @@ TOOLS = ROOT / "tools"
 ASSETS = ROOT / "assets"
 sys.path.insert(0, str(TOOLS))
 
-from svg_diagrams import OUTPUT_STEMS
+from svg_diagrams import OUTPUT_STEMS, SvgCanvas
+from generate_diagrams import BUILDERS
 
 
 class DiagramTests(unittest.TestCase):
@@ -20,9 +22,17 @@ class DiagramTests(unittest.TestCase):
         subprocess.run([sys.executable, str(TOOLS / "generate_diagrams.py")], check=True)
 
     def test_svg_and_png_outputs_exist(self):
+        self.assertEqual(set(BUILDERS), set(OUTPUT_STEMS))
         for stem in OUTPUT_STEMS:
             self.assertTrue((ASSETS / f"{stem}.svg").is_file())
-            self.assertTrue((ASSETS / f"{stem}.png").is_file())
+            png_path = ASSETS / f"{stem}.png"
+            self.assertTrue(png_path.is_file())
+            with png_path.open("rb") as image:
+                self.assertEqual(image.read(8), b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(image.read(4), b"\x00\x00\x00\r")
+                self.assertEqual(image.read(4), b"IHDR")
+                width, height = struct.unpack(">II", image.read(8))
+                self.assertEqual((width, height), (2400, 800))
 
     def test_svg_canvas_and_square_corners(self):
         for stem in OUTPUT_STEMS:
@@ -38,6 +48,11 @@ class DiagramTests(unittest.TestCase):
             for node in root.findall(".//{http://www.w3.org/2000/svg}text"):
                 self.assertIn("font-size", node.attrib)
                 self.assertGreaterEqual(float(node.attrib["font-size"]), 42)
+        canvas = SvgCanvas()
+        canvas.text(42, 42, "&<>")
+        rendered = canvas.render()
+        self.assertIn("&amp;&lt;&gt;", rendered)
+        ET.fromstring(rendered)
 
     def test_polylines_are_orthogonal(self):
         for stem in OUTPUT_STEMS:
