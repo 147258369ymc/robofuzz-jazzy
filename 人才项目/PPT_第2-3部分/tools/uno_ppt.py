@@ -150,6 +150,10 @@ def add_text(
     shape.ParaAdjust = align
     shape.TextVerticalAdjust = valign
     shape.TextAutoGrowHeight = False
+    shape.TextLeftDistance = cm(0.08)
+    shape.TextRightDistance = cm(0.08)
+    shape.TextUpperDistance = cm(0.03)
+    shape.TextLowerDistance = cm(0.03)
     if fill is None:
         shape.FillStyle = 0
     else:
