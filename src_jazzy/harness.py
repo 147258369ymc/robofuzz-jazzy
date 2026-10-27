@@ -954,13 +954,38 @@ def nav2_send_command(msg, map_ctx=None, start_xy=(0.0, 0.0)):
         if not client.wait_for_server(timeout_sec=20.0):
             raise RuntimeError("nav2 /navigate_to_pose server unavailable")
 
+        # bt_navigator's action server ADVERTISES (wait_for_server passes) before
+        # its lifecycle is fully ACTIVE. Sending a goal while inactive gets
+        # "Action server is inactive. Rejecting the goal." bt_navigator has no
+        # reliable stdout "active" log to gate on, so actively probe: send the
+        # goal, and if rejected, wait and retry until accepted or budget exhausted.
+        # The first accepted goal IS the real navigation goal (not wasted).
+        activation_budget = float(
+            os.environ.get("NAV2_ACTIVATION_BUDGET_SEC", "60.0"))
+        retry_interval = 3.0
+        activation_deadline = time.time() + activation_budget
+        handle = None
         goal = NavigateToPose.Goal()
         goal.pose = goal_msg
-        send_future = client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(node, send_future, timeout_sec=30.0)
-        handle = send_future.result()
+        attempt = 0
+        while time.time() < activation_deadline:
+            attempt += 1
+            send_future = client.send_goal_async(goal)
+            rclpy.spin_until_future_complete(
+                node, send_future, timeout_sec=30.0)
+            handle = send_future.result()
+            if handle is not None and handle.accepted:
+                if attempt > 1:
+                    print(f"                 + goal accepted on attempt {attempt}")
+                break
+            # rejected (bt_navigator still activating) -> wait and retry
+            handle = None
+            time.sleep(retry_interval)
         if handle is None or not handle.accepted:
-            raise RuntimeError("nav2 goal rejected")
+            raise RuntimeError(
+                f"nav2 goal rejected after {attempt} attempts "
+                f"({activation_budget}s activation budget); "
+                "bt_navigator never reached active state")
 
         # Default 300s: the gz Harmonic + full-sensor TB4 sim is CPU-bound and
         # runs well below real time (the nav2 controller logs "Control loop

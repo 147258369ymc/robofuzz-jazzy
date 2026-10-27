@@ -428,11 +428,16 @@ start_nav2_when_ready() {
     -p "node_names:=[map_server]" -r __node:=lifecycle_manager_map &
 
   # nav2 navigation stack (planner + controller + bt_navigator +
-  # /navigate_to_pose action server). Pass params_file only when provided.
+  # /navigate_to_pose action server). Default to the profile's params override
+  # (routes collision_monitor cmd_vel_out to /diffdrive_controller/cmd_vel,
+  # bypassing the Create3 motion_control safety-reflex layer that otherwise
+  # intercepts nav2 velocity commands and blocks the wheels). Override with
+  # NAV2_PARAMS to test a different params file.
   local nav_args=("use_sim_time:=true")
-  local params_file="${NAV2_PARAMS:-}"
+  local params_file="${NAV2_PARAMS:-${ROOT_DIR}/target_profiles/nav2_jazzy.params.yaml}"
   if [[ -n "${params_file}" && -f "${params_file}" ]]; then
     nav_args+=("params_file:=${params_file}")
+    echo "nav2_jazzy stack: using params ${params_file}"
   fi
   echo "nav2_jazzy stack: launching navigation_launch.py ${nav_args[*]}"
   exec ros2 launch nav2_bringup navigation_launch.py "${nav_args[@]}"

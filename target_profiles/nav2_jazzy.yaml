@@ -43,7 +43,7 @@ readiness:
   required_topics_with_data:
     /odom: nav_msgs/msg/Odometry
     /sim_ground_truth_pose: nav_msgs/msg/Odometry
-  timeout_sec: 240
+  timeout_sec: 300
 
 input:
   mode: action_goal

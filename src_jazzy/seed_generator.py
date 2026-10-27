@@ -531,8 +531,8 @@ def apply_slam_motion_strategy(
     return msg_list
 
 
-def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12,
-                             min_dist=0.75, max_dist=3.0):
+def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=16,
+                             min_dist=0.75, max_dist=2.5):
     """Sample reachable free-space goal poses (x, y, yaw) from an occupancy map.
 
     Deterministic: walks free cells on a stride so the same map yields the same
@@ -558,14 +558,17 @@ def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12,
     if len(free) == 0:
         return []
     yaws = [0.0, 1.5708, 3.14159, -1.5708]
-    seeds = []
-    stride = max(1, len(free) // (count * 8))
-    i = 0
-    for idx in range(0, len(free), stride):
-        if len(seeds) >= count:
-            break
-        row, col = int(free[idx][0]), int(free[idx][1])
-        x, y = map_ctx.cell_to_world(col, row)
+
+    # First collect ALL free cells inside the [min_dist, max_dist] annulus that
+    # are BFS-reachable, THEN sub-sample count of them evenly. The earlier
+    # approach strode the whole-map free list by a fixed step and only kept
+    # cells that happened to land in the annulus -- for a small annulus that
+    # yielded far fewer than `count` seeds (observed: 4 of 16). Filtering first
+    # then evenly sampling guarantees up to `count` diverse seeds regardless of
+    # how small the annulus is relative to the whole map.
+    candidates = []
+    for row, col in free:
+        x, y = map_ctx.cell_to_world(int(col), int(row))
         dist = _math.hypot(x - start_xy[0], y - start_xy[1])
         if dist < min_dist:
             continue
@@ -573,8 +576,28 @@ def generate_nav2_goal_seeds(map_ctx, start_xy=(0.0, 0.0), count=12,
             continue
         if not map_ctx.reachable(start_xy, (x, y)):
             continue
+        # Reject goals inside nav2's costmap inflation layer. A goal within
+        # inflation(0.45)+robot_radius(0.22)=0.67m of an obstacle is BFS-reachable
+        # but NOT costmap-plannable -> nav2 legitimately ABORTs -> spurious
+        # FALSE_FAILURE. Filtering at the source stops wall-hugging goals from
+        # ever being sent (root-cause fix for 13/13 false positives in the
+        # 1000-round campaign, all at x=+-6.48 map-edge goals, clearance 0.40-0.45m).
+        if map_ctx.clearance(x, y, max_r=0.7) < 0.67:
+            continue
+        candidates.append((x, y))
+
+    if not candidates:
+        return []
+
+    # Evenly sub-sample `count` candidates across the reachable annulus so the
+    # seeds spread over the whole ring rather than clustering in one arc.
+    step = max(1, len(candidates) // count)
+    seeds = []
+    for i, idx in enumerate(range(0, len(candidates), step)):
+        if len(seeds) >= count:
+            break
+        x, y = candidates[idx]
         seeds.append((x, y, yaws[i % len(yaws)]))
-        i += 1
     return seeds
 
 

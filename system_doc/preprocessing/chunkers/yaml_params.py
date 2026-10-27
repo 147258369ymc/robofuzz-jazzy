@@ -41,18 +41,54 @@ class YamlParamChunker(BaseChunker):
         return chunks
 
     def _find_params_root(self, data: dict) -> dict:
-        """找到参数根节点（跳过 node_name/ros__parameters 包装层）"""
-        # 尝试 ROS2 标准结构: {node: {ros__parameters: {...}}}
-        for key, val in data.items():
-            if isinstance(val, dict):
-                if "ros__parameters" in val:
-                    return val["ros__parameters"]
-                # 递归一层
-                for k2, v2 in val.items():
-                    if k2 == "ros__parameters" and isinstance(v2, dict):
-                        return v2
-        # 没有 ros__parameters 包装，直接返回顶层
-        return data
+        """找到参数根节点（跳过 node_name/ros__parameters 包装层）。
+
+        ROS2 参数文件可能是单节点 ({node: {ros__parameters: {...}}}) 或多节点
+        (nav2 的 nav2_params.yaml 有 amcl / controller_server / planner_server /
+        costmaps 等 ~15 个节点，各带自己的 ros__parameters)。
+
+        - 单节点：直接返回该节点的 ros__parameters（保持历史行为，既有目标的
+          block 路径/命名不变）。
+        - 多节点：用节点名做前缀合并所有节点的 ros__parameters，避免只取第一个
+          节点导致其余节点参数全部丢失，也能区分不同节点下的同名参数
+          (如 local/global costmap 各自的 inflation_radius)。
+        """
+        # 递归收集所有 ros__parameters 块。nav2 里 costmap 是双层包装
+        # (global_costmap -> global_costmap -> ros__parameters)，普通 node 是
+        # 单层 (controller_server -> ros__parameters)，故需递归而非只查一层。
+        # 用到该 ros__parameters 的外层节点路径做前缀，区分同名参数
+        # (如 local/global costmap 各自的 inflation_radius)。
+        node_params: dict[str, dict] = {}
+
+        def _collect(node, prefix):
+            if not isinstance(node, dict):
+                return
+            for key, val in node.items():
+                if key == "ros__parameters" and isinstance(val, dict):
+                    node_params[prefix.rstrip(".")] = val
+                elif isinstance(val, dict):
+                    _collect(val, f"{prefix}{key}.")
+
+        _collect(data, "")
+
+        if not node_params:
+            # 没有 ros__parameters 包装，直接返回顶层
+            return data
+        if len(node_params) == 1:
+            # 单节点：返回其 ros__parameters，不加前缀（向后兼容）
+            return next(iter(node_params.values()))
+        # 多节点：外层节点名做前缀合并，flatten 生成 <node>.<...> 路径。
+        # 双层包装 (global_costmap.global_costmap) 会折叠为一个前缀键。
+        merged: dict[str, dict] = {}
+        for prefix, params in node_params.items():
+            # 折叠重复段: "global_costmap.global_costmap" -> "global_costmap"
+            segs = prefix.split(".")
+            if len(segs) >= 2 and segs[-1] == segs[-2]:
+                key = ".".join(segs[:-1])
+            else:
+                key = prefix
+            merged[key] = params
+        return merged
 
     def _flatten(
         self, node: Any, path: list[str], chunks: list[RawChunk], file_path: Path

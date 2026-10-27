@@ -63,6 +63,27 @@ class MapContext:
                     q.append((nc, nr))
         return False
 
+    def clearance(self, x, y, max_r=1.0, occ_thresh=50):
+        """Distance (m) from world point (x,y) to nearest occupied/unknown cell,
+        capped at max_r. Used to reject goals inside nav2's costmap inflation
+        layer (BFS-reachable != costmap-plannable), the root cause of the
+        FALSE_FAILURE false positives observed in the 1000-round campaign.
+        Out-of-bounds -> max_r (treated as open, permissive)."""
+        import math as _m
+        gc, gr = self.world_to_cell(x, y)
+        if not self._in_bounds(gc, gr):
+            return max_r
+        steps = int(max_r / self.resolution)
+        best = max_r
+        for dr in range(-steps, steps + 1):
+            for dc in range(-steps, steps + 1):
+                c, r = gc + dc, gr + dr
+                if self._in_bounds(c, r) and not self.is_free(c, r, occ_thresh):
+                    d = _m.hypot(dc, dr) * self.resolution
+                    if d < best:
+                        best = d
+        return best
+
     def nearest_free_cell(self, col, row, occ_thresh=50, max_radius=None):
         if self.is_free(col, row, occ_thresh):
             return col, row

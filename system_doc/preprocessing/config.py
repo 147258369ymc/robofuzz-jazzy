@@ -165,6 +165,55 @@ SLAM_TOOLBOX_JAZZY_CONFIG = TargetConfig(
 )
 
 
+NAV2_JAZZY_CONFIG = TargetConfig(
+    name="nav2_jazzy",
+    version="nav2-1.3.12_turtlebot4_jazzy",
+    doc_root="system_doc/nav2_jazzy",
+    # 目标驱动、高信噪比语料:只索引 NavigateToPose 目标导航 + 真值定位 + 4 判据
+    # 实际依赖的组件约束。原始上游 official_specs/*.rst 保留在磁盘作为优先级-2
+    # 证据,但不默认送入 OracleIR —— 其语义已蒸馏进 extracted_specs/*.md,直接喂
+    # 原始 .rst(如 mppi 1291 行)会污染生成上下文(与 slam_toolbox_jazzy 同策略)。
+    file_configs=[
+        # 蒸馏的 oracle 导向契约(送生成器主料)。强制 prose_markdown:这些契约含
+        # 大量 "timeout"/"sequence"/"flow" 等词,会被 detector 误判为 protocol_spec
+        # 而分块失败(liveness 契约实测 0 blocks)。显式覆盖保证按 heading 稳定分块。
+        FileConfig("extracted_specs/arrival_correctness_contract.md",
+                   chunker_override="prose_markdown"),
+        FileConfig("extracted_specs/collision_freedom_contract.md",
+                   chunker_override="prose_markdown"),
+        FileConfig("extracted_specs/liveness_timeout_stuck_contract.md",
+                   chunker_override="prose_markdown"),
+        FileConfig("extracted_specs/false_failure_contract.md",
+                   chunker_override="prose_markdown"),
+        FileConfig("extracted_specs/runtime_and_observability_contract.md",
+                   chunker_override="prose_markdown"),
+        FileConfig("known_issues.md", chunker_override="prose_markdown"),
+        FileConfig("versioned_runtime_sources.md"),
+        # 镜像实测参数默认值(判据阈值锚点,逐参数分块)
+        FileConfig("params/nav2_bringup.nav2_params.yaml"),
+        FileConfig("params/turtlebot4_navigation.nav2.yaml"),
+        # 干净的 action 接口定义(Goal/Result/Feedback 三段)
+        FileConfig("official_specs/nav2_msgs_NavigateToPose.action"),
+        FileConfig("official_specs/nav2_msgs_ComputePathToPose.action"),
+        FileConfig("official_specs/nav2_msgs_FollowPath.action"),
+        # GoalStatus 状态码常量(判据 3/4 的 SUCCEEDED=4/CANCELED=5/ABORTED=6)
+        FileConfig(
+            "ros2_interfaces/action_msgs_msg_GoalStatus.txt",
+            chunker_override="ros_interface",
+        ),
+        # 当前 RoboFuzz 实现快照
+        FileConfig("source_constraints/profile/nav2_jazzy.yaml"),
+        # nav2.py 含模块级 NAV2_* 阈值常量(oracle 判据阈值锚点)。nav2_map.py /
+        # generate_nav2_goal_seeds.py / nav2_gt_tf.py 是纯逻辑(类/函数,无模块级
+        # 常量),SourceCodeChunker 只提取 UPPER_CASE 常量 → 0 blocks,故不纳入
+        # (与 slam 只喂 oracle/slam.py 同策略;逻辑证据仍在磁盘 source_constraints)。
+        FileConfig("source_constraints/oracle/nav2.py"),
+        # 运行时版本证据
+        FileConfig("runtime_metadata/container_versions.tsv"),
+    ],
+)
+
+
 def get_config(target_name: str) -> TargetConfig:
     """获取目标系统配置"""
     configs = {
@@ -174,6 +223,7 @@ def get_config(target_name: str) -> TargetConfig:
         "turtlebot4_jazzy": TURTLEBOT4_JAZZY_CONFIG,
         "px4_v117_jazzy": PX4_V117_JAZZY_CONFIG,
         "slam_toolbox_jazzy": SLAM_TOOLBOX_JAZZY_CONFIG,
+        "nav2_jazzy": NAV2_JAZZY_CONFIG,
     }
     if target_name not in configs:
         raise ValueError(

@@ -1,0 +1,159 @@
+# Version-locked descriptor for OracleIR generation against the nav2
+# NavigateToPose target on the RoboFuzz Jazzy TurtleBot4 base with
+# simulator ground-truth localization (amcl bypassed).
+name: nav2_jazzy
+display_name: "Nav2 1.3.12 NavigateToPose on TurtleBot4 Jazzy (ground-truth localization)"
+version: "nav2-1.3.12_turtlebot4_jazzy"
+middleware: ros2
+description: >
+  RoboFuzz clean-state navigation target in slam_arena. The fuzzer mutates a
+  NavigateToPose goal pose (PoseStamped); nav2 (NavfnPlanner + MPPIController +
+  SimpleGoalChecker + bt_navigator) plans and drives the TurtleBot4. Localization
+  is pinned to simulator ground truth via a map->odom TF publisher, so the oracle
+  judges the planning + control + behavior-tree layer against ground truth, not
+  amcl. Criteria: arrival honesty, collision freedom, liveness (no timeout/stuck),
+  and no over-conservative failure. Goals are BFS-reachable free-space samples.
+
+topic_suffix: ""
+
+topics:
+  - name: /robofuzz/nav2_goal
+    msg_type: geometry_msgs/msg/PoseStamped
+    fields: [header.stamp, header.frame_id, pose.position.x, pose.position.y, pose.orientation.z, pose.orientation.w]
+    field_units: {pose.position.x: m, pose.position.y: m}
+    frequency_hz: 0.0
+    description: "The actual goal sent by the harness (latched TRANSIENT_LOCAL). Arrival is judged against this pose. Optional watch topic; published only during fuzzing."
+
+  - name: /robofuzz/nav2_result
+    msg_type: std_msgs/msg/Int32
+    fields: [data]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Terminal action status: 4 SUCCEEDED, 5 CANCELED, 6 ABORTED, -6 harness TIMEOUT sentinel. Optional watch topic."
+
+  - name: /sim_ground_truth_pose
+    msg_type: nav_msgs/msg/Odometry
+    fields: [header.stamp, header.frame_id, child_frame_id, pose.pose.position.x, pose.pose.position.y, pose.pose.orientation.z, pose.pose.orientation.w]
+    field_units: {pose.pose.position.x: m, pose.pose.position.y: m}
+    frequency_hz: 20.0
+    description: "Gazebo truth reference (best-effort QoS). The trajectory/arrival ground truth; localization is pinned to this via map->odom TF."
+
+  - name: /odom
+    msg_type: nav_msgs/msg/Odometry
+    fields: [header.stamp, header.frame_id, child_frame_id, pose.pose, twist.twist]
+    field_units: {}
+    frequency_hz: 30.0
+    description: "Wheel odometry (drifts); input to the ground-truth map->odom correction and to nav2."
+
+  - name: /bumper_contact
+    msg_type: ros_gz_interfaces/msg/Contacts
+    fields: [header.stamp, contacts]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Nonempty contacts mark a collision. Unlike slam, a collision is itself a nav2 bug (goal is free-space, localization is truth)."
+
+  - name: /scan
+    msg_type: sensor_msgs/msg/LaserScan
+    fields: [header.stamp, header.frame_id, ranges, range_min, range_max]
+    field_units: {ranges: m}
+    frequency_hz: 0.0
+    description: "Laser input to the costmap obstacle/voxel layers."
+
+  - name: /plan
+    msg_type: nav_msgs/msg/Path
+    fields: [header.stamp, poses]
+    field_units: {}
+    frequency_hz: 0.0
+    description: "Global path from NavfnPlanner. Used for path-reasonableness feedback only (no hard assertion)."
+
+  - name: /clock
+    msg_type: rosgraph_msgs/msg/Clock
+    fields: [clock]
+    field_units: {clock: s}
+    frequency_hz: 0.0
+    description: "Simulation clock; sim is CPU-bound and runs below real time, which lengthens navigation wall time."
+
+operating_modes:
+  - name: cold_start
+    description: "Sim and nav2 stack starting; no navigation result expected yet."
+    active_topics: [/clock]
+  - name: stack_active
+    description: "All nav2 lifecycle nodes ACTIVE and /navigate_to_pose action server ready; ground-truth map->odom TF continuous."
+    active_topics: [/odom, /sim_ground_truth_pose, /clock]
+  - name: navigating
+    description: "A goal is accepted and the controller is driving toward it."
+    active_topics: [/robofuzz/nav2_goal, /sim_ground_truth_pose, /odom, /scan, /plan]
+  - name: terminal
+    description: "Navigation reached a terminal status; result recorded for oracle judgment."
+    active_topics: [/robofuzz/nav2_result, /robofuzz/nav2_goal, /sim_ground_truth_pose]
+  - name: collision_contaminated
+    description: "Contact occurred during navigation; a nav2 avoidance failure."
+    active_topics: [/bumper_contact, /sim_ground_truth_pose]
+
+constraint_types:
+  - category: arrival_correctness
+    description: "SUCCEEDED result must agree with ground-truth arrival at the sent goal within goal_checker tolerance."
+    relevant_topics: [/robofuzz/nav2_goal, /robofuzz/nav2_result, /sim_ground_truth_pose]
+    param_patterns: [".*ARRIVAL.*", ".*goal_tolerance.*", ".*STATUS_SUCCEEDED.*"]
+  - category: collision_freedom
+    description: "No contact during commanded navigation; costmap inflation + MPPI + collision monitor should prevent it."
+    relevant_topics: [/bumper_contact, /sim_ground_truth_pose]
+    param_patterns: [".*inflation.*", ".*robot_radius.*", ".*collision.*", ".*contact.*"]
+  - category: liveness
+    description: "Reachable goal must not hang past the action-timeout budget nor leave the robot stuck with near-zero net displacement."
+    relevant_topics: [/robofuzz/nav2_result, /sim_ground_truth_pose]
+    param_patterns: [".*STUCK.*", ".*TIMEOUT.*", ".*server_timeout.*", ".*movement.*", ".*MIN_SAMPLES.*"]
+  - category: false_failure
+    description: "A BFS-reachable goal must not be reported ABORTED with real motion (over-conservative planner)."
+    relevant_topics: [/robofuzz/nav2_result, /sim_ground_truth_pose]
+    param_patterns: [".*STATUS_ABORTED.*", ".*tolerance.*", ".*allow_unknown.*"]
+
+safety_conditions:
+  - name: stack_active
+    description: "All nav2 lifecycle nodes are ACTIVE and /navigate_to_pose is ready."
+    check_expr: "nav2_lifecycle_all_active"
+    required_topics: [/robofuzz/nav2_result]
+  - name: map_odom_tf_continuous
+    description: "Ground-truth map->odom transform is present and continuous (localization is pinned to truth)."
+    check_expr: "map_to_odom_tf_available"
+    required_topics: [/sim_ground_truth_pose, /odom]
+  - name: goal_recorded
+    description: "The actual sent goal was recorded (latched) so arrival can be judged."
+    check_expr: "nav2_goal_sample_count >= 1"
+    required_topics: [/robofuzz/nav2_goal]
+  - name: enough_truth_samples
+    description: "Enough ground-truth pose samples for a trajectory verdict."
+    check_expr: "truth_sample_count >= param('NAV2_MIN_SAMPLES')"
+    required_topics: [/sim_ground_truth_pose]
+  - name: terminal_result
+    description: "A definite terminal action status was recorded (not a mid-run cancel by external party)."
+    check_expr: "nav2_result in (4, 5, 6, -6)"
+    required_topics: [/robofuzz/nav2_result]
+
+param_naming:
+  arrival_correctness:
+    - ".*ARRIVAL.*"
+    - ".*goal_tolerance.*"
+    - ".*STATUS_SUCCEEDED.*"
+  collision_freedom:
+    - ".*inflation.*"
+    - ".*robot_radius.*"
+    - ".*Contacts.*"
+  liveness:
+    - ".*STUCK.*"
+    - ".*TIMEOUT.*"
+    - ".*server_timeout.*"
+    - ".*MIN_SAMPLES.*"
+  false_failure:
+    - ".*STATUS_ABORTED.*"
+    - ".*allow_unknown.*"
+
+generation_rules:
+  - "Localization is pinned to simulator ground truth via a map->odom TF publisher; judge planning+control+behavior-tree correctness, NOT amcl localization. Do not treat amcl parameters (alpha*, z_*, pf_*, particles) as active oracle targets."
+  - "Arrival is judged by comparing the ground-truth final pose against the sent /robofuzz/nav2_goal, only when /robofuzz/nav2_result == 4 (SUCCEEDED). Tolerance derives from SimpleGoalChecker xy_goal_tolerance/yaw_goal_tolerance (0.25) times a calibrated safety factor (NAV2_ARRIVAL_XY_TOL/YAW_TOL = 0.35)."
+  - "A collision is itself a bug here (unlike slam where it excludes the round): the goal is free-space and localization is truth, so any /bumper_contact during commanded motion is a costmap/controller avoidance failure."
+  - "Liveness: a timeout (result -6) or near-zero net displacement without arrival (stuck) on a BFS-reachable goal is a bug. The sim is CPU-bound and slow, so timeout budgets are wall-time and must be calibrated, not taken from nav2 defaults."
+  - "False failure: ABORTED (result 6) with real motion on a BFS-reachable goal indicates over-conservatism. Guard against BFS-reachable != costmap-plannable: goals inside the inflation layer are legitimately abortable, so keep this assertion conservative."
+  - "Result codes are action_msgs/GoalStatus: SUCCEEDED=4, CANCELED=5, ABORTED=6; -6 is the RoboFuzz harness TIMEOUT sentinel, not a GoalStatus value."
+  - "The /robofuzz/nav2_goal, /robofuzz/nav2_result topics are watch_optional (published only during fuzzing); executable specs must note the watchlist already records them."
+  - "Derive numeric alarm thresholds from a version-locked clean calibration; nav2 goal_checker defines arrival semantics but not RoboFuzz alarm values."
